@@ -257,6 +257,7 @@ struct DictionarySearchView: View {
         let showExpressionTags: Bool = userConfig.showExpressionTags
         let harmonicFrequency: Bool = userConfig.harmonicFrequency
         let deduplicatePitchAccents: Bool = userConfig.deduplicatePitchAccents
+        let compactPitchAccents: Bool = userConfig.compactPitchAccents
         let audioEnableAutoplay: Bool = userConfig.audioEnableAutoplay
         let audioPlaybackMode: String = userConfig.audioPlaybackMode.rawValue
         let needsAudio: Bool = anki.needsAudio
@@ -273,6 +274,7 @@ struct DictionarySearchView: View {
             window.showExpressionTags = \(showExpressionTags);
             window.harmonicFrequency = \(harmonicFrequency);
             window.deduplicatePitchAccents = \(deduplicatePitchAccents);
+            window.compactPitchAccents = \(compactPitchAccents);
             window.audioSources = \(audioSources);
             window.audioEnableAutoplay = \(audioEnableAutoplay);
             window.audioPlaybackMode = "\(audioPlaybackMode)";
