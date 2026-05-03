@@ -242,6 +242,9 @@ struct DictionarySearchView: View {
         // enough to risk type-checker timeouts) live in one already-fast place.
         lookupEntries = results.map { PopupView.entryDict(from: $0) }
         
+        let collapsedDictionaries = userConfig.collapseMode == .custom
+        ? ((try? JSONEncoder().encode(DictionaryManager.shared.collapsedDictionaries))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]") : "[]"
         let audioSources = (try? JSONEncoder().encode(userConfig.enabledAudioSources))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         let customCSS = (try? JSONSerialization.data(withJSONObject: userConfig.customCSS, options: .fragmentsAllowed))
@@ -252,7 +255,8 @@ struct DictionarySearchView: View {
         // exactly the kind of expression that can trip "unable to type-check in reasonable time" and
         // cascade into spurious CHoshiDicts `String(...)` interop errors elsewhere in the file.
         let anki = AnkiManager.shared
-        let collapseDictionaries: Bool = userConfig.collapseDictionaries
+        let collapseMode: String = userConfig.collapseMode.rawValue
+        let expandFirstDictionary: Bool = userConfig.expandFirstDictionary
         let compactGlossaries: Bool = userConfig.compactGlossaries
         let showExpressionTags: Bool = userConfig.showExpressionTags
         let harmonicFrequency: Bool = userConfig.harmonicFrequency
@@ -269,7 +273,9 @@ struct DictionarySearchView: View {
         content = """
         <style>.overlay { padding-bottom: 90px; }</style>
         <script>
-            window.collapseDictionaries = \(collapseDictionaries);
+            window.collapseMode = "\(collapseMode)";
+            window.expandFirstDictionary = \(expandFirstDictionary);
+            window.collapsedDictionaries = \(collapsedDictionaries);
             window.compactGlossaries = \(compactGlossaries);
             window.showExpressionTags = \(showExpressionTags);
             window.harmonicFrequency = \(harmonicFrequency);

@@ -1189,11 +1189,16 @@ function createEntryHeader(entry, idx) {
     return header;
 }
 
+// Whether a dictionary's section starts open, from the Collapse Dictionaries settings.
+function dictionaryStartsOpen(dictName, isFirst) {
+    const collapsed = window.collapseMode === 'Collapse All'
+        || (window.collapseMode === 'Custom' && (window.collapsedDictionaries || []).includes(dictName));
+    return !collapsed || Boolean(window.expandFirstDictionary && isFirst);
+}
+
 function createGlossarySection(dictName, contents, isFirst, entryIdx) {
     const details = el('details', { className: 'glossary-group' });
-    if (!window.collapseDictionaries || isFirst) {
-        details.open = true;
-    }
+    details.open = dictionaryStartsOpen(dictName, isFirst);
     
     const summary = el('summary', { className: 'dict-label' });
     summary.appendChild(el('span', { className: 'dict-name', textContent: dictName }));

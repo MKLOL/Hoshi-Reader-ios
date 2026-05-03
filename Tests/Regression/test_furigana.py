@@ -18,6 +18,24 @@ class FuriganaTests(unittest.TestCase):
         script += "\n" + assertions
         subprocess.run(["node", "-e", script], check=True, timeout=10)
 
+    def test_dictionary_sections_open_by_the_collapse_settings(self):
+        self.run_script(r"""
+        const open = (mode, collapsed, expandFirst, name, first) => {
+            window.collapseMode = mode; window.collapsedDictionaries = collapsed; window.expandFirstDictionary = expandFirst;
+            return dictionaryStartsOpen(name, first);
+        };
+        assert.equal(open('Expand All', ['JMdict'], false, 'JMdict', false), true);
+        assert.equal(open('Collapse All', [], false, 'JMdict', true), false);
+        assert.equal(open('Collapse All', [], true, 'JMdict', true), true);
+        assert.equal(open('Collapse All', [], true, 'Jitendex', false), false);
+        assert.equal(open('Custom', ['Jitendex'], false, 'JMdict', false), true);
+        assert.equal(open('Custom', ['Jitendex'], false, 'Jitendex', false), false);
+        assert.equal(open('Custom', ['Jitendex'], true, 'Jitendex', true), true);
+        // A page that sets none of them, as the card preview once did, shows everything.
+        assert.equal(open(undefined, undefined, undefined, 'JMdict', false), true);
+        assert.equal(open('Custom', undefined, undefined, 'JMdict', false), true);
+        """, popup=True)
+
     def test_okurigana_is_not_repeated_above_the_word(self):
         self.run_script(r"""
         const cases = [

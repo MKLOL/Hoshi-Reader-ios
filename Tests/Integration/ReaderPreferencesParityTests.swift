@@ -121,6 +121,31 @@ nonisolated final class ReaderPreferencesParityTests: XCTestCase {
         XCTAssertGreaterThan(edited.editedAt, 11)
     }
 
+    /// "Auto-collapse Dictionaries" was one switch that left the first dictionary open. Its
+    /// choice carries over to Collapse Dictionaries, and a later explicit choice wins.
+    @MainActor func testTheEarlierAutoCollapseSwitchCarriesOverToCollapseModes() {
+        let defaults = UserDefaults.standard
+        let keys = ["collapseDictionaries", "collapseMode", "expandFirstDictionary"]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            ReaderPreferencesStore.shared.reset()
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        XCTAssertEqual(UserConfig().collapseMode, .expandAll)
+        XCTAssertFalse(UserConfig().expandFirstDictionary)
+        defaults.set(true, forKey: "collapseDictionaries")
+        let carried = UserConfig()
+        XCTAssertEqual(carried.collapseMode, .collapseAll)
+        XCTAssertTrue(carried.expandFirstDictionary)
+        carried.collapseMode = .custom
+        carried.expandFirstDictionary = false
+        XCTAssertEqual(UserConfig().collapseMode, .custom)
+        XCTAssertFalse(UserConfig().expandFirstDictionary)
+    }
+
     @MainActor func testEmptyInstallationPublishesNoDefaultsAndClocksHaveStableTieBreak() async {
         let store = PreferencesMemoryStore(), kv = PreferencesMemoryKV()
         let outcome = await HttpReaderPreferencesLane(store: store).run(transport: kv)

@@ -55,7 +55,9 @@ enum PopupCardGeometry {
 enum PopupCardSample {
     static let dictionaryHTML = """
     <script>
-    window.collapseDictionaries = false;
+    window.collapseMode = "Expand All";
+    window.expandFirstDictionary = false;
+    window.collapsedDictionaries = [];
     window.compactGlossaries = false;
     window.showExpressionTags = true;
     window.harmonicFrequency = false;
