@@ -150,6 +150,7 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         boolean("showReadingTime", \.readerShowReadingTime, false)
         boolean("avoidPageBreak", \.avoidPageBreak, false)
         boolean("justifyText", \.justifyText, false)
+        boolean("blurImages", \.blurImages, false)
         boolean("layoutAdvanced", \.layoutAdvanced, false)
         boolean("showTitle", \.readerShowTitle, true)
         boolean("showCharacters", \.readerShowCharacters, true)

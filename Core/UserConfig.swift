@@ -169,6 +169,10 @@ class UserConfig {
         didSet { UserDefaults.standard.set(justifyText, forKey: "justifyText"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
+    var blurImages: Bool {
+        didSet { UserDefaults.standard.set(blurImages, forKey: "blurImages"); ReaderPreferencesStore.shared.localDidChange(self) }
+    }
+    
     var layoutAdvanced: Bool {
         didSet { UserDefaults.standard.set(layoutAdvanced, forKey: "layoutAdvanced"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
@@ -418,6 +422,7 @@ class UserConfig {
         self.verticalPadding = defaults.object(forKey: "layoutVerticalPadding") as? Int ?? 0
         self.avoidPageBreak = defaults.object(forKey: "avoidPageBreak") as? Bool ?? false
         self.justifyText = defaults.object(forKey: "justifyText") as? Bool ?? false
+        self.blurImages = defaults.object(forKey: "blurImages") as? Bool ?? false
         self.layoutAdvanced = defaults.object(forKey: "layoutAdvanced") as? Bool ?? false
         self.lineHeight = defaults.object(forKey: "lineHeight") as? Double ?? 1.65
         self.characterSpacing = defaults.object(forKey: "characterSpacing") as? Double ?? 0
