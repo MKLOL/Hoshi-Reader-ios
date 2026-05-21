@@ -505,6 +505,10 @@ struct ReaderWebView: UIViewRepresentable {
                 lineHeight: parent.userConfig.layoutAdvanced ? parent.userConfig.lineHeight : nil,
                 characterSpacing: parent.userConfig.layoutAdvanced ? parent.userConfig.characterSpacing : nil
             )
+            let paragraphSpacingCss = ReaderTextStyle.paragraphSpacingCSS(
+                parent.userConfig.layoutAdvanced ? parent.userConfig.paragraphSpacing : nil,
+                verticalWriting: parent.userConfig.verticalWriting
+            )
             
             var gridCss = ""
             if !parent.userConfig.justifyText {
@@ -593,6 +597,7 @@ struct ReaderWebView: UIViewRepresentable {
             }
             \(HighlightColor.css)
             \(pageBreakCss)
+            \(paragraphSpacingCss)
             \(textColorCss)
             """
             

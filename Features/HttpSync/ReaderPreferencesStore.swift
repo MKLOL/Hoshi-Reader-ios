@@ -176,6 +176,7 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         integer("popupSwipeThreshold", \.popupSwipeThreshold, 40)
         decimal("lineHeight", \.lineHeight, 1.65)
         decimal("characterSpacing", \.characterSpacing, 0)
+        decimal("paragraphSpacing", \.paragraphSpacing, 0)
         for (name, key) in [("theme", \UserConfig.theme), ("uiTheme", \UserConfig.uiTheme)] {
             fields[name] = Field(defaultValue: .string("System"), read: { .string($0[keyPath: key].rawValue) },
                 write: { c, v in if case .string(let raw) = v, let theme = Themes(rawValue: raw) { c[keyPath: key] = theme } })

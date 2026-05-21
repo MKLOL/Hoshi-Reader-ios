@@ -341,6 +341,10 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 lineHeight: parent.userConfig.layoutAdvanced ? parent.userConfig.lineHeight : nil,
                 characterSpacing: parent.userConfig.layoutAdvanced ? parent.userConfig.characterSpacing : nil
             )
+            let paragraphSpacingCss = ReaderTextStyle.paragraphSpacingCSS(
+                parent.userConfig.layoutAdvanced ? parent.userConfig.paragraphSpacing : nil,
+                verticalWriting: parent.userConfig.verticalWriting
+            )
             
             let verticalPadding = Double(parent.userConfig.verticalPadding)
             let horizontalPadding = Double(parent.userConfig.horizontalPadding)
@@ -426,6 +430,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 background-color: var(--hoshi-sasayaki-background-color) !important;
             }
             \(HighlightColor.css)
+            \(paragraphSpacingCss)
             \(textColorCss)
             """
             

@@ -185,6 +185,10 @@ class UserConfig {
         didSet { UserDefaults.standard.set(characterSpacing, forKey: "characterSpacing"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
+    var paragraphSpacing: Double {
+        didSet { UserDefaults.standard.set(paragraphSpacing, forKey: "paragraphSpacing"); ReaderPreferencesStore.shared.localDidChange(self) }
+    }
+    
     var readerShowTitle: Bool {
         didSet { UserDefaults.standard.set(readerShowTitle, forKey: "readerShowTitle"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
@@ -426,6 +430,7 @@ class UserConfig {
         self.layoutAdvanced = defaults.object(forKey: "layoutAdvanced") as? Bool ?? false
         self.lineHeight = defaults.object(forKey: "lineHeight") as? Double ?? 1.65
         self.characterSpacing = defaults.object(forKey: "characterSpacing") as? Double ?? 0
+        self.paragraphSpacing = defaults.object(forKey: "paragraphSpacing") as? Double ?? 0
         
         self.readerShowTitle = defaults.object(forKey: "readerShowTitle") as? Bool ?? true
         self.readerShowCharacters = defaults.object(forKey: "readerShowCharacters") as? Bool ?? true

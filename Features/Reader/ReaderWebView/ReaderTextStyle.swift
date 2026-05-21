@@ -29,6 +29,14 @@ import Foundation
         return declarations
     }
 
+    /// The gap between paragraphs, along the direction the text block grows. `nil` leaves the
+    /// book's own margins; zero removes them, as on Android.
+    static func paragraphSpacingCSS(_ spacing: Double?, verticalWriting: Bool) -> String {
+        guard let spacing else { return "" }
+        let sides = verticalWriting ? ("right", "left") : ("top", "bottom")
+        return "p { margin-\(sides.0): \(spacing)em !important; margin-\(sides.1): \(spacing)em !important; }"
+    }
+
     /// A line's height comes from the paragraph's own line height, the em box of each inline
     /// box and replaced elements, never from an inline element's own line height. `glyphs` in
     /// place of `inline-box` gives almost the same lines: with a line height set, a line with
