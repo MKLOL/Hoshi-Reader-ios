@@ -158,7 +158,7 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
     }
 
     @MainActor private final class PagedReaderEvents {
-        var restores = 0, saved: [Double] = [], chapterTurns = 0
+        var restores = 0, saved: [Double] = [], chapterTurns = 0, pictures: [URL] = []
     }
 
     /// The real paged reader on one chapter file, in a visible window, with what it reports.
@@ -171,9 +171,10 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
         private let host: UIHostingController<AnyView>
         private let previous: UIWindow?
 
-        init(document: String, progress: Double) throws {
+        init(document: String, progress: Double, files: [String: Data] = [:]) throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("reader-page-\(UUID())", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            for (name, data) in files { try data.write(to: root.appendingPathComponent(name)) }
             let chapter = root.appendingPathComponent("chapter.xhtml")
             try document.write(to: chapter, atomically: true, encoding: .utf8)
             // Either writing mode will do; the host's own preference is left as it is.
@@ -188,7 +189,7 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
                 onSaveBookmark: { events.saved.append($0); bridge.updateProgress($0) },
                 onInternalLink: { _ in false }, onInternalJump: { _ in }, onTextSelected: { _ in nil },
                 onTapOutside: {}, onPageTurn: {}, onRestoreCompleted: { events.restores += 1 },
-                onHighlightCreated: { _, _ in })
+                onHighlightCreated: { _, _ in }, onImageTapped: { events.pictures.append($0) })
             let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
             previous = scene.windows.first(where: \.isKeyWindow)
             window = UIWindow(windowScene: scene)
@@ -300,7 +301,8 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
     }
 
     /// Blur Images hides an illustration until it is tapped, and that tap is not also a tap on
-    /// the page. Paragraph Spacing sets the gap between paragraphs along the way the text grows.
+    /// the page. The next tap opens the picture full screen. Paragraph Spacing sets the gap
+    /// between paragraphs along the way the text grows.
     @MainActor func testBlurredImagesClearOnTheirOwnTapAndParagraphsKeepTheChosenGap() async throws {
         let defaults = UserDefaults.standard
         let keys = ["blurImages", "layoutAdvanced", "paragraphSpacing"]
@@ -317,11 +319,13 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
         let picture = UIGraphicsImageRenderer(size: CGSize(width: 300, height: 300), format: format).image { context in
             UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 300, height: 300))
         }
-        let source = "data:image/png;base64," + (try XCTUnwrap(picture.pngData())).base64EncodedString()
+        let pictureData = try XCTUnwrap(picture.pngData())
+        let inlineSource = "data:image/png;base64," + pictureData.base64EncodedString()
         let small = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20), format: format).image { _ in }
         let gaiji = "data:image/png;base64," + (try XCTUnwrap(small.pngData())).base64EncodedString()
         let reader = try PagedReader(document: "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Chapter</title></head><body>"
-            + "<p id=\"first\">一つ目の段落です。<img id=\"gaiji\" src=\"\(gaiji)\"/></p><p id=\"second\">二つ目の段落です。</p><p><img id=\"picture\" src=\"\(source)\"/></p></body></html>", progress: 0)
+            + "<p id=\"first\">一つ目の段落です。<img id=\"gaiji\" src=\"\(gaiji)\"/></p><p id=\"second\">二つ目の段落です。</p><p><img id=\"picture\" src=\"picture.png\"/></p><p><img id=\"inline\" src=\"\(inlineSource)\"/></p></body></html>",
+            progress: 0, files: ["picture.png": pictureData])
         defer { reader.close() }
         let events = reader.events
         try await reader.settle("the chapter to be shown") { events.restores == 1 }
@@ -340,6 +344,11 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
                      return document.getElementById('picture').classList.contains('blurred') + ' ' + reached; })()
             """)
         XCTAssertEqual(tapped, "false false")
+        XCTAssertTrue(events.pictures.isEmpty, "the tap that uncovers a picture does not also open it")
+        _ = try await value("(document.getElementById('picture').click(), document.getElementById('inline').click(), document.getElementById('inline').click(), 0)")
+        try await reader.settle("the picture to be opened") { !events.pictures.isEmpty }
+        XCTAssertEqual(events.pictures.map(\.lastPathComponent), ["picture.png"], "a picture drawn from inline data has no file to open")
+        XCTAssertTrue(try XCTUnwrap(events.pictures.first).isFileURL)
         let gap = try await value("""
             (() => { const style = getComputedStyle(document.getElementById('second'));
                      const sides = \(reader.vertical) ? [style.marginRight, style.marginLeft] : [style.marginTop, style.marginBottom];

@@ -174,6 +174,8 @@ struct ReaderWebView: UIViewRepresentable {
     var onHighlightCreated: (HighlightColor, HighlightData) -> Void
     /// A pre-translated sentence's button was pressed; the payload is its `c{spine}s{start}` id.
     var onSentenceTranslate: (String) -> Void = { _ in }
+    /// A picture in the chapter was tapped; the payload is its file.
+    var onImageTapped: (URL) -> Void = { _ in }
     let maxSelectionLength: Int = 16
     
     func makeCoordinator() -> Coordinator {
@@ -187,6 +189,7 @@ struct ReaderWebView: UIViewRepresentable {
         config.userContentController.add(context.coordinator, name: "restoreCompleted")
         config.userContentController.add(context.coordinator, name: "selectionState")
         config.userContentController.add(context.coordinator, name: "sentenceTranslate")
+        config.userContentController.add(context.coordinator, name: "imageTapped")
         config.defaultWebpagePreferences.preferredContentMode = .mobile
 
         let webView = HoshiWKWebView(frame: .zero, configuration: config)
@@ -308,6 +311,7 @@ struct ReaderWebView: UIViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "restoreCompleted")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "selectionState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "sentenceTranslate")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "imageTapped")
     }
     
     class Coordinator: NSObject, WKNavigationDelegate, UIGestureRecognizerDelegate, WKScriptMessageHandler {
@@ -343,6 +347,13 @@ struct ReaderWebView: UIViewRepresentable {
                 }
                 return
             }
+            if message.name == "imageTapped" {
+                // Only a picture stored in the book can be opened; one drawn from inline data has no file.
+                if let src = message.body as? String, let url = URL(string: src), url.isFileURL {
+                    parent.onImageTapped(url)
+                }
+                return
+            }
             if message.name == "restoreCompleted" {
                 if shouldSyncProgressAfterRestore {
                     shouldSyncProgressAfterRestore = false
@@ -353,7 +364,7 @@ struct ReaderWebView: UIViewRepresentable {
                 }
                 parent.onRestoreCompleted()
             }
-            else if message.name == "textSelected" {
+            if message.name == "textSelected" {
                 guard let body = message.body as? [String: Any],
                       let text = body["text"] as? String,
                       let sentence = body["sentence"] as? String,
@@ -569,6 +580,12 @@ struct ReaderWebView: UIViewRepresentable {
                 break-inside: avoid !important;
                 -webkit-column-break-inside: avoid !important;
             }
+            .blur-wrapper {
+                display: table;
+                margin: auto;
+                line-height: 0;
+                overflow: hidden;
+            }
             img.block-img.blurred,
             svg.blurred {
                 filter: blur(24px) !important;
@@ -714,47 +731,53 @@ struct ReaderWebView: UIViewRepresentable {
                     });
                 });
                 
-                function blurImage(element) {
-                    element.classList.add('blurred');
-                    element.addEventListener('click', event => {
+                function setupImage(element, src, wrap) {
+                    var target = element;
+                    if (\(parent.userConfig.blurImages)) {
+                        element.classList.add('blurred');
+                        if (wrap) {
+                            target = document.createElement('div');
+                            target.className = 'blur-wrapper';
+                            element.before(target);
+                            target.append(element);
+                        }
+                    }
+                    target.onclick = event => {
                         event.preventDefault();
                         event.stopPropagation();
-                        element.classList.remove('blurred');
-                    }, { once: true });
+                        if (element.classList.contains('blurred')) {
+                            element.classList.remove('blurred');
+                            return;
+                        }
+                        webkit.messageHandlers.imageTapped.postMessage(new URL(src, document.baseURI).href);
+                    };
                 }
                 
-                if (\(parent.userConfig.blurImages)) {
-                    document.querySelectorAll('svg').forEach(svg => {
-                        if (svg.querySelector('image')) {
-                            blurImage(svg);
-                        }
-                    });
-                }
+                document.querySelectorAll('svg').forEach(svg => {
+                    var svgImage = svg.querySelector('image');
+                    if (!svgImage) {
+                        return;
+                    }
+                    setupImage(svg, svgImage.href.baseVal, false);
+                });
                 
                 // apply style to big images only, some epubs have inline pictures as "text"
                 var images = document.querySelectorAll('img');
                 var imagePromises = Array.from(images).map(img => {
                     return new Promise(resolve => {
-                        const isGaiji = img.classList.contains('gaiji') || img.classList.contains('gaiji-line');
-                        // complete covers a failed load too: its error event fired before this ran.
-                        if (img.complete) {
+                        function processImg() {
+                            var isGaiji = img.classList.contains('gaiji') || img.classList.contains('gaiji-line');
                             if (!isGaiji && (img.naturalWidth > 256 || img.naturalHeight > 256)) {
                                 img.classList.add('block-img');
-                                if (\(parent.userConfig.blurImages)) {
-                                    blurImage(img);
-                                }
+                                setupImage(img, img.src, true);
                             }
                             resolve();
+                        }
+                        // complete covers a failed load too: its error event fired before this ran.
+                        if (img.complete) {
+                            processImg();
                         } else {
-                            img.onload = () => {
-                                if (!isGaiji && (img.naturalWidth > 256 || img.naturalHeight > 256)) {
-                                    img.classList.add('block-img');
-                                    if (\(parent.userConfig.blurImages)) {
-                                        blurImage(img);
-                                    }
-                                }
-                                resolve();
-                            };
+                            img.onload = processImg;
                             img.onerror = () => resolve();
                             // A remote image that stalls must not keep the page from opening.
                             setTimeout(resolve, 10000);

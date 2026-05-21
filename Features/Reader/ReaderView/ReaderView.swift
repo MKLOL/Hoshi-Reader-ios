@@ -102,6 +102,7 @@ struct ReaderView: View {
     @State private var topBarTotalWidth: CGFloat = 0
     @State private var titleNaturalWidth: CGFloat = 0
     
+    @State private var imageURL: URL?
     private let webViewPadding: CGFloat = 4
     private let lineHeight: CGFloat = 16
     
@@ -276,7 +277,8 @@ struct ReaderView: View {
                                 viewModel.closePopups()
                                 guard let cached = viewModel.sentenceTranslation(id: id) else { return }
                                 aiController.ask(bubbleText: cached.sentenceText, sentenceId: id, book: viewModel.book)
-                            }
+                            },
+                            onImageTapped: { imageURL = $0 }
                         )
                         .id(WebViewState(
                             verticalWriting: userConfig.verticalWriting,
@@ -330,7 +332,8 @@ struct ReaderView: View {
                                 viewModel.closePopups()
                                 guard let cached = viewModel.sentenceTranslation(id: id) else { return }
                                 aiController.ask(bubbleText: cached.sentenceText, sentenceId: id, book: viewModel.book)
-                            }
+                            },
+                            onImageTapped: { imageURL = $0 }
                         )
                         .id(WebViewState(
                             verticalWriting: userConfig.verticalWriting,
@@ -627,6 +630,14 @@ struct ReaderView: View {
                         .controlSize(.regular)
                         .tint(.secondary)
                 }
+            }
+        }
+        .overlay {
+            if let url = imageURL {
+                FullscreenImageView(url: url, backgroundColor: readerBackgroundColor) {
+                    imageURL = nil
+                }
+                .ignoresSafeArea()
             }
         }
         .overlay {
