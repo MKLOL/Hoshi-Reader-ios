@@ -1,0 +1,23 @@
+name: Feature Request
+description: Request a new feature or changes
+title: '[Feature Request]: '
+body:
+  - type: textarea
+    attributes:
+      label: Description
+      description: >-
+        e.g. current problems, use cases, ...
+  - type: checkboxes
+    attributes:
+      label: Acknowledgements
+      description: Issues disregarding this section will be closed.
+      options:
+        - label: >-
+            I have searched the existing issues and this is NOT a duplicate of
+            an already open or closed issue.
+          required: true
+        - label: >-
+            This change is NOT Android-specific. Android-specific changes should
+            be requested in the Android repository; iOS-specific changes belong
+            here.
+          required: true

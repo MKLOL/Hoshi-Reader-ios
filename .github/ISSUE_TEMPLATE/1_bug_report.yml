@@ -1,0 +1,42 @@
+name: Bug report
+description: Report a bug you have experienced
+title: '[Bug]: '
+body:
+  - type: textarea
+    attributes:
+      label: Description
+      description: >-
+        Describe the issue and how to reproduce it, if you can. Attach
+        screenshots if helpful.
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Are you using the App Store or TestFlight version?
+      description: Make sure you have updated to the latest version.
+      options:
+        - label: App Store
+          required: false
+        - label: TestFlight
+          required: false
+  - type: input
+    attributes:
+      label: Device
+      placeholder: e.g. iPhone 15 Pro
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: iOS version
+      placeholder: e.g. iOS 26.5
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: I am aware that I am reporting a bug for the iOS app.
+      description: >-
+        Issues regarding the Android version should be opened on the respective
+        repository unless instructed otherwise.
+      options:
+        - label: 'Yes'
+          required: true
