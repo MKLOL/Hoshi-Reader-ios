@@ -172,6 +172,19 @@ class BookshelfViewModel {
     
     func deleteBook(_ book: BookMetadata) {
         do {
+            // Stage a tombstone BEFORE removing the directory so the next HTTP sync pushes
+            // `deletedAt` to the server (propagating the delete to other devices) and skips
+            // re-importing this book before that push runs. Mirrors Android's
+            // BookshelfRepository.recordHttpSyncTombstone. Only books with a derivable syncId
+            // participate in sync, so skip the record when the title yields no syncId.
+            if let title = book.title, let syncId = deriveSyncId(title) {
+                HttpSyncDeletedBookStore.record(
+                    syncId: syncId,
+                    title: title,
+                    contentType: book.resolvedContentType,
+                    deletedAt: rfc3339Now()
+                )
+            }
             if let folder = book.folder {
                 let bookURL = try BookStorage.getBooksDirectory().appendingPathComponent(folder)
                 try BookStorage.delete(at: bookURL)

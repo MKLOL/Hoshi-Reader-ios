@@ -211,6 +211,12 @@ struct HttpSyncReconciler {
             rootsBySyncId[book.syncId] = book.root
             importedAtBySyncId[book.syncId] = book.importedAt
         }
+        // SyncIds the user deleted locally but whose tombstone hasn't been pushed yet. Pass 3 must
+        // NOT re-import these from the server's not-yet-tombstoned payload manifests — otherwise the
+        // book resurrects, the outbound push then sees a live local book, prunes the tombstone, and
+        // overwrites the server with `deletedAt = null`. The outbound pass in this same syncOnce
+        // turns the remote metadata into a tombstone instead. Mirrors Android's pendingTombstoneSyncIds.
+        let pendingTombstoneSyncIds = Set(HttpSyncDeletedBookStore.all().keys)
 
         // Pass 1: page through the entire listing and bucket keys by kind. We always do a full
         // list (since=nil) on a manual sync — see the Android rationale: an incremental `since`
@@ -278,6 +284,7 @@ struct HttpSyncReconciler {
             guard let parsed = parseBookKey(meta.key) else { continue }
             if deletedSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
             if rootsBySyncId[parsed.syncId] != nil { markHandled(meta); continue }
+            if pendingTombstoneSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
             do {
                 if let imported = try await importRemoteOnlyBook(syncId: parsed.syncId) {
                     rootsBySyncId[parsed.syncId] = imported
@@ -530,6 +537,42 @@ struct HttpSyncReconciler {
         let localBooks = loadLocalBooks()
         let snapshot = ShelfSnapshot.load()
         var shelfState = HttpSyncShelfStateStore.load()
+
+        // Pass 0: push pending deleted-book tombstones. For each staged delete, PUT a metadata
+        // blob with `deletedAt` set so the deletion propagates to other devices; clear the record
+        // only after a successful PUT (so a transient failure retries next sync). A tombstone whose
+        // syncId now matches a live local book (delete-then-re-import before sync) is pruned without
+        // a push so the live book's normal metadata push wins. Mirrors Android's tombstone loop.
+        let pendingDeleted = HttpSyncDeletedBookStore.all()
+        if !pendingDeleted.isEmpty {
+            let liveLocalSyncIds = Set(localBooks.map { $0.syncId })
+            for syncId in pendingDeleted.keys where liveLocalSyncIds.contains(syncId) {
+                HttpSyncDeletedBookStore.remove(syncId: syncId)
+                shelfState.removeValue(forKey: syncId)
+            }
+            for (syncId, record) in pendingDeleted where !liveLocalSyncIds.contains(syncId) {
+                let blob = HttpSyncMetadataBlob(
+                    title: record.title,
+                    contentType: record.contentType,
+                    importedAt: nil,
+                    deletedAt: record.deletedAt
+                )
+                do {
+                    _ = try await transport.put(
+                        key: SyncKeys.metadata(syncId),
+                        contentType: Self.jsonContentType,
+                        body: try jsonEncoder.encode(blob)
+                    )
+                    result.uploadedMetadata += 1
+                    // Only clear after the PUT succeeds — atomic remove re-reads disk so a delete
+                    // staged for a different syncId mid-sync survives.
+                    HttpSyncDeletedBookStore.remove(syncId: syncId)
+                    shelfState.removeValue(forKey: syncId)
+                } catch {
+                    result.errors.append("\(record.title): \(errorText(error))")
+                }
+            }
+        }
 
         for book in localBooks {
             do {
@@ -844,5 +887,61 @@ enum HttpSyncShelfStateStore {
         guard let url = fileURL() else { return }
         guard let data = try? JSONEncoder().encode(state) else { return }
         try? data.write(to: url, options: .atomic)
+    }
+}
+
+// MARK: - Deleted-book tombstone sidecar (pending local deletes to push)
+
+/// One locally-staged book deletion, persisted in a JSON sidecar in the Books directory until the
+/// next outbound sync turns it into a remote `metadata` tombstone. Mirrors Android's
+/// `HttpSyncDeletedBookRecord`: keeps just enough to re-publish the metadata blob with `deletedAt`.
+nonisolated struct HttpSyncDeletedBookRecord: Codable, Equatable {
+    var title: String
+    var contentType: ContentType
+    var deletedAt: String
+}
+
+/// Per-syncId pending book deletions. When the user deletes a book locally we stage a record here
+/// so the next `pushAllLocal` PUTs `books/{syncId}/metadata` with `deletedAt` set (propagating the
+/// delete to other devices) and so `pullChangedKeys` Pass 3 skips re-importing it before the push
+/// runs. Mirrors Android's `HttpSyncDeletedBookStateStore` + `.http_sync_deleted_books.json`.
+///
+/// The atomic `record`/`remove` helpers re-read disk before writing so a delete staged mid-sync
+/// (e.g. while `pushAllLocal` is clearing other records) is not clobbered — the iOS analogue of
+/// Android's locked `recordDeletedBook` / `removeDeletedBook` (Bug 3 fix).
+enum HttpSyncDeletedBookStore {
+    private static let filename = ".http_sync_deleted_books.json"
+
+    private static func fileURL() -> URL? {
+        (try? BookStorage.getBooksDirectory())?.appendingPathComponent(filename)
+    }
+
+    static func load() -> [String: HttpSyncDeletedBookRecord] {
+        guard let url = fileURL() else { return [:] }
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: HttpSyncDeletedBookRecord].self, from: data)) ?? [:]
+    }
+
+    static func save(_ state: [String: HttpSyncDeletedBookRecord]) {
+        guard let url = fileURL() else { return }
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// All staged tombstones (convenience for iterating in the push pass).
+    static func all() -> [String: HttpSyncDeletedBookRecord] { load() }
+
+    /// Atomically add (or replace) the tombstone for `syncId`, re-reading disk first.
+    static func record(syncId: String, title: String, contentType: ContentType, deletedAt: String) {
+        var state = load()
+        state[syncId] = HttpSyncDeletedBookRecord(title: title, contentType: contentType, deletedAt: deletedAt)
+        save(state)
+    }
+
+    /// Atomically remove the tombstone for `syncId` (no-op if absent), re-reading disk first.
+    static func remove(syncId: String) {
+        var state = load()
+        guard state.removeValue(forKey: syncId) != nil else { return }
+        save(state)
     }
 }
