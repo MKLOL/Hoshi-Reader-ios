@@ -125,6 +125,11 @@ struct MangaReaderView: View {
             withAnimation(.easeInOut(duration: 0.12)) { pageOpacity = 0 }
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
         }
+        .onChange(of: userConfig.enableStatistics) { _, enabled in
+            // Apply the stats toggle live (e.g. the sheet's "Enable" button) instead of only on
+            // the next reader open.
+            model.updateStatisticsEnabled(enabled, title: model.title ?? "")
+        }
         .onDisappear {
             model.flushPendingBookmark()
             model.persistStatistics()

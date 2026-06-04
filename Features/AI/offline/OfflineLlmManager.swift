@@ -17,6 +17,7 @@
 
 import Foundation
 import LLM
+import UIKit
 
 /// Thrown when an on-device model can't be used; `message` is safe to show the user.
 struct OfflineLlmError: LocalizedError {
@@ -39,8 +40,9 @@ final class OfflineLlmManager {
 
     private(set) var status: Status = .idle
 
-    /// Live tok/s of the in-flight generation, or `nil` when idle. Updated from a poller while the
-    /// generation runs (LLM.swift's `getCompletion` doesn't expose per-token callbacks here).
+    /// Tok/s of the most recent generation, or `nil` while idle/generating. `getCompletion` returns
+    /// the whole reply at once (no per-token callbacks), so this is computed once on completion in
+    /// `translate(...)` rather than streamed live.
     private(set) var tokensPerSecond: Double?
 
     /// The id of the currently-resident model, or `nil` if none is loaded.
@@ -63,10 +65,33 @@ final class OfflineLlmManager {
     private var gateBusy = false
     private var gateWaiters: [CheckedContinuation<Void, Never>] = []
 
+    /// Keeps the memory-warning observer alive for the lifetime of this (singleton) manager.
+    private var memoryWarningObserver: NSObjectProtocol?
+
     init(downloads: ModelDownloadManager = .shared,
          settings: OfflineTranslationSettingsStore = .shared) {
         self.downloads = downloads
         self.settings = settings
+        observeMemoryPressure()
+    }
+
+    // MARK: - Memory pressure
+
+    /// Frees the resident model under system memory pressure so a loaded multi-GB GGUF doesn't get
+    /// the app jetsammed. Skipped while a load/generation holds the gate so we don't yank the model
+    /// out from under an in-flight translate.
+    private func observeMemoryPressure() {
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // The notification is delivered on the main queue, matching this main-actor type.
+            MainActor.assumeIsolated {
+                guard let self, !self.gateBusy else { return }
+                self.unload()
+            }
+        }
     }
 
     // MARK: - Serialization gate
@@ -113,7 +138,19 @@ final class OfflineLlmManager {
             )
         }
 
-        // Free the outgoing model before loading the new one (one resident at a time).
+        // Free the outgoing model before loading the new one (one resident at a time). Dropping the
+        // `LLM` reference doesn't synchronously free its llama context (the heavy state lives in the
+        // `LLMCore` actor, whose deinit runs asynchronously), so a swap (e.g. 3 GB → 9 GB) could
+        // momentarily need both resident. Stop any work on the outgoing model, drop our reference,
+        // then hop the runloop / yield so its teardown can run before the new heavy load begins.
+        // Best-effort: this avoids the double-resident peak in the common case.
+        if let outgoing = loaded {
+            outgoing.stop()
+            loaded = nil
+            loadedModelId = nil
+            // Let the dropped instance's actor deinit / llama free run before allocating the next.
+            await Task.yield()
+        }
         loaded = nil
         loadedModelId = nil
         status = .loading(modelId: modelId)
@@ -185,18 +222,33 @@ final class OfflineLlmManager {
             tokensPerSecond = nil
         }
 
+        // Reset the model's KV cache / context before each generation so every translate is a fresh
+        // one-shot (matches Android's `nativeTranslate`). `getCompletion` never resets, so without
+        // this the resident model accumulates context across calls — bubbles bleed together and,
+        // once the context window fills, replies come back empty.
+        llm.reset()
+
         // getCompletion() skips the template's preprocess; apply it ourselves so an instruct/
         // chat GGUF sees its expected chat framing instead of a bare prompt.
         let processed = llm.preprocess(userContent, llm.history, .none)
 
         // Generate off the main actor (it's CPU-heavy). `llm` isn't `Sendable`, but the gate
         // guarantees exclusive access for the duration of this call, so it's safe to box across.
+        // Wrap in a cancellation handler: `MangaAiController.cancel()` cancels the owning task, but
+        // the detached generation can't see that — so on cancel we call `stop()` (LLM.swift sets
+        // the core's `shouldContinuePredicting = false`) to wind generation down promptly and free
+        // the gate (released by the `defer` above) for later translates/swaps.
         let start = Date()
         let boxed = UncheckedBox(llm)
-        let raw = await Task.detached(priority: .userInitiated) {
-            await boxed.value.getCompletion(from: processed)
-        }.value
+        let raw = await withTaskCancellationHandler {
+            await Task.detached(priority: .userInitiated) {
+                await boxed.value.getCompletion(from: processed)
+            }.value
+        } onCancel: {
+            boxed.value.stop()
+        }
         let elapsed = Date().timeIntervalSince(start)
+        try Task.checkCancellation()
 
         let text = cleanup(raw, template: model.templateKind)
         let approxTokens = max(1, text.split(whereSeparator: { $0 == " " || $0 == "\n" }).count)

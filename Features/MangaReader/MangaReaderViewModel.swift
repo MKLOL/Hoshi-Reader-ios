@@ -92,6 +92,32 @@ final class MangaReaderViewModel {
         statistics = tracker
     }
 
+    /// Re-syncs the tracker with `userConfig.enableStatistics` when it changes while the reader is
+    /// open. The tracker captures `enabled` at construction, so flipping the toggle from the stats
+    /// sheet (or Settings) would otherwise do nothing until the book is reopened. Re-inits with a
+    /// fresh `enabled` and starts tracking immediately when turned on; persists/drops the in-memory
+    /// tracker when turned off.
+    func updateStatisticsEnabled(_ enabled: Bool, title: String) {
+        // Already in the requested state — nothing to do.
+        if let tracker = statistics, tracker.enabled == enabled { return }
+        guard let bookRoot else { return }
+
+        if enabled {
+            let initial = BookStorage.loadMangaStatistics(root: bookRoot) ?? []
+            var tracker = MangaStatisticsTracker(
+                title: title,
+                initialStatistics: initial,
+                enabled: true
+            )
+            tracker.start(currentPage: pageIndex + 1)
+            statistics = tracker
+        } else {
+            // Flush whatever was accumulated before tearing the tracker down.
+            persistStatistics()
+            statistics = nil
+        }
+    }
+
     func toggleStatisticsTracking() {
         guard var tracker = statistics, tracker.enabled else { return }
         if tracker.isTracking {

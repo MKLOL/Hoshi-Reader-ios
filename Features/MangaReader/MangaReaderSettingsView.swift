@@ -26,7 +26,7 @@ struct MangaReaderSettingsView: View {
             }
 
             Section {
-                Toggle("Use Noto Sans JP Font", isOn: $userConfig.mangaUseNotoSansJpFont)
+                Toggle("Use Japanese sans-serif font", isOn: $userConfig.mangaUseNotoSansJpFont)
             } footer: {
                 Text("Render OCR text with a Japanese sans-serif font.")
             }
