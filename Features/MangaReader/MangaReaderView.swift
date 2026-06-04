@@ -174,7 +174,10 @@ struct MangaReaderView: View {
         .onChange(of: eInkMode) { _, _ in
             model.renderCurrentPage(controller: controller, eInkMode: eInkMode, screenSize: lastSize, userConfig: userConfig)
         }
-        .onDisappear { model.flushPendingBookmark() }
+        .onDisappear {
+            model.flushPendingBookmark()
+            aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
+        }
     }
 
     @State private var lastSize: CGSize = .zero

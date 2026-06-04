@@ -138,9 +138,9 @@ final class MangaReaderViewModel {
         guard let book, let bookRoot, let page = book.pages.first(where: { $0.index == index }) else { return nil }
         let relative = page.imagePath.trimmingPrefixSlash()
         guard !relative.isEmpty else { return nil }
-        let candidate = bookRoot.appendingPathComponent(relative).standardizedFileURL
-        // Containment guard mirrors the scheme handler.
-        let rootPath = bookRoot.standardizedFileURL.path
+        let candidate = bookRoot.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
+        // Containment guard mirrors the scheme handler (incl. symlink canonicalization).
+        let rootPath = bookRoot.standardizedFileURL.resolvingSymlinksInPath().path
         guard candidate.path.hasPrefix(rootPath + "/"),
               FileManager.default.fileExists(atPath: candidate.path) else {
             return nil

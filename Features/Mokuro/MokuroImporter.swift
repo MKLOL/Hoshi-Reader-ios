@@ -162,18 +162,27 @@ struct MokuroImporter {
             rewrittenPages[idx]["img_path"] = "\(imagesDir)/\(basename)"
         }
 
-        // Determine the target directory; dedupe against an existing import.
+        // Determine the target directory. Dedupe a true re-import of the SAME volume (same title
+        // + page count) by returning the existing book; otherwise uniquify the directory name so a
+        // different volume that sanitizes to the same name never clears/overwrites an existing
+        // book's images/bookmark/statistics (mirrors Android's createMokuroBookDirectory).
         let booksDir = try BookStorage.getBooksDirectory()
         let safeTitle = sanitizeFileName(title)
-        let targetRoot = booksDir.appendingPathComponent(safeTitle)
-
-        if fileManager.fileExists(atPath: targetRoot.path(percentEncoded: false)) {
-            if let existing = BookStorage.loadMetadata(root: targetRoot) {
-                return existing
-            }
-            // Directory exists but no usable metadata — clear it and re-import.
-            try? fileManager.removeItem(at: targetRoot)
+        let primaryRoot = booksDir.appendingPathComponent(safeTitle)
+        if fileManager.fileExists(atPath: primaryRoot.path(percentEncoded: false)),
+           let existing = BookStorage.loadMetadata(root: primaryRoot),
+           existing.title == title,
+           BookStorage.loadBookInfo(root: primaryRoot)?.characterCount == plannedBasenames.count {
+            return existing
         }
+
+        var folderName = safeTitle
+        var suffix = 1
+        while fileManager.fileExists(atPath: booksDir.appendingPathComponent(folderName).path(percentEncoded: false)) {
+            folderName = "\(safeTitle)-\(suffix)"
+            suffix += 1
+        }
+        let targetRoot = booksDir.appendingPathComponent(folderName)
 
         do {
             // Copy images into images/.
@@ -197,7 +206,7 @@ struct MokuroImporter {
             try rewrittenData.write(to: mokuroDest, options: .atomic)
 
             // Generate the cover from the first page image.
-            let coverRelative = "Books/\(safeTitle)/cover.jpg"
+            let coverRelative = "Books/\(folderName)/cover.jpg"
             var coverPath: String?
             if let firstBasename = plannedBasenames.first {
                 let firstImage = imagesTarget.appendingPathComponent(firstBasename)
@@ -215,7 +224,7 @@ struct MokuroImporter {
             let metadata = BookMetadata(
                 title: title,
                 cover: coverPath,
-                folder: safeTitle,
+                folder: folderName,
                 lastAccess: Date(),
                 contentType: .mokuro,
                 importedAt: rfc3339Now()

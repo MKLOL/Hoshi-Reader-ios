@@ -155,7 +155,8 @@ class BookshelfViewModel {
                 }
             } else {
                 bookProgress[book.id] = 0.0
-                bookPageLabel[book.id] = book.resolvedContentType == .mokuro ? "p. 1 / \(bookInfo?.characterCount ?? 0)" : nil
+                let pages = bookInfo?.characterCount ?? 0
+                bookPageLabel[book.id] = (book.resolvedContentType == .mokuro && pages > 0) ? "p. 1 / \(pages)" : nil
             }
         }
     }
@@ -261,12 +262,10 @@ class BookshelfViewModel {
 
                 var failed: [String] = []
                 for (index, url) in urls.enumerated() {
-                    autoreleasepool {
-                        do {
-                            try importMangaBundle(from: url)
-                        } catch {
-                            failed.append(url.lastPathComponent)
-                        }
+                    do {
+                        try importMangaBundle(from: url)
+                    } catch {
+                        failed.append(url.lastPathComponent)
                     }
                     let next = index + 1
                     if next < urls.count {
@@ -286,12 +285,7 @@ class BookshelfViewModel {
     }
 
     private func importMangaBundle(from url: URL) throws {
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer {
-            if accessing {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
+        // MokuroImporter owns the security-scoped access (single owner; no double start/stop).
         _ = try MokuroImporter.importBundle(from: url)
     }
 
@@ -474,7 +468,9 @@ class BookshelfViewModel {
                 title: document.title,
                 cover: coverURL,
                 folder: bookFolder.lastPathComponent,
-                lastAccess: Date()
+                lastAccess: Date(),
+                contentType: .epub,
+                importedAt: rfc3339Now()
             )
             
             let bookinfo = BookProcessor.process(document: document)

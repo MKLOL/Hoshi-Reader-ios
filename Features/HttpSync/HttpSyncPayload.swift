@@ -85,7 +85,7 @@ nonisolated struct HttpSyncPayloadCodec {
             try Self.zipBookDirectory(bookRoot: bookRoot, to: zipURL)
         }.value
         let attrs = try? fileManager.attributesOfItem(atPath: zipURL.path(percentEncoded: false))
-        let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         Self.writeCachedSha(bookRoot: bookRoot, sha: sha)
 
         // PUT zip first so the manifest never points at a missing or stale blob.

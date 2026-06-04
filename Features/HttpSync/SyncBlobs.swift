@@ -165,7 +165,7 @@ nonisolated struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
 /// Manifest describing a book's payload.zip.
 nonisolated struct HttpSyncPayloadManifest: Codable, Equatable {
     let sha256: String
-    let sizeBytes: Int
+    let sizeBytes: Int64
     let originalName: String
     let format: ContentType
 }

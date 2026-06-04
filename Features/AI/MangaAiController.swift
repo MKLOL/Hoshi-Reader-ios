@@ -51,6 +51,9 @@ final class MangaAiController {
     private let client: OpenAiChatClient
     private let history: AiChatHistoryStore
     private var task: Task<Void, Never>?
+    /// Replays the last request for the popup's Retry button (the original bubble text or image
+    /// crop is captured here; `State.error` carries no payload to reconstruct it from).
+    private var lastRequest: (() -> Void)?
 
     init(settings: AiChatSettingsStore = .shared,
          client: OpenAiChatClient = OpenAiChatClient(),
@@ -67,6 +70,7 @@ final class MangaAiController {
     func ask(bubbleText: String, book: BookMetadata) {
         let trimmed = bubbleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        lastRequest = { [weak self] in self?.ask(bubbleText: trimmed, book: book) }
         let apiKey = settings.apiKey
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             state = .error("Set your OpenAI API key in Settings → ChatGPT.")
@@ -107,6 +111,7 @@ final class MangaAiController {
     /// Translates an image crop (rendered manga panel) via the vision endpoint, persists the
     /// exchange with the screenshot attached, and updates `state`.
     func translateCrop(image: AiChatImage, book: BookMetadata) {
+        lastRequest = { [weak self] in self?.translateCrop(image: image, book: book) }
         let apiKey = settings.apiKey
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             state = .error("Set your OpenAI API key in Settings → ChatGPT.")
@@ -140,6 +145,11 @@ final class MangaAiController {
                 self.state = .error(Self.message(for: error))
             }
         }
+    }
+
+    /// Re-runs the most recent request (the popup's Retry button). No-op if there's nothing to retry.
+    func retry() {
+        lastRequest?()
     }
 
     /// Cancels any in-flight request without dismissing the popup.

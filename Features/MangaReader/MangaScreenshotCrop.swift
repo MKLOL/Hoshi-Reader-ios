@@ -163,7 +163,10 @@ private nonisolated func decodeImage(source: CGImageSource, thumbnailMaxEdge: In
     let options: [CFString: Any] = [
         kCGImageSourceCreateThumbnailFromImageAlways: true,
         kCGImageSourceThumbnailMaxPixelSize: thumbnailMaxEdge,
-        kCGImageSourceCreateThumbnailWithTransform: true,
+        // Keep raw (untransformed) pixel orientation so the decoded dims match the
+        // kCGImagePropertyPixelWidth/Height the crop rect is computed against, and so this path
+        // agrees with the full-size CGImageSourceCreateImageAtIndex branch (also untransformed).
+        kCGImageSourceCreateThumbnailWithTransform: false,
     ]
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
         ?? CGImageSourceCreateImageAtIndex(source, 0, nil)

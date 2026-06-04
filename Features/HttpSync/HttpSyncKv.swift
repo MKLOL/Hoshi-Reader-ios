@@ -206,14 +206,15 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     // MARK: LIST
 
     func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList {
-        var components = URLComponents()
-        var items: [URLQueryItem] = []
-        if let prefix { items.append(URLQueryItem(name: "prefix", value: prefix)) }
-        if let since { items.append(URLQueryItem(name: "since", value: since)) }
-        if let cursor { items.append(URLQueryItem(name: "cursor", value: cursor)) }
-        if let limit { items.append(URLQueryItem(name: "limit", value: String(limit))) }
-        components.queryItems = items.isEmpty ? nil : items
-        let query = components.percentEncodedQuery.map { "?\($0)" } ?? ""
+        // Encode query values the same way Android does (Java URLEncoder): `/`, `:` etc. are
+        // percent-encoded. URLComponents.percentEncodedQuery leaves `/` and `:` literal, which
+        // would diverge from the Android client and from servers that match query strings exactly.
+        var parts: [String] = []
+        if let prefix { parts.append("prefix=\(urlEncode(prefix))") }
+        if let since { parts.append("since=\(urlEncode(since))") }
+        if let cursor { parts.append("cursor=\(urlEncode(cursor))") }
+        if let limit { parts.append("limit=\(limit)") }
+        let query = parts.isEmpty ? "" : "?" + parts.joined(separator: "&")
 
         let request = makeRequest("GET", path: "/v1/kv\(query)", contentType: nil)
         let (data, response) = try await perform(request)

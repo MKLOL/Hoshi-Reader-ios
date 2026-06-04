@@ -165,7 +165,7 @@ struct MangaAiPopupView: View {
         // The "missing API key" failure already points at Settings; retrying would fail the same
         // way, so only offer Retry for other errors.
         if !message.lowercased().hasPrefix("set your openai api key") {
-            Button("Retry") { controller.ask(bubbleText: controller.state.bubbleText, book: book) }
+            Button("Retry") { controller.retry() }
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity, alignment: .trailing)
         }
