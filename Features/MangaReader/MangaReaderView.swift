@@ -32,6 +32,9 @@ struct MangaReaderView: View {
 
     @State private var model: MangaReaderViewModel
     @State private var controller = MangaWebViewController()
+    /// Drives the ChatGPT popup (bubble translate + screenshot translate). Used when the host
+    /// doesn't override `onAskAi`/`onTranslateCrop`.
+    @State private var aiController = MangaAiController()
     @State private var focusMode = false
     @State private var eInkMode = false
     @State private var showGoToPageDialog = false
@@ -144,6 +147,22 @@ struct MangaReaderView: View {
                 goToPageDialog
             }
         }
+        .overlay {
+            if aiController.isPresented {
+                MangaAiPopupView(
+                    controller: aiController,
+                    book: metadata,
+                    userConfig: userConfig,
+                    coverURL: metadata.coverURL
+                )
+            }
+        }
+        .onAppear {
+            // Push new ChatGPT replies to the HTTP KV sync server (no-op unless sync is enabled).
+            aiController.onEntryPersisted = { book, entry in
+                HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry)
+            }
+        }
         .statusBarHidden(focusMode)
         .persistentSystemOverlays(focusMode ? .hidden : .automatic)
         .task { await model.load(controller: controller) }
@@ -179,7 +198,10 @@ struct MangaReaderView: View {
                 )
             },
             onTapOutside: { model.closePopups() },
-            onAskAi: { text in onAskAi?(text) },
+            onAskAi: { text in
+                if let onAskAi { onAskAi(text) }
+                else { aiController.ask(bubbleText: text, book: metadata) }
+            },
             onCopy: { text in UIPasteboard.general.string = text },
             onPageReady: {
                 // Page finished rendering — fade it back in (the crossfade for v1).
@@ -345,6 +367,8 @@ struct MangaReaderView: View {
             cropMangaImageFilePng(imageFile: imageFile, crop: crop)
         }.value
         guard let png else { return }
-        onTranslateCrop?(mangaScreenshotAiImage(pngData: png))
+        let image = mangaScreenshotAiImage(pngData: png)
+        if let onTranslateCrop { onTranslateCrop(image) }
+        else { aiController.translateCrop(image: image, book: metadata) }
     }
 }

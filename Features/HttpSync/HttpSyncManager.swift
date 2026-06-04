@@ -44,7 +44,9 @@ final class HttpSyncManager {
 
     init(settings: HttpSyncSettingsStore? = nil, aiSettings: AiSettingsSyncing? = nil) {
         self.settings = settings ?? HttpSyncSettingsStore.shared
-        self.aiSettings = aiSettings
+        // Default to the app's ChatGPT settings store so model/prompt sync works out of the box;
+        // tests can inject a stub.
+        self.aiSettings = aiSettings ?? AiChatSettingsStore.shared
     }
 
     // MARK: - Manual reconcile

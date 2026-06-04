@@ -239,6 +239,8 @@ final class MangaReaderViewModel {
             lastModified: Date()
         )
         try? BookStorage.save(bookmark, inside: bookRoot, as: FileNames.bookmark)
+        // Fire-and-forget push to the HTTP KV sync server (no-op unless sync is enabled).
+        HttpSyncManager.shared.onPageTurnPersisted(book: metadata)
     }
 
     // MARK: Selection script
