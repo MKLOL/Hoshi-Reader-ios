@@ -364,7 +364,7 @@ class ReaderViewModel {
         let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
         var dictionaryStyles: [String: String] = [:]
         for style in LookupEngine.shared.getStyles() {
-            dictionaryStyles[String(style.dict_name)] = String(style.styles)
+            dictionaryStyles[cxxStringToSwift(style.dict_name)] = cxxStringToSwift(style.styles)
         }
         var cue: SasayakiMatch? = nil
         if sasayakiPlayer.hasAudio, let offset = selection.normalizedOffset {
@@ -400,7 +400,7 @@ class ReaderViewModel {
                     return p
                 }
             }
-            return String(firstResult.matched).count
+            return cxxStringToSwift(firstResult.matched).count
         }
         return nil
     }

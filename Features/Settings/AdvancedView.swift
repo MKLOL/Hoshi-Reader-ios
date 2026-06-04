@@ -48,6 +48,13 @@ struct AdvancedView: View {
                     Label("ChatGPT", systemImage: "sparkles")
                 }
                 .foregroundStyle(.primary)
+
+                NavigationLink {
+                    OfflineTranslationSettingsView()
+                } label: {
+                    Label("On-device Translation", systemImage: "cpu")
+                }
+                .foregroundStyle(.primary)
             }
 
             Section {

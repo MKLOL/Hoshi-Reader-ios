@@ -50,6 +50,11 @@ final class MangaAiController {
     private let settings: AiChatSettingsStore
     private let client: OpenAiChatClient
     private let history: AiChatHistoryStore
+    /// On-device translation settings + manager. When `useOnDeviceTranslation` is on and a model is
+    /// available, `ask` translates locally instead of calling OpenAI.
+    private let offlineSettings: OfflineTranslationSettingsStore
+    private let offlineManager: OfflineLlmManager
+    private let offlineDownloads: ModelDownloadManager
     private var task: Task<Void, Never>?
     /// Replays the last request for the popup's Retry button (the original bubble text or image
     /// crop is captured here; `State.error` carries no payload to reconstruct it from).
@@ -57,10 +62,16 @@ final class MangaAiController {
 
     init(settings: AiChatSettingsStore = .shared,
          client: OpenAiChatClient = OpenAiChatClient(),
-         history: AiChatHistoryStore = .shared) {
+         history: AiChatHistoryStore = .shared,
+         offlineSettings: OfflineTranslationSettingsStore = .shared,
+         offlineManager: OfflineLlmManager = .shared,
+         offlineDownloads: ModelDownloadManager = .shared) {
         self.settings = settings
         self.client = client
         self.history = history
+        self.offlineSettings = offlineSettings
+        self.offlineManager = offlineManager
+        self.offlineDownloads = offlineDownloads
     }
 
     // MARK: - Requests
@@ -71,9 +82,23 @@ final class MangaAiController {
         let trimmed = bubbleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         lastRequest = { [weak self] in self?.ask(bubbleText: trimmed, book: book) }
+
+        // On-device path: when the toggle is on AND a model is available, translate locally.
+        if offlineSettings.useOnDeviceTranslation,
+           !offlineDownloads.downloadedModelIds().isEmpty {
+            askOnDevice(bubbleText: trimmed, book: book)
+            return
+        }
+
         let apiKey = settings.apiKey
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            state = .error("Set your OpenAI API key in Settings → ChatGPT.")
+            // On-device is selected but no model is downloaded → point to settings.
+            if offlineSettings.useOnDeviceTranslation {
+                state = .error("On-device translation is on but no model is downloaded. Download "
+                    + "one in Settings → On-device translation.")
+            } else {
+                state = .error("Set your OpenAI API key in Settings → ChatGPT.")
+            }
             return
         }
         let model = settings.model
@@ -108,13 +133,56 @@ final class MangaAiController {
         }
     }
 
+    /// Translates a bubble fully on-device via `OfflineLlmManager`. Builds the same dictionary
+    /// lookup and persists the exchange identically to the cloud path (the synced wire shape is
+    /// unchanged), attaching a one-line tok/s telemetry footer to `debugInfo` like Android.
+    private func askOnDevice(bubbleText trimmed: String, book: BookMetadata) {
+        let model = offlineSettings.selectedModel
+        let prompt = settings.promptText
+        let lookup = Self.buildDictionaryLookup(query: trimmed)
+
+        cancel()
+        state = .loading(bubbleText: trimmed)
+        task = Task { [offlineManager] in
+            do {
+                let result = try await offlineManager.translate(
+                    instruction: prompt, japaneseText: trimmed
+                )
+                if Task.isCancelled { return }
+                let entry = AiChatEntry(
+                    bubbleText: trimmed,
+                    prompt: prompt,
+                    // Record which on-device model produced the reply (mirrors the cloud `model`).
+                    model: model.id,
+                    response: result.text,
+                    timestampSeconds: Date().timeIntervalSinceReferenceDate,
+                    dictionaryLookup: lookup,
+                    debugInfo: result.debugLine
+                )
+                self.persist(entry, book: book)
+                if Task.isCancelled { return }
+                self.state = .result(entry)
+            } catch {
+                if Task.isCancelled { return }
+                self.state = .error(Self.message(for: error))
+            }
+        }
+    }
+
     /// Translates an image crop (rendered manga panel) via the vision endpoint, persists the
     /// exchange with the screenshot attached, and updates `state`.
     func translateCrop(image: AiChatImage, book: BookMetadata) {
         lastRequest = { [weak self] in self?.translateCrop(image: image, book: book) }
         let apiKey = settings.apiKey
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            state = .error("Set your OpenAI API key in Settings → ChatGPT.")
+            // Vision crops always use the cloud (the on-device text models aren't multimodal). If
+            // the user is on the on-device path with no API key, say so clearly.
+            if offlineSettings.useOnDeviceTranslation {
+                state = .error("Screenshot translation needs ChatGPT (the on-device model can't "
+                    + "read images). Add your OpenAI API key in Settings → ChatGPT.")
+            } else {
+                state = .error("Set your OpenAI API key in Settings → ChatGPT.")
+            }
             return
         }
         let model = settings.model
