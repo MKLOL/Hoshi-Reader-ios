@@ -10,12 +10,15 @@
 //  page, then confirms to send the crop (mapped to image pixels by the page script) on for
 //  translation, or cancels.
 //
+//  The action bar (Cancel / Translate) is pinned to the top safe area on a solid contrasting
+//  pill so both buttons stay legible over the dimmed page and never collide with the bottom
+//  page indicator.
+//
 
 import SwiftUI
 
 struct MangaScreenshotCropOverlay: View {
     let containerSize: CGSize
-    let darkInterface: Bool
     let onCancel: () -> Void
     let onConfirm: (MangaScreenshotCropRect) -> Void
 
@@ -44,9 +47,21 @@ struct MangaScreenshotCropOverlay: View {
     }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
+            // The drag-to-crop gesture lives on the dimmed backdrop only, so taps on the action
+            // bar buttons aren't swallowed by it (a whole-overlay gesture would start a drag
+            // instead of activating Cancel/Translate).
             Color.black.opacity(0.36)
                 .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            if dragStart == nil {
+                                dragStart = value.startLocation
+                            }
+                            dragEnd = value.location
+                        }
+                )
 
             if let rect = previewRect {
                 Rectangle()
@@ -65,38 +80,44 @@ struct MangaScreenshotCropOverlay: View {
                     .allowsHitTesting(false)
             }
 
-            VStack {
-                Spacer()
-                HStack(spacing: 8) {
-                    Button("Cancel", role: .cancel, action: onCancel)
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 8)
-
-                    Button("Translate") {
-                        if let rect = currentRect { onConfirm(rect) }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(currentRect == nil)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(
-                    Capsule().fill(
-                        darkInterface ? Color.black.opacity(0.72) : Color.white.opacity(0.92)
-                    )
-                )
-                .padding(.bottom, 28)
-            }
+            actionBar
         }
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    if dragStart == nil {
-                        dragStart = value.startLocation
-                    }
-                    dragEnd = value.location
-                }
+        .ignoresSafeArea()
+    }
+
+    /// Cancel (left) + Translate (right) on a solid pill, pinned just below the status bar.
+    private var actionBar: some View {
+        HStack(spacing: 12) {
+            Button(action: onCancel) {
+                Text("Cancel")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                    .background(Color.white.opacity(0.18), in: Capsule())
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                if let rect = currentRect { onConfirm(rect) }
+            } label: {
+                Text("Translate")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                    .background(currentRect == nil ? Color.white.opacity(0.4) : Color.white, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(currentRect == nil)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            Capsule().fill(Color.black.opacity(0.82))
         )
+        .padding(.top, max(UIApplication.topSafeArea, 8) + 8)
+        // Sits above the drag layer so the buttons stay tappable.
+        .zIndex(10)
     }
 }

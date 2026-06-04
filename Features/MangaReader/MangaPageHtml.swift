@@ -18,8 +18,7 @@
 //  Everything else faithfully follows the Android renderer: definite-px sized `.page` flexbox
 //  (no vw/vh/%), `.frame` aspect-fit, `.ocr-box` absolute %-positioning + cqw font-size,
 //  vertical-rl writing mode, transparent-until-tapped reveal with action buttons, the
-//  wrap-fallback binary-search JS, the crop/host-rect mapping JS, the e-ink CSS branch and
-//  `setHostScale`.
+//  wrap-fallback binary-search JS, the crop/host-rect mapping JS, and `setHostScale`.
 //
 
 import Foundation
@@ -39,7 +38,6 @@ enum MangaPageHtml {
     ///     page's `window.hoshiSelection` interface works on tap.
     ///   - scanNonJapaneseText: forwarded to `window.scanNonJapaneseText`, mirroring the EPUB
     ///     reader so the selection scanner respects the dictionary setting.
-    ///   - eInkMode: picks a high-contrast black-on-white matched-word highlight.
     ///   - viewportCssWidth/viewportCssHeight: the host WebView's viewport size in CSS px;
     ///     every layout size is baked into the CSS as a definite px value.
     ///   - singleTapLookup: when `true`, the first tap reveals + looks up; default `false`
@@ -50,7 +48,6 @@ enum MangaPageHtml {
         backgroundCssColor: String,
         selectionScript: String,
         scanNonJapaneseText: Bool,
-        eInkMode: Bool,
         viewportCssWidth: Int,
         viewportCssHeight: Int,
         singleTapLookup: Bool = false,
@@ -75,7 +72,6 @@ enum MangaPageHtml {
 
         let css = pageCss(
             backgroundCssColor: backgroundCssColor,
-            eInkMode: eInkMode,
             viewportCssWidth: viewportWidth,
             viewportCssHeight: viewportHeight,
             frameWidthCss: frameWidthCss,
@@ -164,19 +160,13 @@ enum MangaPageHtml {
 
     private static func pageCss(
         backgroundCssColor: String,
-        eInkMode: Bool,
         viewportCssWidth: Int,
         viewportCssHeight: Int,
         frameWidthCss: String,
         frameHeightCss: String,
         useNotoSansJpFont: Bool
     ) -> String {
-        // On a greyscale e-ink display a colour highlight is nearly indistinguishable from the
-        // OCR plate, so the matched word is shown inverted (black plate, white text); on a
-        // colour display it gets the usual amber highlight.
-        let matchedWordHighlight = eInkMode
-            ? "::highlight(hoshi-selection) { background: #000; color: #fff; }"
-            : "::highlight(hoshi-selection) { background: #ffd400; color: #000; }"
+        let matchedWordHighlight = "::highlight(hoshi-selection) { background: #ffd400; color: #000; }"
         let ocrBoxFontFamilyRule = useNotoSansJpFont
             ? "font-family: 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', sans-serif;"
             : ""

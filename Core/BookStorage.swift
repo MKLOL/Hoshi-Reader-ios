@@ -15,6 +15,9 @@ nonisolated enum FileNames: Sendable {
     static let bookinfo = "bookinfo.json"
     static let shelves = "shelves.json"
     static let statistics = "statistics.json"
+    /// Manga reading statistics sidecar (page/time based), kept separate from the
+    /// character-based EPUB `statistics.json`.
+    static let mangaStatistics = "manga_statistics.json"
     static let sasayakiMatch = "sasayaki_match.json"
     static let sasayakiPlayback = "sasayaki_playback.json"
     static let highlights = "highlights.json"
@@ -145,6 +148,10 @@ struct BookStorage {
     
     static func loadStatistics(root: URL) -> [Statistics]? {
         load([Statistics].self, from: root.appendingPathComponent(FileNames.statistics))
+    }
+
+    static func loadMangaStatistics(root: URL) -> [Statistics]? {
+        load([Statistics].self, from: root.appendingPathComponent(FileNames.mangaStatistics))
     }
     
     static func loadSasayakiMatch(root: URL) -> SasayakiMatchData? {

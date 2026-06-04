@@ -29,11 +29,14 @@ final class MangaReaderViewModel {
     /// Shared dictionary popups, mirroring `ReaderViewModel.popups`.
     var popups: [PopupItem] = []
 
+    /// Reading statistics tracker (page/time based). `nil` until the book loads.
+    private(set) var statistics: MangaStatisticsTracker?
+
     private var bookmarkSaveTask: Task<Void, Never>?
     private var pendingBookmarkPage: Int?
     private let bookmarkDebounce: Duration = .milliseconds(400)
 
-    /// Small render cache of recently built page HTML (keyed by page index + e-ink + size).
+    /// Small render cache of recently built page HTML (keyed by page index + size).
     private var htmlCache: [MangaRenderKey: String] = [:]
     private let htmlCacheLimit = 5
 
@@ -46,7 +49,7 @@ final class MangaReaderViewModel {
 
     // MARK: Loading
 
-    func load(controller: MangaWebViewController) async {
+    func load(controller: MangaWebViewController, userConfig: UserConfig) async {
         guard !isReady, errorMessage == nil else { return }
         guard let booksDir = try? BookStorage.getBooksDirectory(), let folder = metadata.folder else {
             errorMessage = "Could not locate the manga book."
@@ -68,39 +71,85 @@ final class MangaReaderViewModel {
             let restored = BookStorage.loadBookmark(root: root)?.chapterIndex ?? 0
             pageIndex = max(0, min(restored, max(0, parsedBook.pages.count - 1)))
             isReady = true
+            setUpStatistics(title: parsedBook.title, root: root, userConfig: userConfig)
         } else {
             errorMessage = parsed.error ?? "Could not parse the manga."
         }
     }
 
+    // MARK: Statistics
+
+    private func setUpStatistics(title: String, root: URL, userConfig: UserConfig) {
+        let initial = BookStorage.loadMangaStatistics(root: root) ?? []
+        var tracker = MangaStatisticsTracker(
+            title: title,
+            initialStatistics: initial,
+            enabled: userConfig.enableStatistics
+        )
+        if userConfig.enableStatistics {
+            tracker.start(currentPage: pageIndex + 1)
+        }
+        statistics = tracker
+    }
+
+    func toggleStatisticsTracking() {
+        guard var tracker = statistics, tracker.enabled else { return }
+        if tracker.isTracking {
+            tracker.pause(currentPage: pageIndex + 1)
+        } else {
+            tracker.start(currentPage: pageIndex + 1)
+        }
+        statistics = tracker
+        persistStatistics()
+    }
+
+    private func recordPageTurnForStatistics() {
+        guard var tracker = statistics, tracker.enabled else { return }
+        tracker.startForPageTurnIfNeeded(currentPage: pageIndex + 1)
+        tracker.update(currentPage: pageIndex + 1)
+        statistics = tracker
+    }
+
+    /// Flushes accumulated stats and persists today's bucket to the manga sidecar.
+    func persistStatistics() {
+        guard let bookRoot, var tracker = statistics, tracker.enabled else { return }
+        tracker.update(currentPage: pageIndex + 1)
+        if let toPersist = tracker.statisticsForPersistence() {
+            try? BookStorage.save(toPersist, inside: bookRoot, as: FileNames.mangaStatistics)
+        }
+        statistics = tracker
+    }
+
     // MARK: Rendering
 
-    func renderCurrentPage(controller: MangaWebViewController, eInkMode: Bool, screenSize: CGSize, userConfig: UserConfig) {
+    func renderCurrentPage(controller: MangaWebViewController, screenSize: CGSize, userConfig: UserConfig) {
         guard let book, !book.pages.isEmpty, screenSize.width > 0, screenSize.height > 0 else { return }
         let index = max(0, min(pageIndex, book.pages.count - 1))
         let page = book.pages[index]
 
         let width = Int(screenSize.width.rounded())
         let height = Int(screenSize.height.rounded())
-        let key = MangaRenderKey(pageIndex: index, eInk: eInkMode, width: width, height: height)
-        let html = htmlCache[key] ?? buildHtml(page: page, eInkMode: eInkMode, width: width, height: height, userConfig: userConfig)
+        let key = MangaRenderKey(pageIndex: index, width: width, height: height)
+        let html = htmlCache[key] ?? buildHtml(page: page, width: width, height: height, userConfig: userConfig)
         cacheHtml(html, for: key)
 
         let allowedPaths = Set([page.imagePath.trimmingPrefixSlash()])
         controller.load(html: html, allowedImagePaths: allowedPaths)
 
         scheduleBookmark(page: index)
+        recordPageTurnForStatistics()
     }
 
-    private func buildHtml(page: MokuroPage, eInkMode: Bool, width: Int, height: Int, userConfig: UserConfig) -> String {
+    private func buildHtml(page: MokuroPage, width: Int, height: Int, userConfig: UserConfig) -> String {
         MangaPageHtml.build(
             page: page,
-            backgroundCssColor: eInkMode ? "#ffffff" : "#000000",
+            backgroundCssColor: "#000000",
             selectionScript: Self.selectionScript,
-            scanNonJapaneseText: false,
-            eInkMode: eInkMode,
+            scanNonJapaneseText: userConfig.mangaScanNonJapaneseText,
             viewportCssWidth: width,
-            viewportCssHeight: height
+            viewportCssHeight: height,
+            singleTapLookup: userConfig.mangaSingleTapLookup,
+            useNotoSansJpFont: userConfig.mangaUseNotoSansJpFont
         )
     }
 
@@ -256,7 +305,6 @@ final class MangaReaderViewModel {
 
 private struct MangaRenderKey: Hashable {
     let pageIndex: Int
-    let eInk: Bool
     let width: Int
     let height: Int
 }

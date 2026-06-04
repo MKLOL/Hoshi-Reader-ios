@@ -8,9 +8,9 @@
 //  The mokuro manga reader screen. Ported from Android `features/mangareader/
 //  MangaReaderScreen.kt`, adapted to SwiftUI + WKWebView. Owns the current page index and the
 //  parsed MokuroBook, hosts the OCR-overlay WebView, the reader chrome (title, page X/Y, back,
-//  focus toggle, e-ink toggle, go-to-page dialog), RTL paging with a crossfade, debounced
-//  bookmark persistence, the shared dictionary PopupView (the same one the EPUB reader uses),
-//  and the screenshot-crop overlay.
+//  focus toggle, go-to-page dialog, statistics sheet), RTL paging with a crossfade, debounced
+//  bookmark persistence, manga reading statistics, the shared dictionary PopupView (the same one
+//  the EPUB reader uses), and the screenshot-crop overlay.
 //
 //  Phase 2 seams (wired by the orchestrator):
 //   - `onAskAi`: invoked with a bubble's OCR text when the sparkles button is tapped.
@@ -36,9 +36,10 @@ struct MangaReaderView: View {
     /// doesn't override `onAskAi`/`onTranslateCrop`.
     @State private var aiController = MangaAiController()
     @State private var focusMode = false
-    @State private var eInkMode = false
     @State private var showGoToPageDialog = false
+    @State private var showOverflowMenu = false
     @State private var screenshotCropMode = false
+    @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
     @State private var pageOpacity: Double = 1
 
@@ -53,9 +54,7 @@ struct MangaReaderView: View {
         _model = State(initialValue: MangaReaderViewModel(metadata: metadata))
     }
 
-    private var backgroundColor: Color {
-        eInkMode ? .white : .black
-    }
+    private let backgroundColor: Color = .black
 
     private var pageIndicator: String {
         guard model.pageCount > 0 else { return "" }
@@ -67,9 +66,90 @@ struct MangaReaderView: View {
             backgroundColor.ignoresSafeArea()
 
             if model.isReady {
-                GeometryReader { geometry in
-                    ZStack {
-                        readerSurface(geometry: geometry)
+                // Reserve bands for the top/bottom chrome so the WebView never sits underneath
+                // them — a full-screen WKWebView swallows taps over its frame, which would make
+                // the chrome buttons unresponsive (mirrors the EPUB reader's layout). The manga
+                // page is letterboxed, so the reserved bands only trim empty space.
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: topChromeHeight)
+                        .allowsHitTesting(false)
+                    pageContent
+                    Color.clear
+                        .frame(height: bottomChromeHeight)
+                        .allowsHitTesting(false)
+                }
+            } else if let error = model.errorMessage {
+                Text(error)
+                    .foregroundStyle(.secondary)
+                    .padding()
+            } else {
+                ProgressView().tint(.secondary)
+            }
+        }
+        .overlay(alignment: .top) {
+            if !focusMode && !screenshotCropMode { topBar }
+        }
+        .overlay(alignment: .bottom) {
+            if !screenshotCropMode { bottomBar }
+        }
+        .overlay {
+            if showGoToPageDialog {
+                goToPageDialog
+            }
+        }
+        .sheet(isPresented: $showStatisticsSheet) {
+            MangaStatisticsView(model: model, userConfig: userConfig)
+        }
+        .overlay {
+            if aiController.isPresented {
+                MangaAiPopupView(
+                    controller: aiController,
+                    book: metadata,
+                    userConfig: userConfig,
+                    coverURL: metadata.coverURL
+                )
+            }
+        }
+        .onAppear {
+            // Push new ChatGPT replies to the HTTP KV sync server (no-op unless sync is enabled).
+            aiController.onEntryPersisted = { book, entry in
+                HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry)
+            }
+        }
+        .statusBarHidden(focusMode)
+        .persistentSystemOverlays(focusMode ? .hidden : .automatic)
+        .task { await model.load(controller: controller, userConfig: userConfig) }
+        .onChange(of: model.pageIndex) { _, _ in
+            model.closePopups()
+            withAnimation(.easeInOut(duration: 0.12)) { pageOpacity = 0 }
+            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+        }
+        .onDisappear {
+            model.flushPendingBookmark()
+            model.persistStatistics()
+            aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
+        }
+    }
+
+    /// Height reserved (within the safe area) for the top bar content; reclaimed by the page in
+    /// focus mode and while cropping (the crop overlay needs the full screen).
+    private var topChromeHeight: CGFloat {
+        (focusMode || screenshotCropMode) ? 0 : 52
+    }
+
+    /// Height reserved (within the safe area) for the page indicator / focus-toggle strip.
+    private var bottomChromeHeight: CGFloat {
+        screenshotCropMode ? 0 : 42
+    }
+
+    @State private var lastSize: CGSize = .zero
+
+    @ViewBuilder
+    private var pageContent: some View {
+        GeometryReader { geometry in
+            ZStack {
+                readerSurface(geometry: geometry)
 
                         // Shared dictionary popups — identical presentation to the EPUB reader.
                         ForEach($model.popups) { $popup in
@@ -121,7 +201,6 @@ struct MangaReaderView: View {
                         if screenshotCropMode {
                             MangaScreenshotCropOverlay(
                                 containerSize: geometry.size,
-                                darkInterface: !eInkMode,
                                 onCancel: { screenshotCropMode = false },
                                 onConfirm: { rect in
                                     screenshotCropMode = false
@@ -132,55 +211,7 @@ struct MangaReaderView: View {
                         }
                     }
                 }
-            } else if let error = model.errorMessage {
-                Text(error)
-                    .foregroundStyle(.secondary)
-                    .padding()
-            } else {
-                ProgressView().tint(.secondary)
-            }
-
-            chrome
-        }
-        .overlay {
-            if showGoToPageDialog {
-                goToPageDialog
-            }
-        }
-        .overlay {
-            if aiController.isPresented {
-                MangaAiPopupView(
-                    controller: aiController,
-                    book: metadata,
-                    userConfig: userConfig,
-                    coverURL: metadata.coverURL
-                )
-            }
-        }
-        .onAppear {
-            // Push new ChatGPT replies to the HTTP KV sync server (no-op unless sync is enabled).
-            aiController.onEntryPersisted = { book, entry in
-                HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry)
-            }
-        }
-        .statusBarHidden(focusMode)
-        .persistentSystemOverlays(focusMode ? .hidden : .automatic)
-        .task { await model.load(controller: controller) }
-        .onChange(of: model.pageIndex) { _, _ in
-            model.closePopups()
-            withAnimation(.easeInOut(duration: 0.12)) { pageOpacity = 0 }
-            model.renderCurrentPage(controller: controller, eInkMode: eInkMode, screenSize: lastSize, userConfig: userConfig)
-        }
-        .onChange(of: eInkMode) { _, _ in
-            model.renderCurrentPage(controller: controller, eInkMode: eInkMode, screenSize: lastSize, userConfig: userConfig)
-        }
-        .onDisappear {
-            model.flushPendingBookmark()
-            aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
-        }
     }
-
-    @State private var lastSize: CGSize = .zero
 
     @ViewBuilder
     private func readerSurface(geometry: GeometryProxy) -> some View {
@@ -217,59 +248,26 @@ struct MangaReaderView: View {
         .onAppear {
             lastSize = geometry.size
             model.viewportSize = geometry.size
-            model.renderCurrentPage(controller: controller, eInkMode: eInkMode, screenSize: geometry.size, userConfig: userConfig)
+            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
         }
         .onChange(of: geometry.size) { _, newSize in
             lastSize = newSize
             model.viewportSize = newSize
-            model.renderCurrentPage(controller: controller, eInkMode: eInkMode, screenSize: newSize, userConfig: userConfig)
+            model.renderCurrentPage(controller: controller, screenSize: newSize, userConfig: userConfig)
         }
     }
 
     // MARK: Chrome
 
-    @ViewBuilder
-    private var chrome: some View {
-        VStack(spacing: 0) {
-            if !focusMode {
-                topBar
-                    .background(backgroundColor.opacity(0.001))
-            }
-            Spacer(minLength: 0)
-                // The central spacer toggles focus mode without covering OCR taps: it sits
-                // above the WebView only as a thin transparent strip used for the gesture, but
-                // because it is in a VStack with the bars it does overlap the page. Disable hit
-                // testing on it so taps fall through to the WebView; focus toggles from the
-                // bottom bar's empty area instead.
-                .allowsHitTesting(false)
-            if !focusMode {
-                bottomBar
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.default.speed(2)) { focusMode.toggle() }
-                    }
-            } else {
-                // In focus mode, a tap anywhere on the bottom strip restores the chrome.
-                Color.clear
-                    .frame(height: max(UIApplication.bottomSafeArea, 44))
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.default.speed(2)) { focusMode.toggle() }
-                    }
-            }
-        }
-        .allowsHitTesting(!screenshotCropMode)
-    }
-
     private var topBar: some View {
         HStack {
-            Button {
-                model.flushPendingBookmark()
-                dismissReader?()
-            } label: {
-                CircleButton(systemName: "chevron.left")
-            }
-            .buttonStyle(.plain)
+            CircleButton(systemName: "chevron.left")
+                .contentShape(Circle())
+                .onTapGesture {
+                    model.flushPendingBookmark()
+                    model.persistStatistics()
+                    dismissReader?()
+                }
 
             Spacer()
 
@@ -281,39 +279,40 @@ struct MangaReaderView: View {
                 Spacer()
             }
 
-            Menu {
-                Button {
-                    showGoToPageDialog = true
-                    goToPageText = "\(model.pageIndex + 1)"
-                } label: {
-                    Label("Go to page", systemImage: "arrow.right.to.line")
-                }
-                Button {
-                    eInkMode.toggle()
-                } label: {
-                    Label(eInkMode ? "Disable e-ink mode" : "E-ink mode",
-                          systemImage: eInkMode ? "sun.max" : "moon")
-                }
-                Button {
+            CircleButton(systemName: "slider.horizontal.3")
+                .contentShape(Circle())
+                .onTapGesture {
                     model.closePopups()
-                    screenshotCropMode = true
-                } label: {
-                    Label("Screenshot translate", systemImage: "camera.viewfinder")
+                    showOverflowMenu = true
                 }
-            } label: {
-                CircleButton(systemName: "slider.horizontal.3")
-            }
-            .tint(.primary)
         }
         .padding(.horizontal, 20)
-        .padding(.top, max(UIApplication.topSafeArea, 8))
+        // The inset region already starts at the safe-area edge; a small gap hugs the status bar.
+        .padding(.top, 4)
         .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
+        .background(backgroundColor.opacity(0.001))
+        .confirmationDialog("", isPresented: $showOverflowMenu, titleVisibility: .hidden) {
+            Button("Go to page") {
+                goToPageText = "\(model.pageIndex + 1)"
+                showGoToPageDialog = true
+            }
+            Button("Screenshot translate") {
+                model.closePopups()
+                screenshotCropMode = true
+            }
+            Button("Statistics") {
+                model.closePopups()
+                showStatisticsSheet = true
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var bottomBar: some View {
         HStack {
             Spacer()
-            if !pageIndicator.isEmpty {
+            if !focusMode, !pageIndicator.isEmpty {
                 Text(pageIndicator)
                     .font(.caption)
                     .monospacedDigit()
@@ -324,7 +323,14 @@ struct MangaReaderView: View {
             }
             Spacer()
         }
-        .padding(.bottom, max(UIApplication.bottomSafeArea, 12))
+        .frame(maxWidth: .infinity, minHeight: 36)
+        // A small gap hugs the home indicator.
+        .padding(.bottom, 6)
+        .background(backgroundColor.opacity(0.001))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.default.speed(2)) { focusMode.toggle() }
+        }
     }
 
     private var goToPageDialog: some View {

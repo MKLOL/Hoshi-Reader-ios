@@ -36,6 +36,13 @@ struct AdvancedView: View {
             
             Section {
                 NavigationLink {
+                    MangaReaderSettingsView()
+                } label: {
+                    Label("Manga Reader", systemImage: "book.pages")
+                }
+                .foregroundStyle(.primary)
+
+                NavigationLink {
                     AiSettingsView()
                 } label: {
                     Label("ChatGPT", systemImage: "sparkles")

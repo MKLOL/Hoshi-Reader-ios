@@ -207,6 +207,18 @@ class UserConfig {
         didSet { UserDefaults.standard.set(readerShowSasayakiToggle, forKey: "readerShowSasayakiToggle") }
     }
     
+    var mangaSingleTapLookup: Bool {
+        didSet { UserDefaults.standard.set(mangaSingleTapLookup, forKey: "mangaSingleTapLookup") }
+    }
+
+    var mangaUseNotoSansJpFont: Bool {
+        didSet { UserDefaults.standard.set(mangaUseNotoSansJpFont, forKey: "mangaUseNotoSansJpFont") }
+    }
+
+    var mangaScanNonJapaneseText: Bool {
+        didSet { UserDefaults.standard.set(mangaScanNonJapaneseText, forKey: "mangaScanNonJapaneseText") }
+    }
+
     var popupWidth: Int {
         didSet { UserDefaults.standard.set(popupWidth, forKey: "popupWidth") }
     }
@@ -379,6 +391,10 @@ class UserConfig {
         self.readerShowReadingTime = defaults.object(forKey: "readerShowReadingTime") as? Bool ?? false
         self.readerShowSasayakiToggle = defaults.object(forKey: "readerShowSasayakiToggle") as? Bool ?? false
         
+        self.mangaSingleTapLookup = defaults.object(forKey: "mangaSingleTapLookup") as? Bool ?? false
+        self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false
+        self.mangaScanNonJapaneseText = defaults.object(forKey: "mangaScanNonJapaneseText") as? Bool ?? false
+
         self.popupWidth = defaults.object(forKey: "popupWidth") as? Int ?? 320
         self.popupHeight = defaults.object(forKey: "popupHeight") as? Int ?? 250
         self.popupFullWidth = defaults.object(forKey: "popupFullWidth") as? Bool ?? false
