@@ -22,7 +22,7 @@ import Foundation
 
 // MARK: - Per-key Hoshi blob shapes
 
-struct HttpSyncMetadataBlob: Codable, Equatable {
+nonisolated struct HttpSyncMetadataBlob: Codable, Equatable {
     let title: String
     let contentType: ContentType
     /// Shelf/folder placement. `nil` means intentionally unshelved. Omission ("leave the local
@@ -58,9 +58,25 @@ struct HttpSyncMetadataBlob: Codable, Equatable {
         importedAt = try c.decodeIfPresent(String.self, forKey: .importedAt)
         deletedAt = try c.decodeIfPresent(String.self, forKey: .deletedAt)
     }
+
+    /// Explicit encode so EVERY key is always emitted, with `null` for absent values. Android's
+    /// kotlinx.serialization uses `explicitNulls = true` (the default) + `encodeDefaults = true`,
+    /// so it always writes `"shelfName": null` etc. The reconciler's shelf-presence detection
+    /// uses `containsKey`, so byte-matching that "field is present even when null" behavior is
+    /// load-bearing — the synthesized `Codable` encoder would otherwise omit nil optionals and
+    /// silently change shelf-sync semantics across platforms.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(title, forKey: .title)
+        try c.encode(contentType, forKey: .contentType)
+        try c.encode(shelfName, forKey: .shelfName)
+        try c.encode(shelfUpdatedAt, forKey: .shelfUpdatedAt)
+        try c.encode(importedAt, forKey: .importedAt)
+        try c.encode(deletedAt, forKey: .deletedAt)
+    }
 }
 
-struct HttpSyncBookmarkBlob: Codable, Equatable {
+nonisolated struct HttpSyncBookmarkBlob: Codable, Equatable {
     let chapterIndex: Int
     let progress: Double
     let characterCount: Int
@@ -68,7 +84,7 @@ struct HttpSyncBookmarkBlob: Codable, Equatable {
     let lastModified: String
 }
 
-struct HttpSyncChatEntryBlob: Codable, Equatable {
+nonisolated struct HttpSyncChatEntryBlob: Codable, Equatable {
     let bubbleText: String
     let prompt: String
     let model: String
@@ -103,11 +119,26 @@ struct HttpSyncChatEntryBlob: Codable, Equatable {
         screenshotImage = try c.decodeIfPresent(AiChatImage.self, forKey: .screenshotImage)
         dictionaryLookup = try c.decodeIfPresent(AiChatDictionaryLookup.self, forKey: .dictionaryLookup)
     }
+
+    /// Explicit encode so the optional `screenshotImage` / `dictionaryLookup` keys are always
+    /// emitted (as `null` when absent), matching Android's `explicitNulls = true`. The chat key is
+    /// content-addressed by bubbleText/timestamp/response so this doesn't affect dedup, but keeping
+    /// the bytes identical avoids any server-side etag drift between platforms.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(bubbleText, forKey: .bubbleText)
+        try c.encode(prompt, forKey: .prompt)
+        try c.encode(model, forKey: .model)
+        try c.encode(response, forKey: .response)
+        try c.encode(timestampSeconds, forKey: .timestampSeconds)
+        try c.encode(screenshotImage, forKey: .screenshotImage)
+        try c.encode(dictionaryLookup, forKey: .dictionaryLookup)
+    }
 }
 
 /// Cross-device ChatGPT settings (model + prompts). The API key is intentionally NOT here — it
 /// stays per-device. `lastModified` is the LWW tiebreaker.
-struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
+nonisolated struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
     let model: String
     let promptText: String
     var imagePromptText: String
@@ -132,7 +163,7 @@ struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
 }
 
 /// Manifest describing a book's payload.zip.
-struct HttpSyncPayloadManifest: Codable, Equatable {
+nonisolated struct HttpSyncPayloadManifest: Codable, Equatable {
     let sha256: String
     let sizeBytes: Int
     let originalName: String
@@ -142,7 +173,7 @@ struct HttpSyncPayloadManifest: Codable, Equatable {
 // MARK: - KV server wire records (content-blind store)
 
 /// Metadata for one key, as returned by the list endpoint and write responses.
-struct HttpSyncKvKeyMeta: Codable, Equatable {
+nonisolated struct HttpSyncKvKeyMeta: Codable, Equatable {
     let key: String
     let lastModified: String
     var etag: String?
@@ -150,6 +181,16 @@ struct HttpSyncKvKeyMeta: Codable, Equatable {
     var contentType: String?
 
     enum CodingKeys: String, CodingKey { case key, lastModified, etag, size, contentType }
+
+    /// Memberwise init so the transport can synthesize a write response from the multipart-complete
+    /// reply (which has a different JSON shape than this struct).
+    init(key: String, lastModified: String, etag: String? = nil, size: Int? = nil, contentType: String? = nil) {
+        self.key = key
+        self.lastModified = lastModified
+        self.etag = etag
+        self.size = size
+        self.contentType = contentType
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -162,7 +203,7 @@ struct HttpSyncKvKeyMeta: Codable, Equatable {
 }
 
 /// Response of `GET /v1/kv?prefix=&since=&cursor=&limit=`.
-struct HttpSyncKvList: Codable, Equatable {
+nonisolated struct HttpSyncKvList: Codable, Equatable {
     var keys: [HttpSyncKvKeyMeta]
     var truncated: Bool?
     var nextCursor: String?

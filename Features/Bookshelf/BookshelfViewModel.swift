@@ -15,6 +15,7 @@ class BookshelfViewModel {
     var books: [BookMetadata] = []
     var shelves: [BookShelf] = []
     var isImporting: Bool = false
+    var isImportingEpub: Bool = false
     var shouldShowError: Bool = false
     var errorMessage: String = ""
     var shouldShowSuccess: Bool = false
@@ -24,6 +25,8 @@ class BookshelfViewModel {
     var importBooksProgress: String?
     
     private var bookProgress: [UUID: Double] = [:]
+    /// "p. X / Y" page labels for mokuro books, keyed by book id. EPUB books are absent.
+    private var bookPageLabel: [UUID: String] = [:]
     
     func loadBooks() {
         do {
@@ -129,27 +132,41 @@ class BookshelfViewModel {
         guard let directory = try? BookStorage.getBooksDirectory() else {
             return
         }
-        
+
         for book in books {
             guard let folder = book.folder else {
                 continue
             }
             let root = directory.appendingPathComponent(folder)
-            
+
             let bookInfo = BookStorage.loadBookInfo(root: root)
             let bookmark = BookStorage.loadBookmark(root: root)
-            
+
             if let total = bookInfo?.characterCount, total > 0,
                let current = bookmark?.characterCount {
                 bookProgress[book.id] = Double(current) / Double(total)
+                // For mokuro books characterCount is a page count (bookmark = page + 1), so surface
+                // a human page label instead of the EPUB percentage.
+                if book.resolvedContentType == .mokuro {
+                    let page = min(max(current, 1), total)
+                    bookPageLabel[book.id] = "p. \(page) / \(total)"
+                } else {
+                    bookPageLabel[book.id] = nil
+                }
             } else {
                 bookProgress[book.id] = 0.0
+                bookPageLabel[book.id] = book.resolvedContentType == .mokuro ? "p. 1 / \(bookInfo?.characterCount ?? 0)" : nil
             }
         }
     }
-    
+
     func progress(for book: BookMetadata) -> Double {
         bookProgress[book.id] ?? 0.0
+    }
+
+    /// "p. X / Y" for mokuro books, `nil` for EPUB (which use the percentage label).
+    func pageLabel(for book: BookMetadata) -> String? {
+        bookPageLabel[book.id]
     }
     
     func deleteBook(_ book: BookMetadata) {
@@ -220,6 +237,64 @@ class BookshelfViewModel {
         }
     }
     
+    func importMangaBundles(result: Result<[URL], Error>) {
+        do {
+            let urls = try result.get()
+            if urls.isEmpty {
+                return
+            }
+
+            if urls.count == 1 {
+                do {
+                    try importMangaBundle(from: urls[0])
+                    loadBooks()
+                } catch {
+                    showError(message: error.localizedDescription)
+                }
+                return
+            }
+
+            importBooksProgress = "Importing 1 / \(urls.count)..."
+            Task {
+                defer { importBooksProgress = nil }
+                await Task.yield()
+
+                var failed: [String] = []
+                for (index, url) in urls.enumerated() {
+                    autoreleasepool {
+                        do {
+                            try importMangaBundle(from: url)
+                        } catch {
+                            failed.append(url.lastPathComponent)
+                        }
+                    }
+                    let next = index + 1
+                    if next < urls.count {
+                        importBooksProgress = "Importing \(next + 1) / \(urls.count)..."
+                        await Task.yield()
+                    }
+                }
+                loadBooks()
+
+                if !failed.isEmpty {
+                    showError(message: "Failed to import:\n\(failed.joined(separator: "\n"))")
+                }
+            }
+        } catch {
+            showError(message: error.localizedDescription)
+        }
+    }
+
+    private func importMangaBundle(from url: URL) throws {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        _ = try MokuroImporter.importBundle(from: url)
+    }
+
     func importRemoteBook(from url: URL) {
         isDownloading = true
         Task {

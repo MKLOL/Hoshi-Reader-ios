@@ -27,13 +27,23 @@ struct WebViewState: Hashable {
 struct ReaderLoader: View {
     @Environment(UserConfig.self) private var userConfig
     @State private var viewModel: ReaderLoaderViewModel
-    
+    private let isMokuro: Bool
+
     init(book: BookMetadata) {
         _viewModel = State(initialValue: ReaderLoaderViewModel(book: book))
+        // Detect the on-disk content type (mokuro.json sidecar) as the source of truth, falling
+        // back to the stored metadata hint for books whose directory can't be resolved yet.
+        if let booksFolder = try? BookStorage.getBooksDirectory(), let folder = book.folder {
+            self.isMokuro = ContentType.detect(bookDir: booksFolder.appendingPathComponent(folder)) == .mokuro
+        } else {
+            self.isMokuro = book.resolvedContentType == .mokuro
+        }
     }
-    
+
     var body: some View {
-        if let doc = viewModel.document, let root = viewModel.rootURL {
+        if isMokuro {
+            MangaReaderView(metadata: viewModel.book)
+        } else if let doc = viewModel.document, let root = viewModel.rootURL {
             ReaderView(
                 book: viewModel.book,
                 document: doc,

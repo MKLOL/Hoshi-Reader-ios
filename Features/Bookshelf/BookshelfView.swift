@@ -49,7 +49,7 @@ struct BookshelfView: View {
                             ContentUnavailableView {
                                 Label("No Books", systemImage: "books.vertical")
                             } description: {
-                                Text("Import an EPUB using the \(Image(systemName: "plus")) button to start reading.")
+                                Text("Import manga using the \(Image(systemName: "plus")) button to start reading.")
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.top, 160)
@@ -80,6 +80,12 @@ struct BookshelfView: View {
                     }
                     .fileImporter(
                         isPresented: $viewModel.isImporting,
+                        allowedContentTypes: [UTType(filenameExtension: "cbz") ?? .data, .zip, .folder],
+                        allowsMultipleSelection: true,
+                        onCompletion: viewModel.importMangaBundles
+                    )
+                    .fileImporter(
+                        isPresented: $viewModel.isImportingEpub,
                         allowedContentTypes: [.epub],
                         allowsMultipleSelection: true,
                         onCompletion: viewModel.importBooks
@@ -195,13 +201,16 @@ struct BookshelfView: View {
         .onChange(of: pendingImportURL) { _, url in
             if let url {
                 navigationPath = NavigationPath()
-                if url.pathExtension == "colpkg" || url.pathExtension == "apkg" {
+                let ext = url.pathExtension.lowercased()
+                if ext == "colpkg" || ext == "apkg" {
                     do {
                         try AnkiManager.shared.importAnkiBackup(from: url)
                     } catch {
                         viewModel.errorMessage = error.localizedDescription
                         viewModel.shouldShowError = true
                     }
+                } else if ext == "cbz" || ext == "zip" {
+                    viewModel.importMangaBundles(result: .success([url]))
                 } else {
                     viewModel.importBook(result: .success(url))
                 }
@@ -327,10 +336,21 @@ struct BookshelfView: View {
             }
             
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    viewModel.isImporting = true
+                Menu {
+                    Button {
+                        viewModel.isImporting = true
+                    } label: {
+                        Label("Import Manga", systemImage: "book.pages")
+                    }
+                    Button {
+                        viewModel.isImportingEpub = true
+                    } label: {
+                        Label("Import EPUB", systemImage: "book")
+                    }
                 } label: {
                     Image(systemName: "plus")
+                } primaryAction: {
+                    viewModel.isImporting = true
                 }
             }
         }

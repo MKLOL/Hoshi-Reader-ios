@@ -36,12 +36,28 @@ struct AdvancedView: View {
             
             Section {
                 NavigationLink {
+                    AiSettingsView()
+                } label: {
+                    Label("ChatGPT", systemImage: "sparkles")
+                }
+                .foregroundStyle(.primary)
+            }
+
+            Section {
+                NavigationLink {
                     SyncView()
                 } label: {
                     Label("ッツ Sync", systemImage: "cloud")
                 }
                 .foregroundStyle(.primary)
-                
+
+                NavigationLink {
+                    HttpSyncSettingsView()
+                } label: {
+                    Label("Sync (HTTP)", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .foregroundStyle(.primary)
+
                 NavigationLink {
                     AnkiConnectView()
                 } label: {

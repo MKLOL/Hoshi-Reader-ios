@@ -11,13 +11,16 @@ import SwiftUI
 struct BookView: View {
     let book: BookMetadata
     let progress: Double
+    /// When set (mokuro books), shown in place of the percentage label.
+    var pageLabel: String? = nil
     var isSelected: Bool = false
-    
+
     var body: some View {
         VStack(spacing: 6) {
             BookCover(
                 book: book,
                 progress: progress,
+                pageLabel: pageLabel,
                 isSelected: isSelected
             )
             
@@ -33,6 +36,8 @@ struct BookView: View {
 struct BookCover: View {
     let book: BookMetadata
     var progress: Double? = nil
+    /// When set (mokuro books), shown in place of the percentage label.
+    var pageLabel: String? = nil
     var isSelected: Bool = false
     
     private let coverAspectRatio: CGFloat = 0.709
@@ -85,7 +90,7 @@ struct BookCover: View {
                 HStack(spacing: 8) {
                     ProgressView(value: progress)
                         .tint(.secondary.opacity(0.4))
-                    Text(String(format: "%.1f%%", progress * 100))
+                    Text(pageLabel ?? String(format: "%.1f%%", progress * 100))
                         .font(.caption2)
                         .fontWeight(.medium)
                         .monospacedDigit()
