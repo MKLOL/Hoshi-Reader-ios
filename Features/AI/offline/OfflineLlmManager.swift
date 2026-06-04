@@ -24,6 +24,7 @@
 import Foundation
 import LLM
 import UIKit
+import os
 
 /// Thrown when an on-device model can't be used; `message` is safe to show the user.
 struct OfflineLlmError: LocalizedError {
@@ -156,6 +157,27 @@ final class OfflineLlmManager {
                 message: "On-device model isn't downloaded yet. Download it in Settings → "
                     + "On-device translation."
             )
+        }
+
+        // RAM guard: don't try to load a model larger than this device can hold — otherwise iOS
+        // jetsam-kills the app with no explanation. `os_proc_available_memory()` is this app's
+        // remaining allocatable bytes before the jetsam limit; a loaded GGUF needs roughly its file
+        // size plus headroom for the KV cache + runtime. Checked BEFORE we unload the current model,
+        // so a failed big-model load doesn't also drop a working one. (Returns 0 where unavailable
+        // e.g. the simulator — skip the check then.)
+        let availableMemory = Int64(os_proc_available_memory())
+        if availableMemory > 0 {
+            let needed = model.approxSizeBytes + model.approxSizeBytes / 4
+            if needed > availableMemory {
+                let fmt = ByteCountFormatter()
+                fmt.allowedUnits = [.useGB]
+                fmt.countStyle = .memory
+                throw OfflineLlmError(
+                    message: "Not enough free memory to load \(model.displayName) on this device "
+                        + "(needs ~\(fmt.string(fromByteCount: needed)), ~\(fmt.string(fromByteCount: availableMemory)) free). "
+                        + "Try a smaller model."
+                )
+            }
         }
 
         // Free the outgoing model before loading the new one (one resident at a time). Dropping the
