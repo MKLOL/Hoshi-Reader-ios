@@ -249,7 +249,19 @@ final class OfflineLlmManager {
         // context across calls — bubbles bleed together and, once the context window fills, replies
         // come back empty. `respond(to:with:)` also appends to history, but `reset()` clears it each
         // call so it never grows.
+        //
+        // `reset()` clears `history` synchronously but schedules `core.resetContext()` (which zeroes
+        // the KV cache / token count) on a fire-and-forget `Task`. That reset can otherwise land
+        // AFTER `respond(...)` has begun encoding the new prompt — `prepareContext` appends at
+        // `pos: currentTokenCount` without zeroing it — so stale KV-context bleeds into the next
+        // translation (and, once the window fills, replies come back empty). Make the reset
+        // deterministically complete before generation: `reset()` enqueues the `resetContext()` job
+        // on `core`; `Task.yield()` lets that fire-and-forget task body run so the job is enqueued on
+        // the actor; then awaiting a cheap, read-only `core` method drains the actor's serial queue
+        // up to and including that reset before we call `respond(...)`.
         llm.reset()
+        await Task.yield()
+        _ = await llm.core.getChatTemplateHint()
 
         // Stream the reply with LLM.swift's `respond(to:with:)`: it applies the template's
         // `preprocess` internally (so an instruct/chat GGUF sees its chat framing), then hands us an

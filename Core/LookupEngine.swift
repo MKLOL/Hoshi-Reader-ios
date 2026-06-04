@@ -41,6 +41,21 @@ class LookupEngine {
     func getStyles() -> [DictionaryStyle] {
         return Array(dictQuery?.get_styles() ?? [])
     }
+
+    /// Convenience over ``getStyles()`` returning a `dictName -> css` map. The CHoshiDicts
+    /// `String(...)` interop conversions live here in one trivially type-checkable spot so the
+    /// many inline callers (popup / dictionary / manga / AI views) don't each rebuild the map and
+    /// risk type-checker timeouts in their larger surrounding expressions.
+    func getStylesMap() -> [String: String] {
+        var styles: [String: String] = [:]
+        for style in getStyles() {
+            // Route through the documented interop helper — bare `String(std.string)` doesn't
+            // reliably resolve in this file's C++ interop import graph (see CxxStringInterop.swift).
+            let name = cxxStringToSwift(style.dict_name)
+            styles[name] = cxxStringToSwift(style.styles)
+        }
+        return styles
+    }
     
     func withMediaFile<T>(dictName: String, mediaPath: String, _ body: (Data) -> T) -> T {
         let view = dictQuery!.get_media_file_view(std.string(dictName), std.string(mediaPath))

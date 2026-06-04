@@ -356,27 +356,27 @@ struct PopupView: View {
 
         var glossaries: [[String: Any]] = []
         for glossary in result.term.glossaries {
-            glossaries.append([
-                "dictionary": String(glossary.dict_name),
-                "content": String(glossary.glossary),
-                "definitionTags": String(glossary.definition_tags),
-                "termTags": String(glossary.term_tags),
-            ])
+            var entry: [String: Any] = [:]
+            entry["dictionary"] = String(glossary.dict_name)
+            entry["content"] = String(glossary.glossary)
+            entry["definitionTags"] = String(glossary.definition_tags)
+            entry["termTags"] = String(glossary.term_tags)
+            glossaries.append(entry)
         }
 
         var frequencies: [[String: Any]] = []
         for frequency in result.term.frequencies {
             var frequencyTags: [[String: Any]] = []
             for frequencyTag in frequency.frequencies {
-                frequencyTags.append([
-                    "value": Int(frequencyTag.value),
-                    "displayValue": String(frequencyTag.display_value),
-                ])
+                var tag: [String: Any] = [:]
+                tag["value"] = Int(frequencyTag.value)
+                tag["displayValue"] = String(frequencyTag.display_value)
+                frequencyTags.append(tag)
             }
-            frequencies.append([
-                "dictionary": String(frequency.dict_name),
-                "frequencies": frequencyTags,
-            ])
+            var entry: [String: Any] = [:]
+            entry["dictionary"] = String(frequency.dict_name)
+            entry["frequencies"] = frequencyTags
+            frequencies.append(entry)
         }
 
         var pitches: [[String: Any]] = []
@@ -388,24 +388,24 @@ struct PopupView: View {
                     pitchPositions.append(position)
                 }
             }
-            pitches.append([
-                "dictionary": String(pitchEntry.dict_name),
-                "pitchPositions": pitchPositions,
-            ])
+            var entry: [String: Any] = [:]
+            entry["dictionary"] = String(pitchEntry.dict_name)
+            entry["pitchPositions"] = pitchPositions
+            pitches.append(entry)
         }
 
         let rules = String(result.term.rules).split(separator: " ").map { String($0) }
 
-        return [
-            "expression": expression,
-            "reading": reading,
-            "matched": matched,
-            "deinflectionTrace": deinflectionTrace,
-            "glossaries": glossaries,
-            "frequencies": frequencies,
-            "pitches": pitches,
-            "rules": rules,
-        ]
+        var entry: [String: Any] = [:]
+        entry["expression"] = expression
+        entry["reading"] = reading
+        entry["matched"] = matched
+        entry["deinflectionTrace"] = deinflectionTrace
+        entry["glossaries"] = glossaries
+        entry["frequencies"] = frequencies
+        entry["pitches"] = pitches
+        entry["rules"] = rules
+        return entry
     }
 
     private static func buildContent(lookupResults: [LookupResult], userConfig: UserConfig) -> (content: String, lookupEntries: [[String: Any]]) {

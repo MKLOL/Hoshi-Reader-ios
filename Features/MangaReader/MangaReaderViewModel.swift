@@ -140,7 +140,12 @@ final class MangaReaderViewModel {
         persistStatistics()
     }
 
-    private func recordPageTurnForStatistics(autostartMode: StatisticsAutostartMode) {
+    /// Records a real page turn for statistics. Must be called only from the actual page-turn path
+    /// (gated on an actual page-index change in the view), never from `renderCurrentPage` — that
+    /// also runs on initial appear and on rotation, which would make `.pageturn` autostart trigger
+    /// on open/rotation rather than on the first true page turn (mirrors the EPUB reader, which only
+    /// starts/updates stats on a real scroll/page-turn event).
+    func recordPageTurnForStatistics(autostartMode: StatisticsAutostartMode) {
         guard var tracker = statistics, tracker.enabled else { return }
         // Page-turn autostart: a page turn starts tracking on the first turn. In `off` mode a page
         // turn must not auto-start (the user controls it manually); `on` mode is already tracking.
@@ -186,7 +191,6 @@ final class MangaReaderViewModel {
         }
 
         scheduleBookmark(page: index)
-        recordPageTurnForStatistics(autostartMode: userConfig.statisticsAutostartMode)
     }
 
     /// Proactively builds + caches HTML for the ±1 neighbour pages and warms their image files so
@@ -260,10 +264,7 @@ final class MangaReaderViewModel {
 
     func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool) -> Int? {
         let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
-        var dictionaryStyles: [String: String] = [:]
-        for style in LookupEngine.shared.getStyles() {
-            dictionaryStyles[String(style.dict_name)] = String(style.styles)
-        }
+        let dictionaryStyles = LookupEngine.shared.getStylesMap()
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
@@ -284,7 +285,7 @@ final class MangaReaderViewModel {
                     return p
                 }
             }
-            return String(firstResult.matched).count
+            return cxxStringToSwift(firstResult.matched).count
         }
         return nil
     }
@@ -325,6 +326,13 @@ final class MangaReaderViewModel {
             if Task.isCancelled { return }
             self.writeBookmark(page: page)
         }
+    }
+
+    /// Cancels the in-flight adjacent-page preload, if any (e.g. on reader close). The preload is a
+    /// pure cache-warming task with no user-visible state, so cancelling it just stops needless work.
+    func cancelPreload() {
+        preloadTask?.cancel()
+        preloadTask = nil
     }
 
     /// Flushes any pending debounced bookmark write immediately (e.g. on reader close).

@@ -156,16 +156,12 @@ struct DictionarySearchView: View {
             return
         }
         
-        let styles = LookupEngine.shared.getStyles()
-        constructHtml(results: results, styles: styles)
+        constructHtml(results: results, styles: LookupEngine.shared.getStylesMap())
     }
     
     private func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int,  isVertical: Bool, isFullWidth: Bool) -> Int? {
         let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
-        var dictionaryStyles: [String: String] = [:]
-        for style in LookupEngine.shared.getStyles() {
-            dictionaryStyles[String(style.dict_name)] = String(style.styles)
-        }
+        let dictionaryStyles = LookupEngine.shared.getStylesMap()
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
@@ -187,11 +183,14 @@ struct DictionarySearchView: View {
                     return p
                 }
             }
-            return String(firstResult.matched).count
+            // `String(firstResult.matched)` stops resolving here ("no exact matches in call to
+            // initializer") once the surrounding file gets heavy enough for the type-checker — the
+            // documented CHoshiDicts interop fallback (see CxxStringInterop.swift).
+            return cxxStringToSwift(firstResult.matched).count
         }
         return nil
     }
-    
+
     private func closePopups() {
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
@@ -215,101 +214,52 @@ struct DictionarySearchView: View {
         }
     }
     
-    private func constructHtml(results: [LookupResult], styles: [DictionaryStyle]) {
-        dictionaryStyles = [:]
-        for style in styles {
-            dictionaryStyles[String(style.dict_name)] = String(style.styles)
-        }
-        
-        var entries: [[String: Any]] = []
-        for result in results {
-            let expression = String(result.term.expression)
-            let reading = String(result.term.reading)
-            let matched = String(result.matched)
-            let deinflectionTrace = result.trace.reversed().map {
-                [
-                    "name": String($0.name),
-                    "description": String($0.description),
-                ]
-            }
-            
-            var glossaries: [[String: Any]] = []
-            for glossary in result.term.glossaries {
-                glossaries.append([
-                    "dictionary": String(glossary.dict_name),
-                    "content": String(glossary.glossary),
-                    "definitionTags": String(glossary.definition_tags),
-                    "termTags": String(glossary.term_tags),
-                ])
-            }
-            
-            var frequencies: [[String: Any]] = []
-            for frequency in result.term.frequencies {
-                var frequencyTags: [[String: Any]] = []
-                for frequencyTag in frequency.frequencies {
-                    frequencyTags.append([
-                        "value": Int(frequencyTag.value),
-                        "displayValue": String(frequencyTag.display_value),
-                    ])
-                }
-                frequencies.append([
-                    "dictionary": String(frequency.dict_name),
-                    "frequencies": frequencyTags,
-                ])
-            }
-            
-            var pitches: [[String: Any]] = []
-            for pitchEntry in result.term.pitches {
-                var pitchPositions: [Int] = []
-                for element in pitchEntry.pitch_positions {
-                    let position = Int(element)
-                    if !pitchPositions.contains(position) {
-                        pitchPositions.append(position)
-                    }
-                }
-                pitches.append([
-                    "dictionary": String(pitchEntry.dict_name),
-                    "pitchPositions": pitchPositions,
-                ])
-            }
-            
-            let rules = String(result.term.rules).split(separator: " ").map { String($0) }
-            
-            entries.append([
-                "expression": expression,
-                "reading": reading,
-                "matched": matched,
-                "deinflectionTrace": deinflectionTrace,
-                "glossaries": glossaries,
-                "frequencies": frequencies,
-                "pitches": pitches,
-                "rules": rules,
-            ])
-        }
-        
-        lookupEntries = entries
+    private func constructHtml(results: [LookupResult], styles: [String: String]) {
+        dictionaryStyles = styles
+
+        // Reuse the shared entry builder so the inline `[String: Any]` literals (which were large
+        // enough to risk type-checker timeouts) live in one already-fast place.
+        lookupEntries = results.map { PopupView.entryDict(from: $0) }
         
         let audioSources = (try? JSONEncoder().encode(userConfig.enabledAudioSources))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         let customCSS = (try? JSONSerialization.data(withJSONObject: userConfig.customCSS, options: .fragmentsAllowed))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
-        
+
+        // Hoist every interpolated value into a typed local so the large multiline string literal
+        // type-checks trivially. Mixed Bool/String/enum interpolations inside one big literal are
+        // exactly the kind of expression that can trip "unable to type-check in reasonable time" and
+        // cascade into spurious CHoshiDicts `String(...)` interop errors elsewhere in the file.
+        let anki = AnkiManager.shared
+        let collapseDictionaries: Bool = userConfig.collapseDictionaries
+        let compactGlossaries: Bool = userConfig.compactGlossaries
+        let showExpressionTags: Bool = userConfig.showExpressionTags
+        let harmonicFrequency: Bool = userConfig.harmonicFrequency
+        let deduplicatePitchAccents: Bool = userConfig.deduplicatePitchAccents
+        let audioEnableAutoplay: Bool = userConfig.audioEnableAutoplay
+        let audioPlaybackMode: String = userConfig.audioPlaybackMode.rawValue
+        let needsAudio: Bool = anki.needsAudio
+        let allowDupes: Bool = anki.allowDupes
+        let useAnkiConnect: Bool = anki.useAnkiConnect
+        let embedMedia: Bool = anki.embedMedia
+        let compactGlossariesAnki: Bool = anki.compactGlossaries
+
         content = """
         <style>.overlay { padding-bottom: 90px; }</style>
         <script>
-            window.collapseDictionaries = \(userConfig.collapseDictionaries);
-            window.compactGlossaries = \(userConfig.compactGlossaries);
-            window.showExpressionTags = \(userConfig.showExpressionTags);
-            window.harmonicFrequency = \(userConfig.harmonicFrequency);
-            window.deduplicatePitchAccents = \(userConfig.deduplicatePitchAccents);
+            window.collapseDictionaries = \(collapseDictionaries);
+            window.compactGlossaries = \(compactGlossaries);
+            window.showExpressionTags = \(showExpressionTags);
+            window.harmonicFrequency = \(harmonicFrequency);
+            window.deduplicatePitchAccents = \(deduplicatePitchAccents);
             window.audioSources = \(audioSources);
-            window.audioEnableAutoplay = \(userConfig.audioEnableAutoplay);
-            window.audioPlaybackMode = "\(userConfig.audioPlaybackMode.rawValue)";
-            window.needsAudio = \(AnkiManager.shared.needsAudio);
-            window.allowDupes = \(AnkiManager.shared.allowDupes);
-            window.useAnkiConnect = \(AnkiManager.shared.useAnkiConnect);
-            window.embedMedia = \(AnkiManager.shared.embedMedia);
-            window.compactGlossariesAnki = \(AnkiManager.shared.compactGlossaries);
+            window.audioEnableAutoplay = \(audioEnableAutoplay);
+            window.audioPlaybackMode = "\(audioPlaybackMode)";
+            window.needsAudio = \(needsAudio);
+            window.allowDupes = \(allowDupes);
+            window.useAnkiConnect = \(useAnkiConnect);
+            window.embedMedia = \(embedMedia);
+            window.compactGlossariesAnki = \(compactGlossariesAnki);
             window.customCSS = \(customCSS);
         </script>
         <div style="height: 50px;"></div>

@@ -63,6 +63,10 @@ struct MangaReaderView: View {
     @State private var pendingSlideIndex: Int?
     /// Bumped per page change so a stale snapshot task for a superseded turn is discarded.
     @State private var slideGeneration = 0
+    /// Safety net for a page that never reports `onPageReady` (e.g. an image that fails to load):
+    /// after a short timeout it restores opacity and clears any pending slide so the page can't get
+    /// stuck invisible / held off-screen. Cancelled the moment the page reports ready.
+    @State private var pageReadyTimeoutTask: Task<Void, Never>?
 
     init(
         metadata: BookMetadata,
@@ -156,6 +160,9 @@ struct MangaReaderView: View {
         .onDisappear {
             model.flushPendingBookmark()
             model.persistStatistics()
+            model.cancelPreload() // stop warming adjacent pages once we're leaving the reader
+            pageReadyTimeoutTask?.cancel()
+            pageReadyTimeoutTask = nil
             aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
         }
     }
@@ -316,6 +323,10 @@ struct MangaReaderView: View {
     /// with a brief opacity dip — never a stuck state).
     private func beginPageTurn(from oldIndex: Int, to newIndex: Int) {
         model.closePopups()
+        // Real page turn: this only fires on an actual page-index change (driven by
+        // `onChange(of: model.pageIndex)`), so `.pageturn` autostart and the stats update happen
+        // here — not in `renderCurrentPage`, which also runs on initial appear and on rotation.
+        model.recordPageTurnForStatistics(autostartMode: userConfig.statisticsAutostartMode)
         slideGeneration += 1
         let generation = slideGeneration
         let direction: NavigationDirection = newIndex >= oldIndex ? .forward : .backward
@@ -347,12 +358,33 @@ struct MangaReaderView: View {
                 withAnimation(.easeInOut(duration: 0.12)) { pageOpacity = 0 }
                 model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
             }
+            // Guard against a page that never reports ready (failed image load, etc.): the snapshot
+            // path holds the WebView off-screen until `onPageReady`, and the no-snapshot path leaves
+            // `pageOpacity` at 0 — either would leave the page invisible/stuck without this timeout.
+            schedulePageReadyTimeout(generation: generation)
+        }
+    }
+
+    /// Backstop for a turn whose `onPageReady` never arrives: after a short delay, restore opacity
+    /// and clear any pending slide so the page returns to a visible resting state. No-op if a newer
+    /// turn has superseded this one (the slide generation moved on).
+    private func schedulePageReadyTimeout(generation: Int) {
+        pageReadyTimeoutTask?.cancel()
+        pageReadyTimeoutTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled { return }
+            guard generation == slideGeneration else { return }
+            clearSlide()
+            withAnimation(.easeInOut(duration: 0.18)) { pageOpacity = 1 }
         }
     }
 
     /// Invoked when the WebView finishes rendering a page. Drives the slide for a pending turn, or
     /// restores opacity for the no-snapshot fallback path.
     private func onPageReady() {
+        // The page drew — the stuck-page backstop is no longer needed.
+        pageReadyTimeoutTask?.cancel()
+        pageReadyTimeoutTask = nil
         if let pending = pendingSlideIndex, slideSnapshot != nil {
             // The slide only starts once the page it is waiting on has actually drawn.
             guard pending == model.pageIndex else { return }

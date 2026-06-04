@@ -241,11 +241,13 @@ struct PopupWebView: UIViewRepresentable {
             webView.callAsyncJavaScript(
                 """
                 window.dictionaryStyles = dictionaryStyles;
+                window.lookupEntries = lookupEntries;
                 window.entryCount = entryCount;
                 window.renderPopup();
                 """,
                 arguments: [
                     "dictionaryStyles": parent.dictionaryStyles,
+                    "lookupEntries": parent.lookupEntries,
                     "entryCount": parent.lookupEntries.count,
                 ],
                 in: nil,
