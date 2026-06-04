@@ -1,5 +1,5 @@
 {
-  "originHash" : "315ee0bd4f8d0ef8f31decd69e748d00cd8898d63bd0c332834195f6837f7acf",
+  "originHash" : "07be10fa4e6750845ab693d9f8b170221d87261e80c1dc821c22282b11f6cf7a",
   "pins" : [
     {
       "identity" : "aexml",
@@ -17,6 +17,24 @@
       "state" : {
         "branch" : "main",
         "revision" : "1198201a91b47b3dbddb5d69552bf9daeacb2790"
+      }
+    },
+    {
+      "identity" : "llm.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/eastriverlee/LLM.swift",
+      "state" : {
+        "revision" : "427f3b8957a40982500abc8d35ccff8b83ec56a4",
+        "version" : "2.1.0"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-syntax.git",
+      "state" : {
+        "revision" : "4799286537280063c85a32f09884cfbca301b1a1",
+        "version" : "602.0.0"
       }
     },
     {
