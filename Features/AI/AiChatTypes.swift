@@ -14,14 +14,14 @@ import Foundation
 
 /// Image bytes attached to a ChatGPT exchange (screenshot translation), base64 without the
 /// `data:` prefix.
-struct AiChatImage: Codable, Equatable {
+nonisolated struct AiChatImage: Codable, Equatable {
     let mimeType: String
     let base64Data: String
 }
 
 /// One ChatGPT exchange about a manga bubble or screenshot. `timestampSeconds` is in the same
 /// Apple-reference-date epoch the rest of the app's sidecar files use.
-struct AiChatEntry: Codable, Equatable, Identifiable {
+nonisolated struct AiChatEntry: Codable, Equatable, Identifiable {
     let bubbleText: String
     let prompt: String
     let model: String
@@ -66,7 +66,7 @@ struct AiChatEntry: Codable, Equatable, Identifiable {
 }
 
 /// The per-manga ChatGPT history, newest entries last.
-struct AiChatLog: Codable, Equatable {
+nonisolated struct AiChatLog: Codable, Equatable {
     var entries: [AiChatEntry]
 
     init(entries: [AiChatEntry] = []) { self.entries = entries }
@@ -80,7 +80,7 @@ struct AiChatLog: Codable, Equatable {
 }
 
 /// Compact Yomitan-style lookup context stored beside a ChatGPT exchange.
-struct AiChatDictionaryLookup: Codable, Equatable {
+nonisolated struct AiChatDictionaryLookup: Codable, Equatable {
     let query: String
     var results: [AiChatDictionaryLookupResult]
 
@@ -98,7 +98,7 @@ struct AiChatDictionaryLookup: Codable, Equatable {
     }
 }
 
-struct AiChatDictionaryLookupResult: Codable, Equatable {
+nonisolated struct AiChatDictionaryLookupResult: Codable, Equatable {
     let expression: String
     let reading: String
     let matched: String
@@ -138,19 +138,19 @@ struct AiChatDictionaryLookupResult: Codable, Equatable {
     }
 }
 
-struct AiChatDeinflectionStep: Codable, Equatable {
+nonisolated struct AiChatDeinflectionStep: Codable, Equatable {
     let name: String
     let description: String
 }
 
-struct AiChatGlossary: Codable, Equatable {
+nonisolated struct AiChatGlossary: Codable, Equatable {
     let dictionary: String
     let content: String
     let definitionTags: String
     let termTags: String
 }
 
-struct AiChatFrequencyGroup: Codable, Equatable {
+nonisolated struct AiChatFrequencyGroup: Codable, Equatable {
     let dictionary: String
     var frequencies: [AiChatFrequency]
 
@@ -168,12 +168,12 @@ struct AiChatFrequencyGroup: Codable, Equatable {
     }
 }
 
-struct AiChatFrequency: Codable, Equatable {
+nonisolated struct AiChatFrequency: Codable, Equatable {
     let value: Int
     let displayValue: String
 }
 
-struct AiChatPitchGroup: Codable, Equatable {
+nonisolated struct AiChatPitchGroup: Codable, Equatable {
     let dictionary: String
     var pitchPositions: [Int]
 

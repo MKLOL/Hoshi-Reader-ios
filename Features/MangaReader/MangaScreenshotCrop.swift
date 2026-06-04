@@ -18,13 +18,13 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// Minimum side of a usable crop, in both host and image pixels (matches Android).
-let mangaScreenshotCropMinSizePx = 32
+nonisolated let mangaScreenshotCropMinSizePx = 32
 /// Output crops are clamped to these limits before PNG encode (matches Android).
-private let mangaScreenshotOutputMaxEdgePx = 2048
-private let mangaScreenshotOutputMaxAreaPx = 4_000_000
+private nonisolated let mangaScreenshotOutputMaxEdgePx = 2048
+private nonisolated let mangaScreenshotOutputMaxAreaPx = 4_000_000
 
 /// A drag rectangle in host (on-screen) pixels.
-struct MangaScreenshotCropRect: Equatable {
+nonisolated struct MangaScreenshotCropRect: Equatable {
     let left: Int
     let top: Int
     let right: Int
@@ -36,7 +36,7 @@ struct MangaScreenshotCropRect: Equatable {
 
 /// Normalises a raw drag (start/end points) into a clamped, ordered rectangle inside the
 /// container, rejecting anything smaller than `minSize` on either side.
-func normalizedMangaScreenshotCropRect(
+nonisolated func normalizedMangaScreenshotCropRect(
     startX: CGFloat,
     startY: CGFloat,
     endX: CGFloat,
@@ -56,7 +56,7 @@ func normalizedMangaScreenshotCropRect(
 
 /// Source-image crop in intrinsic manga image pixels (as returned by the page script's
 /// `imageCropFromHostRect`).
-struct MangaImageCropRect: Equatable {
+nonisolated struct MangaImageCropRect: Equatable {
     let left: Int
     let top: Int
     let right: Int
@@ -69,7 +69,7 @@ struct MangaImageCropRect: Equatable {
 
 /// Parses the JSON the page script's `imageCropFromHostRect` returns, returning `nil` when the
 /// crop is missing or below the minimum size.
-func parseMangaImageCropRect(_ json: [String: Any]?) -> MangaImageCropRect? {
+nonisolated func parseMangaImageCropRect(_ json: [String: Any]?) -> MangaImageCropRect? {
     guard let json,
           let left = intValue(json["left"]),
           let top = intValue(json["top"]),
@@ -88,7 +88,7 @@ func parseMangaImageCropRect(_ json: [String: Any]?) -> MangaImageCropRect? {
 
 /// Crops the `imageFile` to `crop` (in source-image pixels) and returns PNG bytes. Uses a
 /// CGImageSource so a large scan is decoded at a reduced size where possible rather than fully.
-func cropMangaImageFilePng(imageFile: URL, crop: MangaImageCropRect) -> Data? {
+nonisolated func cropMangaImageFilePng(imageFile: URL, crop: MangaImageCropRect) -> Data? {
     guard let source = CGImageSourceCreateWithURL(imageFile as CFURL, nil) else { return nil }
     guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
           let pixelWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
@@ -149,13 +149,13 @@ func cropMangaImageFilePng(imageFile: URL, crop: MangaImageCropRect) -> Data? {
 }
 
 /// Builds an `AiChatImage` from PNG bytes for the screenshot-translation hook.
-func mangaScreenshotAiImage(pngData: Data) -> AiChatImage {
+nonisolated func mangaScreenshotAiImage(pngData: Data) -> AiChatImage {
     AiChatImage(mimeType: "image/png", base64Data: pngData.base64EncodedString())
 }
 
 // MARK: - Private helpers
 
-private func decodeImage(source: CGImageSource, thumbnailMaxEdge: Int, imageMaxEdge: Int) -> CGImage? {
+private nonisolated func decodeImage(source: CGImageSource, thumbnailMaxEdge: Int, imageMaxEdge: Int) -> CGImage? {
     if thumbnailMaxEdge >= imageMaxEdge {
         // Full-size decode requested — use the primary image directly.
         return CGImageSourceCreateImageAtIndex(source, 0, nil)
@@ -169,7 +169,7 @@ private func decodeImage(source: CGImageSource, thumbnailMaxEdge: Int, imageMaxE
         ?? CGImageSourceCreateImageAtIndex(source, 0, nil)
 }
 
-private func outputDownsampleScale(width: Int, height: Int) -> Double {
+private nonisolated func outputDownsampleScale(width: Int, height: Int) -> Double {
     if width <= 0 || height <= 0 { return 1 }
     let area = Double(width) * Double(height)
     let edge = Double(max(width, height))
@@ -181,7 +181,7 @@ private func outputDownsampleScale(width: Int, height: Int) -> Double {
     return scale
 }
 
-private func downsample(_ image: CGImage, scale: Double) -> CGImage? {
+private nonisolated func downsample(_ image: CGImage, scale: Double) -> CGImage? {
     if scale >= 0.999 { return image }
     let targetWidth = max(mangaScreenshotCropMinSizePx, Int((Double(image.width) * scale).rounded()))
     let targetHeight = max(mangaScreenshotCropMinSizePx, Int((Double(image.height) * scale).rounded()))
@@ -203,7 +203,7 @@ private func downsample(_ image: CGImage, scale: Double) -> CGImage? {
     return context.makeImage() ?? image
 }
 
-private func pngData(from image: CGImage) -> Data? {
+private nonisolated func pngData(from image: CGImage) -> Data? {
     let data = NSMutableData()
     guard let destination = CGImageDestinationCreateWithData(
         data as CFMutableData,
@@ -218,11 +218,11 @@ private func pngData(from image: CGImage) -> Data? {
     return data as Data
 }
 
-private func clampInt(_ value: Int, _ lower: Int, _ upper: Int) -> Int {
+private nonisolated func clampInt(_ value: Int, _ lower: Int, _ upper: Int) -> Int {
     min(max(value, lower), upper)
 }
 
-private func intValue(_ value: Any?) -> Int? {
+private nonisolated func intValue(_ value: Any?) -> Int? {
     if let n = value as? NSNumber { return n.intValue }
     if let i = value as? Int { return i }
     if let d = value as? Double { return Int(d) }

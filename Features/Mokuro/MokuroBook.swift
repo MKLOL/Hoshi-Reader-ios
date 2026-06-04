@@ -14,7 +14,7 @@ import Foundation
 /// The manga counterpart of an EPUB document. It deliberately stays a plain, reader-agnostic
 /// model so the manga reader can render it however it likes (currently a `WKWebView` of
 /// absolutely-positioned, selectable OCR text boxes).
-struct MokuroBook: Equatable {
+nonisolated struct MokuroBook: Equatable {
     let title: String
     let pages: [MokuroPage]
     /// Book-root-relative path of the image used as the bookshelf cover, if any.
@@ -22,7 +22,7 @@ struct MokuroBook: Equatable {
 }
 
 /// A single manga page: one background image plus its OCR text-box overlays.
-struct MokuroPage: Codable, Equatable {
+nonisolated struct MokuroPage: Codable, Equatable {
     /// Zero-based page index within the volume. Doubles as the reader's bookmark position.
     let index: Int
     /// Book-root-relative path to the page image.
@@ -34,7 +34,7 @@ struct MokuroPage: Codable, Equatable {
 
 /// One OCR text region, positioned in image-pixel coordinates relative to the page image.
 /// The manga reader scales these to the rendered page size.
-struct MokuroTextBox: Codable, Equatable {
+nonisolated struct MokuroTextBox: Codable, Equatable {
     let left: Int
     let top: Int
     let width: Int

@@ -123,13 +123,15 @@ nonisolated struct HttpSyncPayloadCodec {
         guard try await transport.downloadToFile(key: SyncKeys.payloadZip(syncId), targetURL: zipURL) != nil else {
             throw HttpSyncError("Payload zip missing for \(syncId) (manifest existed).")
         }
-        // Offload sha verification + unzip so a large download never blocks the UI.
+        // Offload sha verification + unzip so a large download never blocks the UI. Reference
+        // FileManager.default inside the closure rather than capturing the local (non-Sendable)
+        // instance, so the detached closure stays Sendable.
         try await Task.detached(priority: .utility) {
             let actualSha = try Self.sha256OfFile(zipURL)
             if actualSha != manifest.sha256 {
                 throw HttpSyncError("Payload zip for \(syncId) failed sha256 check (expected \(manifest.sha256), got \(actualSha)).")
             }
-            try fileManager.createDirectory(at: targetDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
             do {
                 try ArchiveExtractor.unzip(zipURL, to: targetDir)
             } catch {

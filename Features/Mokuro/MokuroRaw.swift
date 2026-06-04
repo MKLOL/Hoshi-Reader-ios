@@ -14,7 +14,7 @@ import Foundation
 
 /// Top-level `mokuro.json` document. Unknown fields are ignored (Codable drops them) so newer
 /// mokuro versions keep parsing; only the fields the reader needs are modelled here.
-struct RawMokuro: Decodable {
+nonisolated struct RawMokuro: Decodable {
     let title: String?
     let volume: String?
     let pages: [RawMokuroPage]
@@ -31,7 +31,7 @@ struct RawMokuro: Decodable {
     }
 }
 
-struct RawMokuroPage: Decodable {
+nonisolated struct RawMokuroPage: Decodable {
     let imgWidth: Int
     let imgHeight: Int
     let imgPath: String
@@ -53,7 +53,7 @@ struct RawMokuroPage: Decodable {
     }
 }
 
-struct RawMokuroBlock: Decodable {
+nonisolated struct RawMokuroBlock: Decodable {
     /// `[xMin, yMin, xMax, yMax]` in image pixels.
     let box: [Double]
     let vertical: Bool
@@ -79,7 +79,7 @@ struct RawMokuroBlock: Decodable {
 extension RawMokuro {
     /// Builds a `MokuroBook`. `fallbackTitle` is used when the document has no `volume`/`title`
     /// (the importer passes the book directory name). Returns `nil` if there are no pages.
-    func toMokuroBook(fallbackTitle: String) -> MokuroBook? {
+    nonisolated func toMokuroBook(fallbackTitle: String) -> MokuroBook? {
         let mapped = pages.enumerated().map { index, page in page.toMokuroPage(index: index) }
         guard !mapped.isEmpty else { return nil }
         let resolvedTitle = volume?.nonBlank
@@ -94,7 +94,7 @@ extension RawMokuro {
 }
 
 extension RawMokuroPage {
-    func toMokuroPage(index: Int) -> MokuroPage {
+    nonisolated func toMokuroPage(index: Int) -> MokuroPage {
         MokuroPage(
             index: index,
             imagePath: imgPath,
@@ -106,7 +106,7 @@ extension RawMokuroPage {
 }
 
 extension RawMokuroBlock {
-    func toMokuroTextBox() -> MokuroTextBox? {
+    nonisolated func toMokuroTextBox() -> MokuroTextBox? {
         guard box.count >= 4 else { return nil }
         // mokuro stores box as [xMin, yMin, xMax, yMax] in image-pixel coordinates.
         let xMin = box[0], yMin = box[1], xMax = box[2], yMax = box[3]
@@ -126,7 +126,7 @@ extension RawMokuroBlock {
 
 private extension String {
     /// Kotlin `String.ifBlank { null }`: nil if empty or all-whitespace.
-    var nonBlank: String? {
+    nonisolated var nonBlank: String? {
         trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
     }
 }
@@ -144,13 +144,13 @@ private extension String {
 /// The result depends only on `mokuroFs` — not box size, orientation, or line count — so two
 /// bubbles with the same mokuro-reported glyph height reveal at the same OCR text size. Ported
 /// verbatim from the Android `clampMokuroFontSize` (READABLE_TARGET_PX = 30, BOOST_STRENGTH = 0.5).
-func clampMokuroFontSize(mokuroFontSize: Double) -> Int {
+nonisolated func clampMokuroFontSize(mokuroFontSize: Double) -> Int {
     let mokuroFs = max(1, Int(mokuroFontSize))
     let headroom = max(0.0, MokuroFontTuning.readableTargetPx - Double(mokuroFs))
     return max(1, Int(Double(mokuroFs) + headroom * MokuroFontTuning.boostStrength))
 }
 
-enum MokuroFontTuning {
+nonisolated enum MokuroFontTuning {
     /// Target drawn-glyph height (image pixels) considered comfortably tappable.
     static let readableTargetPx = 30.0
     static let boostStrength = 0.5

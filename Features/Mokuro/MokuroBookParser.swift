@@ -19,7 +19,7 @@ import Foundation
 /// the same `mokuro.json` more than once in quick succession (once when the bookshelf reads
 /// metadata, once when the reader loads), so coalescing those into one parse + decode avoids
 /// re-reading a large sidecar. The cache clears automatically when the file changes.
-final class MokuroBookParser: @unchecked Sendable {
+nonisolated final class MokuroBookParser: @unchecked Sendable {
     /// Shared instance so the bookshelf and reader share one cache entry.
     static let shared = MokuroBookParser()
 

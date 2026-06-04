@@ -53,23 +53,23 @@ final class MangaReaderViewModel {
             return
         }
         let root = booksDir.appendingPathComponent(folder)
-        // Parse off the main actor; return a Sendable Result (the error reduced to its message
-        // so no non-Sendable `Error` existential crosses the task boundary).
-        let parsed: Result<MokuroBook, String> = await Task.detached(priority: .userInitiated) {
-            do { return .success(try MokuroBookParser.shared.parse(bookRoot: root)) }
-            catch { return .failure(error.localizedDescription) }
+        // Parse off the main actor; return a Sendable tuple (the error reduced to its message so
+        // no non-Sendable `Error` existential crosses the task boundary; `String` can't be a
+        // `Result.Failure` since it isn't `Error`).
+        let parsed: (book: MokuroBook?, error: String?) = await Task.detached(priority: .userInitiated) {
+            do { return (try MokuroBookParser.shared.parse(bookRoot: root), nil) }
+            catch { return (nil, error.localizedDescription) }
         }.value
 
-        switch parsed {
-        case .success(let parsedBook):
+        if let parsedBook = parsed.book {
             book = parsedBook
             bookRoot = root
             controller.bookRootForScheme = root
             let restored = BookStorage.loadBookmark(root: root)?.chapterIndex ?? 0
             pageIndex = max(0, min(restored, max(0, parsedBook.pages.count - 1)))
             isReady = true
-        case .failure(let message):
-            errorMessage = message
+        } else {
+            errorMessage = parsed.error ?? "Could not parse the manga."
         }
     }
 

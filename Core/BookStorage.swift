@@ -9,7 +9,7 @@
 import EPUBKit
 import Foundation
 
-enum FileNames: Sendable {
+nonisolated enum FileNames: Sendable {
     static let metadata = "metadata.json"
     static let bookmark = "bookmark.json"
     static let bookinfo = "bookinfo.json"
