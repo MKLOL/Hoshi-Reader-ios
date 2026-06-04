@@ -110,6 +110,7 @@ struct PopupWebView: UIViewRepresentable {
     var dictionaryStyles: [String: String] = [:]
     var lookupEntries: [[String: Any]] = []
     var onMine: (([String: String]) async -> Bool)? = nil
+    var onLookupRedirect: ((String) -> [[String: Any]])? = nil
     var onTextSelected: ((SelectionData) -> Int?)? = nil
     var onTapOutside: (() -> Void)? = nil
     var onSwipeDismiss: (() -> Void)? = nil
@@ -172,6 +173,7 @@ struct PopupWebView: UIViewRepresentable {
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "mineEntry")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "duplicateCheck")
         config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "getEntry")
+        config.userContentController.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: "lookupRedirect")
         config.setURLSchemeHandler(AudioHandler(), forURLScheme: "audio")
         config.setURLSchemeHandler(ImageHandler(), forURLScheme: "image")
         config.mediaTypesRequiringUserActionForPlayback = []
@@ -213,6 +215,7 @@ struct PopupWebView: UIViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "mineEntry", contentWorld: .page)
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "duplicateCheck", contentWorld: .page)
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "getEntry", contentWorld: .page)
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "lookupRedirect", contentWorld: .page)
     }
     
     class Coordinator: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKNavigationDelegate {
@@ -221,9 +224,17 @@ struct PopupWebView: UIViewRepresentable {
         var wasLoaded: Bool = false
         var clearSelection: Bool = false
         let id = UUID()
-        
+        // Currently displayed entries. Seeded from the initial lookup and replaced in place when an
+        // in-popup redirect resolves new entries, so `getEntry` always serves the live entry set
+        // (the popup.js back/forward history keeps DOM snapshots, not the native store).
+        private var entries: [[String: Any]]? = nil
+
         init(parent: PopupWebView) {
             self.parent = parent
+        }
+
+        private func currentEntries() -> [[String: Any]] {
+            entries ?? parent.lookupEntries
         }
         
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -251,7 +262,21 @@ struct PopupWebView: UIViewRepresentable {
                 return (await AnkiManager.shared.checkDuplicate(word: word), nil)
             }
             if message.name == "getEntry", let index = message.body as? Int {
-                return (parent.lookupEntries[index], nil)
+                let entries = currentEntries()
+                guard index >= 0, index < entries.count else {
+                    return (nil, nil)
+                }
+                return (entries[index], nil)
+            }
+            if message.name == "lookupRedirect", let query = message.body as? String {
+                let redirected = parent.onLookupRedirect?(query) ?? []
+                guard !redirected.isEmpty else {
+                    return (0, nil)
+                }
+                // Replace the native entry store so the subsequent `getEntry` calls triggered by
+                // popup.js `renderPopup` serve the redirected entries.
+                entries = redirected
+                return (redirected.count, nil)
             }
             return (nil, nil)
         }

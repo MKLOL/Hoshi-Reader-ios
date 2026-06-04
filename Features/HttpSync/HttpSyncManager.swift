@@ -25,6 +25,10 @@ final class HttpSyncManager {
 
     /// True while a `syncNow()` reconcile is in flight (drives the settings screen spinner).
     private(set) var isSyncing = false
+    /// Live phased progress for the in-flight reconcile, or nil when idle. Updated on the main
+    /// actor as the reconciler streams `HttpSyncProgress` updates; drives the settings screen's
+    /// linear progress bar + phase label. Mirrors Android's `SyncStatus.Running(progress)`.
+    private(set) var progress: HttpSyncProgress?
     /// One-line summary of the last successful reconcile, or nil if none yet.
     private(set) var lastStatus: String?
     /// Last fatal error string (e.g. not configured / transport build failure), or nil.
@@ -74,15 +78,29 @@ final class HttpSyncManager {
 
         isSyncing = true
         lastError = nil
-        defer { isSyncing = false }
+        progress = HttpSyncProgress(
+            message: "Starting sync",
+            detail: "Preparing to compare this device with the server."
+        )
+        defer {
+            isSyncing = false
+            progress = nil
+        }
 
         // Network IO runs off-thread inside URLSession's async methods; the heavy file work (zip,
         // sha256) is offloaded to a nonisolated payload codec. The orchestration awaits here on
         // the main actor, which keeps the @Observable state and shelf/metadata file writes simple
         // and race-free under the project's MainActor-default isolation.
+        //
+        // The reconciler streams phased progress through `onProgress`; we hop back onto the main
+        // actor to update the @Observable `progress` so the settings screen's bar/label tracks it.
         let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         let reconciler = HttpSyncReconciler(transport: transport)
-        var result = await reconciler.syncOnce(sinceCursor: cursor)
+        var result = await reconciler.syncOnce(sinceCursor: cursor) { [weak self] update in
+            await MainActor.run { self?.progress = update }
+        }
+
+        progress = HttpSyncProgress(message: "Syncing ChatGPT settings", detail: "Checking shared model and prompt settings.")
 
         // App-level AI chat settings LWW — drives the non-Sendable AiChatSettingsStore. One GET +
         // maybe one PUT; cheap.

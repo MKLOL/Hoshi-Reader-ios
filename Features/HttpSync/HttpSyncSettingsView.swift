@@ -54,6 +54,10 @@ struct HttpSyncSettingsView: View {
                     }
                 }
                 .disabled(manager.isSyncing || !store.isConfigured)
+
+                if manager.isSyncing, let progress = manager.progress {
+                    syncProgressView(progress)
+                }
             } footer: {
                 statusFooter
             }
@@ -84,5 +88,28 @@ struct HttpSyncSettingsView: View {
         } else if !store.isConfigured {
             Text("Add a base URL and token to enable sync.")
         }
+    }
+
+    /// Live phased progress shown while a "Sync now" reconcile runs: a linear bar (determinate when
+    /// the current phase has a counter, indeterminate otherwise) plus the phase label and an
+    /// optional finer-grained detail line. Mirrors Android's `SyncProgressView`.
+    @ViewBuilder
+    private func syncProgressView(_ progress: HttpSyncProgress) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let fraction = progress.fraction {
+                ProgressView(value: fraction)
+            } else {
+                ProgressView().progressViewStyle(.linear)
+            }
+            Text(progress.message)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+            if let detail = progress.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }

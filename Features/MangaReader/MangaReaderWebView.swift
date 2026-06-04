@@ -54,6 +54,21 @@ final class MangaWebViewController {
         ) { _, _ in }
     }
 
+    /// Snapshots the currently-rendered page into a `UIImage` so it can be slid off-screen while
+    /// the WebView reloads to the next page underneath (the directional page-turn animation). Uses
+    /// `takeSnapshot`, which captures the out-of-process WebKit content the way `layer.render`
+    /// cannot. Returns `nil` when the WebView is not laid out or the snapshot fails — the caller
+    /// then swaps the page without a slide.
+    func snapshotCurrentPage() async -> UIImage? {
+        guard let webView else { return nil }
+        let bounds = webView.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        let config = WKSnapshotConfiguration()
+        config.rect = bounds
+        config.afterScreenUpdates = false
+        return try? await webView.takeSnapshot(configuration: config)
+    }
+
     /// Maps a host-pixel drag rectangle to an image-pixel crop using the page script.
     func imageCropRect(for rect: MangaScreenshotCropRect) async -> MangaImageCropRect? {
         guard let webView else { return nil }

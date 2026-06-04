@@ -385,6 +385,36 @@ a {
     line-height: 1;
 }
 
+/* In-popup redirect history (back/forward) controls. Only present in the DOM while
+   navigation history exists (see updateNavControls in popup.js). */
+.popup-nav-controls {
+    position: fixed;
+    bottom: 6px;
+    right: 6px;
+    z-index: 700;
+    display: flex;
+    gap: 2px;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(128, 128, 128, 0.18);
+    -webkit-user-select: none;
+}
+
+.popup-nav-button {
+    border: none;
+    background: transparent;
+    color: var(--text-color);
+    font-size: 22px;
+    line-height: 1;
+    padding: 2px 10px;
+    opacity: 0.7;
+    -webkit-user-select: none;
+}
+
+.popup-nav-button:disabled {
+    opacity: 0.2;
+}
+
 .pitch-list {
     margin: 3px 0 0 0;
     font-size: 13px;

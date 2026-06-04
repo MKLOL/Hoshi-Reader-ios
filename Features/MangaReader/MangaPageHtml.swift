@@ -23,7 +23,10 @@
 
 import Foundation
 
-enum MangaPageHtml {
+/// Pure, `nonisolated` page-HTML builder so the adjacent-page preloader can build neighbour
+/// pages off the main actor (see `MangaPageRenderCache`). Has no MainActor dependencies — it
+/// turns a `MokuroPage` + a few primitives into an HTML string.
+nonisolated enum MangaPageHtml {
     /// Base URL the per-page HTML is loaded against; the custom scheme handler serves
     /// `hoshi-img://manga/<relative image path>` requests off disk.
     static let baseURLString = "hoshi-img://manga/"

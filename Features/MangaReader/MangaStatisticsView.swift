@@ -53,6 +53,7 @@ struct MangaStatisticsView: View {
                         Text("Statistics can also be toggled in Settings → Advanced → Statistics.")
                     }
                 } else if let statistics {
+                    autostartSection
                     statisticsSection(
                         title: "Session",
                         stat: statistics.session,
@@ -90,6 +91,7 @@ struct MangaStatisticsView: View {
             statRow("Pace", "\(stat.lastReadingSpeed.formatted(.number.grouping(.never))) pages / h")
             statRow("Reading Time", Duration.seconds(stat.readingTime).formatted())
             if showToggle {
+                statRow("Pages Remaining", "\(remainingPages.formatted(.number.grouping(.never)))")
                 statRow(
                     "Time to Finish",
                     Duration.seconds(secondsRemaining(speed: stat.lastReadingSpeed)).formatted()
@@ -110,6 +112,22 @@ struct MangaStatisticsView: View {
         }
     }
 
+    /// Autostart selector — mirrors Android, which reads `statisticsAutostartMode` per reader.
+    /// Off = never auto-track, Page Turn = start on the first page turn, On = start on open.
+    @ViewBuilder
+    private var autostartSection: some View {
+        @Bindable var userConfig = userConfig
+        Section {
+            Picker("Autostart", selection: $userConfig.statisticsAutostartMode) {
+                ForEach(StatisticsAutostartMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+        } footer: {
+            Text("When to begin tracking automatically. You can also start or pause from the Session controls.")
+        }
+    }
+
     private func statRow(_ label: String, _ value: String) -> some View {
         HStack {
             Text(label)
@@ -118,9 +136,13 @@ struct MangaStatisticsView: View {
         }
     }
 
+    /// Pages left to the end of the volume from the current page (never negative).
+    private var remainingPages: Int {
+        max(model.pageCount - (model.pageIndex + 1), 0)
+    }
+
     private func secondsRemaining(speed: Int) -> Double {
         guard speed > 0 else { return 0 }
-        let remaining = max(model.pageCount - (model.pageIndex + 1), 0)
-        return Double(remaining) / (Double(speed) / 3600.0)
+        return Double(remainingPages) / (Double(speed) / 3600.0)
     }
 }

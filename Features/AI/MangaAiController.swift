@@ -23,7 +23,10 @@ import CHoshiDicts
 final class MangaAiController {
     enum State: Equatable {
         case idle
-        case loading(bubbleText: String)
+        /// `onDevice` is true when the active engine is the local LLM rather than the ChatGPT API, so
+        /// the popup can show an "On-device translation" header + live tok/s. Mirrors Android
+        /// `AiChatUiState.onDevice`.
+        case loading(bubbleText: String, onDevice: Bool)
         case result(AiChatEntry)
         case error(String)
 
@@ -31,10 +34,16 @@ final class MangaAiController {
         var bubbleText: String {
             switch self {
             case .idle: return ""
-            case .loading(let text): return text
+            case .loading(let text, _): return text
             case .result(let entry): return entry.bubbleText
             case .error: return ""
             }
+        }
+
+        /// True when the in-flight (loading) request is being served by the on-device model.
+        var isOnDevice: Bool {
+            if case .loading(_, let onDevice) = self { return onDevice }
+            return false
         }
     }
 
@@ -108,7 +117,7 @@ final class MangaAiController {
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
         cancel()
-        state = .loading(bubbleText: trimmed)
+        state = .loading(bubbleText: trimmed, onDevice: false)
         task = Task { [client] in
             do {
                 let response = try await client.complete(
@@ -142,7 +151,7 @@ final class MangaAiController {
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
         cancel()
-        state = .loading(bubbleText: trimmed)
+        state = .loading(bubbleText: trimmed, onDevice: true)
         task = Task { [offlineManager] in
             do {
                 let result = try await offlineManager.translate(
@@ -190,7 +199,8 @@ final class MangaAiController {
         let label = "Screenshot translation"
 
         cancel()
-        state = .loading(bubbleText: label)
+        // Vision crops always use the cloud (the on-device models aren't multimodal).
+        state = .loading(bubbleText: label, onDevice: false)
         task = Task { [client] in
             do {
                 let response = try await client.completeImage(

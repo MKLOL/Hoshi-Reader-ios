@@ -120,6 +120,21 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         config.delegateClass = ShortcutSceneDelegate.self
         return config
     }
+
+    /// The system relaunched us (or woke a suspended app) to deliver events for a background
+    /// `URLSession` — namely the on-device model download (see `ModelDownloadManager`). Hand the
+    /// completion handler to the manager, which recreates the session under the same identifier so
+    /// the delegate receives the queued events, then calls this handler once they've all been
+    /// delivered (`urlSessionDidFinishEvents`). Called on the main thread by UIKit.
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        // `UIApplicationDelegate` is `@MainActor`, so this runs on the main actor — the manager's
+        // (main-actor) handler store is reachable directly.
+        ModelDownloadManager.shared.setBackgroundCompletionHandler(
+            completionHandler, forIdentifier: identifier
+        )
+    }
 }
 
 class ShortcutSceneDelegate: NSObject, UIWindowSceneDelegate {

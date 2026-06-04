@@ -45,6 +45,35 @@ protocol AiSettingsSyncing {
     func applyFromSync(model: String, promptText: String, imagePromptText: String, remoteLastEditedAt: String) -> Bool
 }
 
+// MARK: - Progress
+
+/// One phased progress update emitted by the reconciler while a manual "Sync now" runs. Mirrors
+/// Android's `HttpSyncProgress`: a top-level `message` (the phase), an optional finer-grained
+/// `detail`, and an optional `completed`/`total` pair so the UI can render a determinate bar.
+///
+/// `Sendable` so it can cross the reconcile's `await` boundaries back to the main-actor `onProgress`
+/// callback (the manager mirrors it onto its `@Observable` `progress`).
+struct HttpSyncProgress: Sendable, Equatable {
+    var message: String
+    var detail: String?
+    var completed: Int?
+    var total: Int?
+
+    init(message: String, detail: String? = nil, completed: Int? = nil, total: Int? = nil) {
+        self.message = message
+        self.detail = detail
+        self.completed = completed
+        self.total = total
+    }
+
+    /// Fraction in `0...1` for a determinate bar, or `nil` (indeterminate) when no counter is set.
+    /// Matches Android: `(completed + 1) / total` so the final item reads as 100%.
+    var fraction: Double? {
+        guard let completed, let total, total > 0 else { return nil }
+        return min(max(Double(completed + 1) / Double(total), 0), 1)
+    }
+}
+
 // MARK: - Result
 
 /// Outcome of one reconcile pass. Granular counts so the UI can show a one-line summary.
@@ -104,12 +133,24 @@ struct HttpSyncReconciler {
     /// One per-book reconciliation pass (inbound then outbound). The app-level AI-chat-settings
     /// LWW is handled separately by `HttpSyncManager` on the main actor (it owns the non-Sendable
     /// settings store); see `HttpSyncManager.syncAppSettings`.
-    func syncOnce(sinceCursor: String?) async -> HttpSyncResult {
+    ///
+    /// `onProgress` is invoked at the start of each phase (and per-item within the counted phases)
+    /// so the settings screen can show a live phase label + linear bar. It mirrors Android's
+    /// `onProgress` callback. Defaults to a no-op so tests and the push hooks are unaffected.
+    func syncOnce(
+        sinceCursor: String?,
+        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void = { _ in }
+    ) async -> HttpSyncResult {
         var result = HttpSyncResult()
 
-        let inbound = await pullChangedKeys(sinceCursor: sinceCursor, into: &result)
-        await pushAllLocal(into: &result)
+        await onProgress(HttpSyncProgress(
+            message: "Preparing sync",
+            detail: "Connecting to the HTTP sync server."
+        ))
+        let inbound = await pullChangedKeys(sinceCursor: sinceCursor, into: &result, onProgress: onProgress)
+        await pushAllLocal(into: &result, onProgress: onProgress)
 
+        await onProgress(HttpSyncProgress(message: "Finishing sync", detail: "Saving the sync cursor."))
         result.newLastSyncedAt = safeNewCursor(currentCursor: sinceCursor, inbound: inbound)
         if result.newLastSyncedAt == sinceCursor { result.newLastSyncedAt = nil }
         return result
@@ -138,6 +179,17 @@ struct HttpSyncReconciler {
 
     private enum BookKeyKind { case bookmark, chat, metadata, payloadManifest, payloadZip }
     private struct ParsedBookKey { let syncId: String; let kind: BookKeyKind }
+
+    /// Lowercase phase-detail label for a key kind (mirrors Android's `kind.name.lowercase()`).
+    private func kindLabel(_ kind: BookKeyKind) -> String {
+        switch kind {
+        case .bookmark: return "bookmark"
+        case .chat: return "chat"
+        case .metadata: return "metadata"
+        case .payloadManifest: return "payload manifest"
+        case .payloadZip: return "payload zip"
+        }
+    }
 
     private func parseBookKey(_ key: String) -> ParsedBookKey? {
         guard key.hasPrefix(SyncKeys.allBooksPrefix) else { return nil }
@@ -191,7 +243,11 @@ struct HttpSyncReconciler {
 
     // MARK: - Inbound
 
-    private func pullChangedKeys(sinceCursor: String?, into result: inout HttpSyncResult) async -> InboundCursor {
+    private func pullChangedKeys(
+        sinceCursor: String?,
+        into result: inout HttpSyncResult,
+        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void
+    ) async -> InboundCursor {
         var cursor = InboundCursor()
 
         func markHandled(_ meta: HttpSyncKvKeyMeta) {
@@ -204,6 +260,10 @@ struct HttpSyncReconciler {
             }
         }
 
+        await onProgress(HttpSyncProgress(
+            message: "Scanning local books",
+            detail: "Preparing to match local and remote sync IDs."
+        ))
         let localBooks = loadLocalBooks()
         var rootsBySyncId: [String: URL] = [:]
         var importedAtBySyncId: [String: String?] = [:]
@@ -227,6 +287,10 @@ struct HttpSyncReconciler {
         var bookmarksAndChats: [(ParsedBookKey, HttpSyncKvKeyMeta)] = []
         var remoteSyncIds: Set<String> = []
 
+        await onProgress(HttpSyncProgress(
+            message: "Listing remote changes",
+            detail: "Asking the server what changed."
+        ))
         do {
             try await transport.listAll(prefix: SyncKeys.allBooksPrefix, since: nil) { meta in
                 guard let parsed = parseBookKey(meta.key) else {
@@ -280,8 +344,14 @@ struct HttpSyncReconciler {
         }
 
         // Pass 3: import remote-only books by their payload manifests, BEFORE bookmarks/chats.
-        for meta in payloadManifests {
+        for (index, meta) in payloadManifests.enumerated() {
             guard let parsed = parseBookKey(meta.key) else { continue }
+            await onProgress(HttpSyncProgress(
+                message: "Checking remote book payloads",
+                detail: "Book \(index + 1) of \(payloadManifests.count): \(parsed.syncId)",
+                completed: index,
+                total: payloadManifests.count
+            ))
             if deletedSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
             if rootsBySyncId[parsed.syncId] != nil { markHandled(meta); continue }
             if pendingTombstoneSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
@@ -301,7 +371,14 @@ struct HttpSyncReconciler {
 
         // Pass 4: metadata shelf placement now that local roots exist.
         let shelfSnapshot = ShelfSnapshot.load()
-        for (parsed, meta) in placementMetadataKeys {
+        for (index, pair) in placementMetadataKeys.enumerated() {
+            let (parsed, meta) = pair
+            await onProgress(HttpSyncProgress(
+                message: "Applying bookshelf folders",
+                detail: "Book \(index + 1) of \(placementMetadataKeys.count): \(parsed.syncId)",
+                completed: index,
+                total: placementMetadataKeys.count
+            ))
             do {
                 let applied = try await applyShelfPlacementFromRemote(
                     syncId: parsed.syncId,
@@ -319,7 +396,14 @@ struct HttpSyncReconciler {
         HttpSyncShelfStateStore.save(shelfState)
 
         // Pass 5: bookmarks and chats now find their local roots.
-        for (parsed, meta) in bookmarksAndChats {
+        for (index, pair) in bookmarksAndChats.enumerated() {
+            let (parsed, meta) = pair
+            await onProgress(HttpSyncProgress(
+                message: "Applying remote reading data",
+                detail: "Item \(index + 1) of \(bookmarksAndChats.count): \(kindLabel(parsed.kind)) for \(parsed.syncId)",
+                completed: index,
+                total: bookmarksAndChats.count
+            ))
             if deletedSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
             guard let root = rootsBySyncId[parsed.syncId] else { markUnhandled(meta); continue }
             do {
@@ -533,10 +617,15 @@ struct HttpSyncReconciler {
 
     // MARK: - Outbound
 
-    private func pushAllLocal(into result: inout HttpSyncResult) async {
+    private func pushAllLocal(
+        into result: inout HttpSyncResult,
+        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void
+    ) async {
         let localBooks = loadLocalBooks()
         let snapshot = ShelfSnapshot.load()
         var shelfState = HttpSyncShelfStateStore.load()
+        let payloadBookCount = localBooks.filter { $0.contentType == .mokuro }.count
+        var payloadBookIndex = 0
 
         // Pass 0: push pending deleted-book tombstones. For each staged delete, PUT a metadata
         // blob with `deletedAt` set so the deletion propagates to other devices; clear the record
@@ -551,6 +640,10 @@ struct HttpSyncReconciler {
                 shelfState.removeValue(forKey: syncId)
             }
             for (syncId, record) in pendingDeleted where !liveLocalSyncIds.contains(syncId) {
+                await onProgress(HttpSyncProgress(
+                    message: "Uploading deleted book markers",
+                    detail: record.title
+                ))
                 let blob = HttpSyncMetadataBlob(
                     title: record.title,
                     contentType: record.contentType,
@@ -574,8 +667,14 @@ struct HttpSyncReconciler {
             }
         }
 
-        for book in localBooks {
+        for (index, book) in localBooks.enumerated() {
             do {
+                await onProgress(HttpSyncProgress(
+                    message: "Uploading local book state",
+                    detail: "Book \(index + 1) of \(localBooks.count): \(book.title)",
+                    completed: index,
+                    total: localBooks.count
+                ))
                 let remoteMetadata = try await fetchRemoteMetadataForUpload(key: SyncKeys.metadata(book.syncId))
                 let remoteDeletedAt = remoteMetadata?.blob.deletedAt
                 let tombstoneOverridden = remoteDeletedAt != nil &&
@@ -634,6 +733,14 @@ struct HttpSyncReconciler {
 
                 // Payload (mokuro only for v2.0) — upload once if the server lacks a manifest.
                 if book.contentType == .mokuro {
+                    let currentPayloadIndex = payloadBookIndex
+                    payloadBookIndex += 1
+                    await onProgress(HttpSyncProgress(
+                        message: "Checking manga payload upload",
+                        detail: "Book \(currentPayloadIndex + 1) of \(payloadBookCount): \(book.title)",
+                        completed: currentPayloadIndex,
+                        total: payloadBookCount
+                    ))
                     let uploaded = try await payloadCodec.uploadIfChanged(
                         transport: transport,
                         syncId: book.syncId,
@@ -652,14 +759,22 @@ struct HttpSyncReconciler {
                         try await transport.listAll(prefix: SyncKeys.chatPrefix(book.syncId), since: nil) { meta in
                             existing.insert(meta.key)
                         }
-                        for entry in entries {
+                        let missing: [(key: String, entry: AiChatEntry)] = entries.compactMap { entry in
                             let suffix = chatEntryKeySuffix(timestampAppleSeconds: entry.timestampSeconds, bubbleText: entry.bubbleText, response: entry.response)
                             let key = SyncKeys.chat(book.syncId, suffix: suffix)
-                            if existing.contains(key) { continue }
+                            return existing.contains(key) ? nil : (key, entry)
+                        }
+                        for (chatIndex, upload) in missing.enumerated() {
+                            await onProgress(HttpSyncProgress(
+                                message: "Uploading manga chat history",
+                                detail: "\(book.title): chat \(chatIndex + 1) of \(missing.count)",
+                                completed: chatIndex,
+                                total: missing.count
+                            ))
                             _ = try await transport.put(
-                                key: key,
+                                key: upload.key,
                                 contentType: Self.jsonContentType,
-                                body: try jsonEncoder.encode(entry.toBlob())
+                                body: try jsonEncoder.encode(upload.entry.toBlob())
                             )
                             result.uploadedChatEntries += 1
                         }

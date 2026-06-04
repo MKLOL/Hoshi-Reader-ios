@@ -264,6 +264,7 @@ struct PopupView: View {
                             onMine: { content in
                                 await mineEntry(content: content, sentence: selectionData.sentence)
                             },
+                            onLookupRedirect: redirectLookup,
                             onTextSelected: onTextSelected,
                             onTapOutside: onTapOutside,
                             onSwipeDismiss: onSwipeDismiss
@@ -290,6 +291,7 @@ struct PopupView: View {
                             onMine: { content in
                                 await mineEntry(content: content, sentence: selectionData.sentence)
                             },
+                            onLookupRedirect: redirectLookup,
                             onTextSelected: onTextSelected,
                             onTapOutside: onTapOutside,
                             onSwipeDismiss: onSwipeDismiss
@@ -304,6 +306,23 @@ struct PopupView: View {
         }
     }
     
+    /// Runs the dictionary lookup for an in-popup redirect (tapping a redirect/related/inflected
+    /// term inside the glossary) and returns the converted entry dictionaries. Reuses the same
+    /// ``LookupEngine`` + ``entryDict(from:)`` pipeline as the initial popup render so the redirected
+    /// content is rendered identically by popup.js in place.
+    private func redirectLookup(query: String) -> [[String: Any]] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return []
+        }
+        let results = LookupEngine.shared.lookup(
+            trimmed,
+            maxResults: userConfig.maxResults,
+            scanLength: trimmed.count
+        )
+        return results.map { PopupView.entryDict(from: $0) }
+    }
+
     private func mineEntry(content: [String: String], sentence: String) async -> Bool {
         var sasayakiAudioData: Data?
         if AnkiManager.shared.needsSasayakiAudio, let cue = sasayakiCue, let player = sasayakiPlayer, player.hasAudio {
@@ -321,73 +340,77 @@ struct PopupView: View {
         )
     }
     
-    private static func buildContent(lookupResults: [LookupResult], userConfig: UserConfig) -> (content: String, lookupEntries: [[String: Any]]) {
-        var entries: [[String: Any]] = []
-        for result in lookupResults {
-            let expression = String(result.term.expression)
-            let reading = String(result.term.reading)
-            let matched = String(result.matched)
-            let deinflectionTrace = result.trace.reversed().map {
-                [
-                    "name": String($0.name),
-                    "description": String($0.description),
-                ]
-            }
-            
-            var glossaries: [[String: Any]] = []
-            for glossary in result.term.glossaries {
-                glossaries.append([
-                    "dictionary": String(glossary.dict_name),
-                    "content": String(glossary.glossary),
-                    "definitionTags": String(glossary.definition_tags),
-                    "termTags": String(glossary.term_tags),
-                ])
-            }
-            
-            var frequencies: [[String: Any]] = []
-            for frequency in result.term.frequencies {
-                var frequencyTags: [[String: Any]] = []
-                for frequencyTag in frequency.frequencies {
-                    frequencyTags.append([
-                        "value": Int(frequencyTag.value),
-                        "displayValue": String(frequencyTag.display_value),
-                    ])
-                }
-                frequencies.append([
-                    "dictionary": String(frequency.dict_name),
-                    "frequencies": frequencyTags,
-                ])
-            }
-            
-            var pitches: [[String: Any]] = []
-            for pitchEntry in result.term.pitches {
-                var pitchPositions: [Int] = []
-                for element in pitchEntry.pitch_positions {
-                    let position = Int(element)
-                    if !pitchPositions.contains(position) {
-                        pitchPositions.append(position)
-                    }
-                }
-                pitches.append([
-                    "dictionary": String(pitchEntry.dict_name),
-                    "pitchPositions": pitchPositions,
-                ])
-            }
-            
-            let rules = String(result.term.rules).split(separator: " ").map { String($0) }
-            
-            entries.append([
-                "expression": expression,
-                "reading": reading,
-                "matched": matched,
-                "deinflectionTrace": deinflectionTrace,
-                "glossaries": glossaries,
-                "frequencies": frequencies,
-                "pitches": pitches,
-                "rules": rules,
+    /// Converts a single ``LookupResult`` into the JS entry dictionary consumed by popup.js.
+    /// Shared by the initial popup render and the in-popup redirect lookup pipeline so both
+    /// paths produce identical entry shapes (see ``PopupWebView`` `lookupRedirect`).
+    static func entryDict(from result: LookupResult) -> [String: Any] {
+        let expression = String(result.term.expression)
+        let reading = String(result.term.reading)
+        let matched = String(result.matched)
+        let deinflectionTrace = result.trace.reversed().map {
+            [
+                "name": String($0.name),
+                "description": String($0.description),
+            ]
+        }
+
+        var glossaries: [[String: Any]] = []
+        for glossary in result.term.glossaries {
+            glossaries.append([
+                "dictionary": String(glossary.dict_name),
+                "content": String(glossary.glossary),
+                "definitionTags": String(glossary.definition_tags),
+                "termTags": String(glossary.term_tags),
             ])
         }
-        
+
+        var frequencies: [[String: Any]] = []
+        for frequency in result.term.frequencies {
+            var frequencyTags: [[String: Any]] = []
+            for frequencyTag in frequency.frequencies {
+                frequencyTags.append([
+                    "value": Int(frequencyTag.value),
+                    "displayValue": String(frequencyTag.display_value),
+                ])
+            }
+            frequencies.append([
+                "dictionary": String(frequency.dict_name),
+                "frequencies": frequencyTags,
+            ])
+        }
+
+        var pitches: [[String: Any]] = []
+        for pitchEntry in result.term.pitches {
+            var pitchPositions: [Int] = []
+            for element in pitchEntry.pitch_positions {
+                let position = Int(element)
+                if !pitchPositions.contains(position) {
+                    pitchPositions.append(position)
+                }
+            }
+            pitches.append([
+                "dictionary": String(pitchEntry.dict_name),
+                "pitchPositions": pitchPositions,
+            ])
+        }
+
+        let rules = String(result.term.rules).split(separator: " ").map { String($0) }
+
+        return [
+            "expression": expression,
+            "reading": reading,
+            "matched": matched,
+            "deinflectionTrace": deinflectionTrace,
+            "glossaries": glossaries,
+            "frequencies": frequencies,
+            "pitches": pitches,
+            "rules": rules,
+        ]
+    }
+
+    private static func buildContent(lookupResults: [LookupResult], userConfig: UserConfig) -> (content: String, lookupEntries: [[String: Any]]) {
+        let entries = lookupResults.map { entryDict(from: $0) }
+
         let audioSources = (try? JSONEncoder().encode(userConfig.enabledAudioSources))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         let customCSS = (try? JSONSerialization.data(withJSONObject: userConfig.customCSS, options: .fragmentsAllowed))

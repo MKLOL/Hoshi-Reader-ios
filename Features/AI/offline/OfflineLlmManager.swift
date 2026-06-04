@@ -14,6 +14,12 @@
 //  async gate so a delete/model-swap can't free the model mid-translation. The user content mirrors
 //  the cloud path: `japaneseText` alone when the instruction is blank, else "<instruction>\n\n<text>".
 //
+//  Generation STREAMS: instead of LLM.swift's one-shot `getCompletion`, `translate` drives the
+//  streaming `respond(to:with:)` API (an `AsyncStream<String>` of token deltas) and republishes a
+//  growing partial string + live tokens/sec via `generationProgress`, so the popup shows the reply
+//  forming in real time and a live throughput counter. Mirrors Android `OfflineLlmManager`'s
+//  `GenerationProgress` + `LlamaInference.translate(onProgress:)`.
+//
 
 import Foundation
 import LLM
@@ -40,9 +46,23 @@ final class OfflineLlmManager {
 
     private(set) var status: Status = .idle
 
-    /// Tok/s of the most recent generation, or `nil` while idle/generating. `getCompletion` returns
-    /// the whole reply at once (no per-token callbacks), so this is computed once on completion in
-    /// `translate(...)` rather than streamed live.
+    /// Live progress of the in-flight on-device generation, or `nil` when idle. Updated on every
+    /// streamed token delta so the popup can show the reply forming + a live tok/s counter. Mirrors
+    /// Android `OfflineLlmManager.GenerationProgress` (a `StateFlow<GenerationProgress?>`).
+    struct GenerationProgress: Equatable {
+        /// The reply text accumulated so far (raw, before final stop-sequence cleanup).
+        let partialText: String
+        /// Approximate generated token count so far.
+        let tokens: Int
+        /// Generation throughput so far (tokens ÷ elapsed seconds).
+        let tokensPerSecond: Double
+    }
+
+    /// Live generation progress, published as each token streams in; `nil` outside a generation.
+    private(set) var generationProgress: GenerationProgress?
+
+    /// Tok/s of the most recent generation, or `nil` while idle. Computed from the final streamed
+    /// token count / elapsed time in `translate(...)`.
     private(set) var tokensPerSecond: Double?
 
     /// The id of the currently-resident model, or `nil` if none is loaded.
@@ -217,32 +237,69 @@ final class OfflineLlmManager {
 
         status = .generating(modelId: model.id)
         tokensPerSecond = nil
+        generationProgress = .init(partialText: "", tokens: 0, tokensPerSecond: 0)
         defer {
             status = loadedModelId.map { .ready(modelId: $0) } ?? .idle
             tokensPerSecond = nil
+            generationProgress = nil
         }
 
         // Reset the model's KV cache / context before each generation so every translate is a fresh
-        // one-shot (matches Android's `nativeTranslate`). `getCompletion` never resets, so without
-        // this the resident model accumulates context across calls — bubbles bleed together and,
-        // once the context window fills, replies come back empty.
+        // one-shot (matches Android's `nativeTranslate`). Without this the resident model accumulates
+        // context across calls — bubbles bleed together and, once the context window fills, replies
+        // come back empty. `respond(to:with:)` also appends to history, but `reset()` clears it each
+        // call so it never grows.
         llm.reset()
 
-        // getCompletion() skips the template's preprocess; apply it ourselves so an instruct/
-        // chat GGUF sees its expected chat framing instead of a bare prompt.
-        let processed = llm.preprocess(userContent, llm.history, .none)
-
-        // Generate off the main actor (it's CPU-heavy). `llm` isn't `Sendable`, but the gate
-        // guarantees exclusive access for the duration of this call, so it's safe to box across.
-        // Wrap in a cancellation handler: `MangaAiController.cancel()` cancels the owning task, but
-        // the detached generation can't see that — so on cancel we call `stop()` (LLM.swift sets
-        // the core's `shouldContinuePredicting = false`) to wind generation down promptly and free
-        // the gate (released by the `defer` above) for later translates/swaps.
+        // Stream the reply with LLM.swift's `respond(to:with:)`: it applies the template's
+        // `preprocess` internally (so an instruct/chat GGUF sees its chat framing), then hands us an
+        // `AsyncStream<String>` of token deltas. We accumulate them, republish a throttled live
+        // partial + tok/s through `generationProgress`, and return the final text so `respond`
+        // records it in (the just-reset) history. The whole drive runs off the main actor inside
+        // `respond` → `core` (an actor); the gate guarantees exclusive access to `llm`, so boxing it
+        // across the boundary is safe.
+        //
+        // Cancellation: `MangaAiController.cancel()` cancels the owning task; the streaming drive
+        // can't see that, so on cancel we call `stop()` (sets the core's
+        // `shouldContinuePredicting = false`) to wind generation down promptly and free the gate.
         let start = Date()
         let boxed = UncheckedBox(llm)
-        let raw = await withTaskCancellationHandler {
+        // Streamed deltas + final count travel back here from the detached drive (a reference type,
+        // boxed across the boundary; the gate guarantees exclusive access).
+        let collected = CollectedOutput()
+        let collectedBox = UncheckedBox(collected)
+
+        await withTaskCancellationHandler {
+            // Drive generation off the main actor (it's CPU-heavy), exactly where the old
+            // `getCompletion` ran. `respond(to:with:)` applies `preprocess` and streams token deltas
+            // into the output-builder closure, which republishes a throttled live partial + tok/s on
+            // the main actor and stashes the final text in `collected`.
             await Task.detached(priority: .userInitiated) {
-                await boxed.value.getCompletion(from: processed)
+                await boxed.value.respond(to: userContent) { stream in
+                    var output = ""
+                    var tokens = 0
+                    var lastEmit = Date.distantPast
+                    for await delta in stream {
+                        output += delta
+                        tokens += 1
+                        // Throttle live UI updates (~4/s) like Android's 250 ms progress poll.
+                        let now = Date()
+                        if now.timeIntervalSince(lastEmit) >= 0.25 {
+                            lastEmit = now
+                            let snapshot = output
+                            let tokenCount = tokens
+                            let tps = Self.throughput(tokens: tokenCount, since: start, until: now)
+                            await MainActor.run {
+                                self.generationProgress = .init(
+                                    partialText: snapshot, tokens: tokenCount, tokensPerSecond: tps
+                                )
+                            }
+                        }
+                    }
+                    collectedBox.value.text = output
+                    collectedBox.value.tokens = tokens
+                    return output
+                }
             }.value
         } onCancel: {
             boxed.value.stop()
@@ -250,11 +307,20 @@ final class OfflineLlmManager {
         let elapsed = Date().timeIntervalSince(start)
         try Task.checkCancellation()
 
-        let text = cleanup(raw, template: model.templateKind)
-        let approxTokens = max(1, text.split(whereSeparator: { $0 == " " || $0 == "\n" }).count)
+        let text = cleanup(collected.text, template: model.templateKind)
+        // Live token count = streamed deltas (≈ generated tokens). Guard against a zero count from an
+        // empty reply so the footer never shows "0 tokens".
+        let approxTokens = max(1, collected.tokens)
         let tps = elapsed > 0 ? Double(approxTokens) / elapsed : 0
         return Result(text: text, modelId: model.id, tokensPerSecond: tps,
                       elapsedSeconds: elapsed, approxTokens: approxTokens)
+    }
+
+    /// Generation throughput so far: streamed tokens ÷ elapsed seconds (0 if no time has passed).
+    /// `nonisolated` so the off-main streaming drive can call it without an actor hop.
+    nonisolated private static func throughput(tokens: Int, since start: Date, until now: Date) -> Double {
+        let elapsed = now.timeIntervalSince(start)
+        return elapsed > 0 ? Double(tokens) / elapsed : 0
     }
 
     /// Frees the resident model. Idempotent. Safe to call when nothing is loaded.
@@ -263,6 +329,7 @@ final class OfflineLlmManager {
         loadedModelId = nil
         status = .idle
         tokensPerSecond = nil
+        generationProgress = nil
     }
 
     // MARK: - Helpers
@@ -305,4 +372,12 @@ final class OfflineLlmManager {
 nonisolated private struct UncheckedBox<T>: @unchecked Sendable {
     let value: T
     init(_ value: T) { self.value = value }
+}
+
+/// Carries the final streamed text + token count out of `respond(to:with:)`'s output-builder closure
+/// (whose return value `respond` consumes internally and discards). A reference type so writes inside
+/// the escaping closure are visible to the caller after the await; serialized by the gate.
+nonisolated private final class CollectedOutput {
+    var text = ""
+    var tokens = 0
 }

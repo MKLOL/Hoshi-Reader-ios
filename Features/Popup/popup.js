@@ -17,10 +17,11 @@ const SMALL_KANA_SET = new Set('ぁぃぅぇぉゃゅょゎァィゥェォャュ
 const NUMERIC_TAG = /^\d+$/;
 // this might not cover every tag
 const POS_TAGS = new Set(['n', 'adj-i', 'adj-na', 'adj-no', 'v1', 'vk', 'vs', 'vs-i', 'vs-s', 'vz', 'vi', 'vt']);
-const audioUrls = {};
+let audioUrls = {};
 let lastSelection = '';
 let currentDictionaryMedia = null;
-const selectedDictionaries = {};
+let selectedDictionaries = {};
+let renderGeneration = 0;
 
 function el(tag, props = {}, children = []) {
     const element = document.createElement(tag);
@@ -904,12 +905,18 @@ function renderStructuredContent(parent, node, language = null, dictName = null,
     if (node.href) {
         element.setAttribute('href', node.href);
         const isExternal = /^https?:\/\//i.test(node.href);
-        element.onclick = (e) => {
+        element.onclick = async (e) => {
             e.preventDefault();
+            e.stopPropagation();
             if (isExternal) {
                 openExternalLink(node.href);
             } else {
-                // TODO: handle redirect to other entry
+                const i = node.href.indexOf('?');
+                const query = i < 0 ? null : new URLSearchParams(node.href.slice(i + 1)).get('query');
+                const count = query ? await webkit.messageHandlers.lookupRedirect.postMessage(query) : 0;
+                if (count > 0) {
+                    redirect(count);
+                }
             }
         };
     }
@@ -1408,27 +1415,132 @@ function createGlossarySection(dictName, contents, isFirst, entryIdx) {
     return details;
 }
 
+// ---------------------------------------------------------------------------
+// In-popup redirect navigation + back/forward history.
+//
+// Mirrors the Android popup (assets/hoshi-popup/popup.js): tapping an internal
+// redirect/related/inflected link (href "?query=...") asks native to resolve the
+// term via LookupEngine (the lookupRedirect handler in PopupWebView.swift, which
+// returns the entry count and stashes the entries so getEntry serves them), then
+// replaces the popup content in place. History is a pair of DOM-snapshot stacks:
+// each snapshot captures the rendered nodes + scroll + the lookupEntries/entryCount
+// so that mining/audio keep working after restoring a previous view.
+// ---------------------------------------------------------------------------
+const backStack = [];
+const forwardStack = [];
+
+function snapshot() {
+    const container = document.getElementById('entries-container');
+    return {
+        nodes: [...container.childNodes],
+        scrollTop: document.scrollingElement.scrollTop,
+        lookupEntries: window.lookupEntries,
+        entryCount: window.entryCount,
+    };
+}
+
+function restore(snap) {
+    const container = document.getElementById('entries-container');
+    container.replaceChildren(...snap.nodes);
+    window.lookupEntries = snap.lookupEntries;
+    window.entryCount = snap.entryCount;
+    audioUrls = {};
+    selectedDictionaries = {};
+    updateNavControls();
+    requestAnimationFrame(() => {
+        document.scrollingElement.scrollTop = snap.scrollTop;
+    });
+}
+
+function navigate(origin, destination) {
+    if (!origin.length) {
+        return;
+    }
+    closeOverlay();
+    destination.push(snapshot());
+    restore(origin.pop());
+}
+
+window.navigateBack = () => navigate(backStack, forwardStack);
+window.navigateForward = () => navigate(forwardStack, backStack);
+
+function redirect(count) {
+    closeOverlay();
+    backStack.push(snapshot());
+    forwardStack.length = 0;
+    window.lookupEntries = undefined;
+    window.entryCount = count;
+    audioUrls = {};
+    selectedDictionaries = {};
+    document.getElementById('entries-container').innerHTML = '';
+    window.renderPopup();
+    requestAnimationFrame(() => {
+        document.scrollingElement.scrollTop = 0;
+        requestAnimationFrame(() => {
+            document.scrollingElement.scrollTop = 0;
+        });
+    });
+}
+
+function updateNavControls() {
+    const hasHistory = backStack.length > 0 || forwardStack.length > 0;
+    let controls = document.getElementById('popup-nav-controls');
+    if (!hasHistory) {
+        controls?.remove();
+        return;
+    }
+    if (!controls) {
+        controls = el('div', { className: 'popup-nav-controls', id: 'popup-nav-controls' });
+        const back = el('button', {
+            className: 'popup-nav-button popup-nav-back',
+            textContent: '‹',
+            'aria-label': 'Back',
+            onclick: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                window.navigateBack();
+            }
+        });
+        const forward = el('button', {
+            className: 'popup-nav-button popup-nav-forward',
+            textContent: '›',
+            'aria-label': 'Forward',
+            onclick: (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                window.navigateForward();
+            }
+        });
+        controls.append(back, forward);
+        document.body.appendChild(controls);
+    }
+    controls.querySelector('.popup-nav-back').disabled = backStack.length === 0;
+    controls.querySelector('.popup-nav-forward').disabled = forwardStack.length === 0;
+}
+
 window.renderPopup = function() {
     const container = document.getElementById('entries-container');
     if (!window.entryCount) {
         return;
     }
-    
+    const generation = ++renderGeneration;
+
     (async () => {
         for (let idx = 0; idx < window.entryCount; idx++) {
-            const entry = await webkit.messageHandlers.getEntry.postMessage(idx);
+            const entry = window.lookupEntries?.[idx] ?? await webkit.messageHandlers.getEntry.postMessage(idx);
+            if (generation !== renderGeneration) return;
             if (!entry) continue;
-            
+
             window.lookupEntries ??= [];
             window.lookupEntries[idx] = entry;
-            
+
             if (idx > 0) {
                 container.appendChild(document.createElement('hr'));
             }
-            
+
             const entryDiv = el('div', { className: 'entry' });
             entryDiv.appendChild(createEntryHeader(entry, idx));
-            
+
             if (window.audioEnableAutoplay && window.audioSources?.length && idx === 0) {
                 setTimeout(() => {
                     const audioButton = entryDiv.querySelector('.audio-button');
@@ -1437,15 +1549,16 @@ window.renderPopup = function() {
                     }
                 }, 70);
             }
-            
+
             const tags = createTags(entry);
             if (tags) {
                 entryDiv.appendChild(tags);
             }
-            
+
             container.appendChild(entryDiv);
             await new Promise(r => requestAnimationFrame(r));
-            
+            if (generation !== renderGeneration) return;
+
             const grouped = {};
             entry.glossaries.forEach(g => {
                 (grouped[g.dictionary] ??= []).push({
@@ -1454,14 +1567,16 @@ window.renderPopup = function() {
                     termTags: g.termTags
                 });
             });
-            
+
             const dictNames = Object.keys(grouped);
             for (let dictIdx = 0; dictIdx < dictNames.length; dictIdx++) {
                 entryDiv.appendChild(createGlossarySection(dictNames[dictIdx], grouped[dictNames[dictIdx]], dictIdx === 0, idx));
                 await new Promise(r => requestAnimationFrame(r));
+                if (generation !== renderGeneration) return;
             }
         }
-        
+        if (generation !== renderGeneration) return;
+
         container.querySelectorAll('.glossary-content ruby').forEach(ruby => {
             ruby.childNodes.forEach(node => {
                 if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
@@ -1472,13 +1587,20 @@ window.renderPopup = function() {
             });
         });
     })();
-    
-    if (window.customCSS) {
+
+    updateNavControls();
+
+    if (window.customCSS && !document.getElementById('popup-custom-css')) {
         const customStyle = document.createElement('style');
+        customStyle.id = 'popup-custom-css';
         customStyle.textContent = window.customCSS;
         document.body.appendChild(customStyle);
     }
-    
+
+    if (container.clickAttached) {
+        return;
+    }
+    container.clickAttached = true;
     container.addEventListener('click', (e) => {
         const target = e.target?.nodeType === Node.TEXT_NODE ? e.target.parentElement : e.target;
         if (!target?.closest('.glossary-content') && !target?.closest('.expr-tag')) {

@@ -8,7 +8,8 @@
 //  The mokuro manga reader screen. Ported from Android `features/mangareader/
 //  MangaReaderScreen.kt`, adapted to SwiftUI + WKWebView. Owns the current page index and the
 //  parsed MokuroBook, hosts the OCR-overlay WebView, the reader chrome (title, page X/Y, back,
-//  focus toggle, go-to-page dialog, statistics sheet), RTL paging with a crossfade, debounced
+//  focus toggle, go-to-page dialog, statistics sheet), RTL paging with a directional page-turn
+//  slide (the outgoing page snapshot slides off while the new page slides in), debounced
 //  bookmark persistence, manga reading statistics, the shared dictionary PopupView (the same one
 //  the EPUB reader uses), and the screenshot-crop overlay.
 //
@@ -42,6 +43,26 @@ struct MangaReaderView: View {
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
     @State private var pageOpacity: Double = 1
+
+    // MARK: Directional page-turn slide
+    //
+    // On a page change the outgoing page is snapshotted and slid off-screen in the swipe
+    // direction while the WebView — already reloading to the new page underneath — slides in from
+    // the opposite edge. Mirrors Android `MangaReaderScreen`'s filmstrip slide (a forward turn in
+    // a right-to-left manga slides the outgoing page off to the *right*; backward to the left).
+    //
+    /// The frozen outgoing page, drawn on top of the reloading WebView. Non-nil only mid-slide.
+    @State private var slideSnapshot: UIImage?
+    /// Which way the outgoing page leaves. `forward` → off to the right (RTL), `backward` → left.
+    @State private var slideDirection: NavigationDirection = .forward
+    /// 0 = slide just started (snapshot centred, WebView fully off the opposite edge); 1 = settled
+    /// (WebView centred, snapshot fully off-screen). Read by the offset modifiers each frame.
+    @State private var slideProgress: CGFloat = 0
+    /// The page index whose `onPageReady` should kick off the slide — the incoming page must finish
+    /// its first draw before the slide starts, or the artwork would visibly resize mid-slide.
+    @State private var pendingSlideIndex: Int?
+    /// Bumped per page change so a stale snapshot task for a superseded turn is discarded.
+    @State private var slideGeneration = 0
 
     init(
         metadata: BookMetadata,
@@ -120,15 +141,17 @@ struct MangaReaderView: View {
         .statusBarHidden(focusMode)
         .persistentSystemOverlays(focusMode ? .hidden : .automatic)
         .task { await model.load(controller: controller, userConfig: userConfig) }
-        .onChange(of: model.pageIndex) { _, _ in
-            model.closePopups()
-            withAnimation(.easeInOut(duration: 0.12)) { pageOpacity = 0 }
-            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+        .onChange(of: model.pageIndex) { oldIndex, newIndex in
+            beginPageTurn(from: oldIndex, to: newIndex)
         }
         .onChange(of: userConfig.enableStatistics) { _, enabled in
             // Apply the stats toggle live (e.g. the sheet's "Enable" button) instead of only on
             // the next reader open.
-            model.updateStatisticsEnabled(enabled, title: model.title ?? "")
+            model.updateStatisticsEnabled(
+                enabled,
+                title: model.title ?? "",
+                autostartMode: userConfig.statisticsAutostartMode
+            )
         }
         .onDisappear {
             model.flushPendingBookmark()
@@ -220,36 +243,56 @@ struct MangaReaderView: View {
 
     @ViewBuilder
     private func readerSurface(geometry: GeometryProxy) -> some View {
-        MangaReaderWebView(
-            controller: controller,
-            backgroundColor: UIColor(backgroundColor),
-            onNavigate: { direction in
-                model.navigate(direction)
-            },
-            onTextSelected: { selection in
-                model.closePopups()
-                return model.handleTextSelection(
-                    selection,
-                    maxResults: userConfig.maxResults,
-                    scanLength: userConfig.scanLength,
-                    isVertical: selection.rect.height > selection.rect.width,
-                    isFullWidth: userConfig.popupFullWidth
-                )
-            },
-            onTapOutside: { model.closePopups() },
-            onAskAi: { text in
-                if let onAskAi { onAskAi(text) }
-                else { aiController.ask(bubbleText: text, book: metadata) }
-            },
-            onCopy: { text in UIPasteboard.general.string = text },
-            onPageReady: {
-                // Page finished rendering — fade it back in (the crossfade for v1).
-                withAnimation(.easeInOut(duration: 0.18)) { pageOpacity = 1 }
+        // RTL filmstrip: a forward turn (page 1 at the right) slides the outgoing page off to the
+        // right and pulls the incoming WebView in from the left; backward is the reverse. The
+        // outgoing snapshot and the WebView stay edge-to-edge, so there is never a gap or a flash
+        // of the reloading page. While a turn is in flight (`slideSnapshot != nil`) the WebView is
+        // held off-screen until its `onPageReady` starts the slide; otherwise it sits at offset 0.
+        let width = geometry.size.width
+        let leavingSign: CGFloat = slideDirection == .backward ? -1 : 1
+        let webViewOffset = slideSnapshot == nil ? 0 : -leavingSign * width * (1 - slideProgress)
+        let snapshotOffset = leavingSign * width * slideProgress
+
+        ZStack {
+            MangaReaderWebView(
+                controller: controller,
+                backgroundColor: UIColor(backgroundColor),
+                onNavigate: { direction in
+                    model.navigate(direction)
+                },
+                onTextSelected: { selection in
+                    model.closePopups()
+                    return model.handleTextSelection(
+                        selection,
+                        maxResults: userConfig.maxResults,
+                        scanLength: userConfig.scanLength,
+                        isVertical: selection.rect.height > selection.rect.width,
+                        isFullWidth: userConfig.popupFullWidth
+                    )
+                },
+                onTapOutside: { model.closePopups() },
+                onAskAi: { text in
+                    if let onAskAi { onAskAi(text) }
+                    else { aiController.ask(bubbleText: text, book: metadata) }
+                },
+                onCopy: { text in UIPasteboard.general.string = text },
+                onPageReady: { onPageReady() }
+            )
+            // One reused WebView (matches the Android single-WebView model).
+            .offset(x: webViewOffset)
+            .opacity(pageOpacity)
+
+            if let snapshot = slideSnapshot {
+                Image(uiImage: snapshot)
+                    .resizable()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .offset(x: snapshotOffset)
+                    .allowsHitTesting(false)
             }
-        )
-        // One reused WebView (matches the Android single-WebView model). The crossfade for v1
-        // is a brief opacity dip on page change, restored when the new page reports ready.
-        .opacity(pageOpacity)
+        }
+        .frame(width: geometry.size.width, height: geometry.size.height)
+        // Keep the sliding pages contained to the page area so they never bleed into the chrome.
+        .clipped()
         .onAppear {
             lastSize = geometry.size
             model.viewportSize = geometry.size
@@ -260,6 +303,82 @@ struct MangaReaderView: View {
             model.viewportSize = newSize
             model.renderCurrentPage(controller: controller, screenSize: newSize, userConfig: userConfig)
         }
+    }
+
+    // MARK: Page-turn slide
+
+    /// Duration of the directional page-turn slide. Long enough to read as a page turn, not a jump.
+    private let slideDuration = 0.32
+
+    /// Starts a page turn: snapshots the outgoing page, then reloads to the new page. The slide
+    /// itself only begins once the incoming page reports ready (`onPageReady`). Robust to fast
+    /// repeat turns via `slideGeneration`, and to snapshot failure (falls back to an instant swap
+    /// with a brief opacity dip — never a stuck state).
+    private func beginPageTurn(from oldIndex: Int, to newIndex: Int) {
+        model.closePopups()
+        slideGeneration += 1
+        let generation = slideGeneration
+        let direction: NavigationDirection = newIndex >= oldIndex ? .forward : .backward
+
+        // No laid-out size yet (first render) — just swap.
+        guard lastSize.width > 0, lastSize.height > 0 else {
+            clearSlide()
+            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+            return
+        }
+
+        Task {
+            // Snapshot the page *before* the reload swaps the HTML underneath.
+            let snapshot = await controller.snapshotCurrentPage()
+            // A newer turn superseded this one while we were snapshotting — abandon it.
+            guard generation == slideGeneration else { return }
+
+            if let snapshot {
+                slideDirection = direction
+                slideProgress = 0
+                slideSnapshot = snapshot
+                pendingSlideIndex = newIndex
+                pageOpacity = 1
+                // Reload underneath the snapshot; the slide starts on the new page's onPageReady.
+                model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+            } else {
+                // No snapshot: instant swap with a brief opacity dip as a graceful fallback.
+                clearSlide()
+                withAnimation(.easeInOut(duration: 0.12)) { pageOpacity = 0 }
+                model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+            }
+        }
+    }
+
+    /// Invoked when the WebView finishes rendering a page. Drives the slide for a pending turn, or
+    /// restores opacity for the no-snapshot fallback path.
+    private func onPageReady() {
+        if let pending = pendingSlideIndex, slideSnapshot != nil {
+            // The slide only starts once the page it is waiting on has actually drawn.
+            guard pending == model.pageIndex else { return }
+            pendingSlideIndex = nil
+            let generation = slideGeneration
+            // Animate the WebView in / snapshot out, then drop the snapshot.
+            withAnimation(.easeOut(duration: slideDuration)) {
+                slideProgress = 1
+            } completion: {
+                // Only tear down if no newer turn has taken over since this slide started.
+                if generation == slideGeneration { clearSlide() }
+            }
+        } else if slideSnapshot == nil {
+            // Fallback path (or first load): restore full opacity.
+            withAnimation(.easeInOut(duration: 0.18)) { pageOpacity = 1 }
+        }
+        // If a snapshot is present but no pending index (slide already running), do nothing here;
+        // the running slide's completion owns teardown.
+    }
+
+    /// Tears down all slide state and restores the page to a clean, centred, opaque resting state.
+    private func clearSlide() {
+        slideSnapshot = nil
+        slideProgress = 0
+        pendingSlideIndex = nil
+        pageOpacity = 1
     }
 
     // MARK: Chrome

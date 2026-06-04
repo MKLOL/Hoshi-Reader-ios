@@ -94,7 +94,7 @@ struct MangaAiPopupView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text(showHistory ? "ChatGPT history" : "ChatGPT")
+            Text(headerTitle)
                 .font(.headline)
             Spacer()
             Button {
@@ -115,6 +115,14 @@ struct MangaAiPopupView: View {
         .padding(16)
     }
 
+    /// The card title, reflecting the active backend while a request is in flight (an on-device
+    /// translation reads "On-device translation"; the cloud path keeps "ChatGPT"). Mirrors Android
+    /// `AiChatPopupView`'s `if (state.onDevice) "On-device translation" else "ChatGPT"`.
+    private var headerTitle: String {
+        if showHistory { return "ChatGPT history" }
+        return controller.state.isOnDevice ? "On-device translation" : "ChatGPT"
+    }
+
     // MARK: - Current exchange
 
     @ViewBuilder
@@ -122,18 +130,43 @@ struct MangaAiPopupView: View {
         switch controller.state {
         case .idle:
             EmptyView()
-        case .loading(let bubbleText):
+        case .loading(let bubbleText, let onDevice):
             bubbleHeader(bubbleText)
-            HStack(spacing: 12) {
-                ProgressView()
-                Text("Asking ChatGPT…")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
+            loadingBody(onDevice: onDevice)
         case .result(let entry):
             entryView(entry)
         case .error(let message):
             errorBody(message)
+        }
+    }
+
+    /// Loading state. For the on-device path it shows "Translating on-device…" plus the live reply
+    /// forming + a live tok/s counter (observed from `OfflineLlmManager.generationProgress`). The
+    /// cloud path keeps the plain "Asking ChatGPT…" spinner. Mirrors Android `LoadingBody`.
+    @ViewBuilder
+    private func loadingBody(onDevice: Bool) -> some View {
+        let progress = onDevice ? OfflineLlmManager.shared.generationProgress : nil
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                ProgressView()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(onDevice ? "Translating on-device…" : "Asking ChatGPT…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    // Live tok/s while the on-device model generates, so a slow reply shows progress.
+                    if let progress, progress.tokens > 0 {
+                        Text(String(format: "⚡ %.1f tok/s · %d tokens",
+                                    progress.tokensPerSecond, progress.tokens))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            // Stream the partial reply as it forms (rendered like the final response so tapping a
+            // Japanese word still works once it lands).
+            if let progress, !progress.partialText.isEmpty {
+                responseText(progress.partialText)
+            }
         }
     }
 

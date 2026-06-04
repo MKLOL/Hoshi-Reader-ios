@@ -36,9 +36,14 @@ final class MangaReaderViewModel {
     private var pendingBookmarkPage: Int?
     private let bookmarkDebounce: Duration = .milliseconds(400)
 
-    /// Small render cache of recently built page HTML (keyed by page index + size).
-    private var htmlCache: [MangaRenderKey: String] = [:]
-    private let htmlCacheLimit = 5
+    /// Off-main LRU cache of generated page HTML + warmed adjacent image files. The live page
+    /// reuses HTML the adjacent-page preloader already built; see `MangaPageRenderCache`.
+    private let renderCache = MangaPageRenderCache()
+    /// Tracks the most recent preload so a fast second page turn cancels the prior preload.
+    private var preloadTask: Task<Void, Never>?
+    /// Bumped on every `renderCurrentPage`; lets a slow build for a stale page be discarded if a
+    /// newer render started in the meantime (the user flicked again before the build finished).
+    private var renderGeneration = 0
 
     var pageCount: Int { book?.pages.count ?? 0 }
     var title: String? { book?.title ?? metadata.title }
@@ -86,7 +91,10 @@ final class MangaReaderViewModel {
             initialStatistics: initial,
             enabled: userConfig.enableStatistics
         )
-        if userConfig.enableStatistics {
+        // Respect the autostart mode: `on` starts tracking immediately on open; `pageTurn` starts
+        // on the first page turn (handled in `recordPageTurnForStatistics`); `off` never auto-starts
+        // (the user starts it manually from the stats sheet's play button).
+        if userConfig.enableStatistics, userConfig.statisticsAutostartMode == .on {
             tracker.start(currentPage: pageIndex + 1)
         }
         statistics = tracker
@@ -97,7 +105,7 @@ final class MangaReaderViewModel {
     /// sheet (or Settings) would otherwise do nothing until the book is reopened. Re-inits with a
     /// fresh `enabled` and starts tracking immediately when turned on; persists/drops the in-memory
     /// tracker when turned off.
-    func updateStatisticsEnabled(_ enabled: Bool, title: String) {
+    func updateStatisticsEnabled(_ enabled: Bool, title: String, autostartMode: StatisticsAutostartMode) {
         // Already in the requested state — nothing to do.
         if let tracker = statistics, tracker.enabled == enabled { return }
         guard let bookRoot else { return }
@@ -109,7 +117,10 @@ final class MangaReaderViewModel {
                 initialStatistics: initial,
                 enabled: true
             )
-            tracker.start(currentPage: pageIndex + 1)
+            // Enabling live from the sheet honours the autostart mode, matching open-time behaviour.
+            if autostartMode == .on {
+                tracker.start(currentPage: pageIndex + 1)
+            }
             statistics = tracker
         } else {
             // Flush whatever was accumulated before tearing the tracker down.
@@ -129,9 +140,13 @@ final class MangaReaderViewModel {
         persistStatistics()
     }
 
-    private func recordPageTurnForStatistics() {
+    private func recordPageTurnForStatistics(autostartMode: StatisticsAutostartMode) {
         guard var tracker = statistics, tracker.enabled else { return }
-        tracker.startForPageTurnIfNeeded(currentPage: pageIndex + 1)
+        // Page-turn autostart: a page turn starts tracking on the first turn. In `off` mode a page
+        // turn must not auto-start (the user controls it manually); `on` mode is already tracking.
+        if autostartMode == .pageturn {
+            tracker.startForPageTurnIfNeeded(currentPage: pageIndex + 1)
+        }
         tracker.update(currentPage: pageIndex + 1)
         statistics = tracker
     }
@@ -152,42 +167,60 @@ final class MangaReaderViewModel {
         guard let book, !book.pages.isEmpty, screenSize.width > 0, screenSize.height > 0 else { return }
         let index = max(0, min(pageIndex, book.pages.count - 1))
         let page = book.pages[index]
-
-        let width = Int(screenSize.width.rounded())
-        let height = Int(screenSize.height.rounded())
-        let key = MangaRenderKey(pageIndex: index, width: width, height: height)
-        let html = htmlCache[key] ?? buildHtml(page: page, width: width, height: height, userConfig: userConfig)
-        cacheHtml(html, for: key)
-
+        // Everything the off-main render needs is captured up front as Sendable values, so the
+        // build Task never reaches back into the non-Sendable `userConfig`.
+        let config = renderConfig(screenSize: screenSize, userConfig: userConfig)
         let allowedPaths = Set([page.imagePath.trimmingPrefixSlash()])
-        controller.load(html: html, allowedImagePaths: allowedPaths)
+
+        renderGeneration += 1
+        let generation = renderGeneration
+
+        // Build (or reuse) the HTML off the main actor via the render cache, then load. On a
+        // preload hit this resolves immediately; on a miss the (possibly large) build happens on
+        // the actor's executor so the main thread never blocks. A newer render supersedes this one.
+        Task { [renderCache] in
+            let html = await renderCache.htmlFor(page: page, config: config)
+            guard self.renderGeneration == generation else { return }
+            controller.load(html: html, allowedImagePaths: allowedPaths)
+            self.preloadAdjacentPages(config: config)
+        }
 
         scheduleBookmark(page: index)
-        recordPageTurnForStatistics()
+        recordPageTurnForStatistics(autostartMode: userConfig.statisticsAutostartMode)
     }
 
-    private func buildHtml(page: MokuroPage, width: Int, height: Int, userConfig: UserConfig) -> String {
-        MangaPageHtml.build(
-            page: page,
-            backgroundCssColor: "#000000",
-            selectionScript: Self.selectionScript,
-            scanNonJapaneseText: userConfig.mangaScanNonJapaneseText,
-            viewportCssWidth: width,
-            viewportCssHeight: height,
-            singleTapLookup: userConfig.mangaSingleTapLookup,
-            useNotoSansJpFont: userConfig.mangaUseNotoSansJpFont
-        )
-    }
-
-    private func cacheHtml(_ html: String, for key: MangaRenderKey) {
-        htmlCache[key] = html
-        if htmlCache.count > htmlCacheLimit {
-            // Drop entries for pages furthest from the current one.
-            let sorted = htmlCache.keys.sorted { abs($0.pageIndex - pageIndex) > abs($1.pageIndex - pageIndex) }
-            for stale in sorted.prefix(htmlCache.count - htmlCacheLimit) {
-                htmlCache.removeValue(forKey: stale)
-            }
+    /// Proactively builds + caches HTML for the ±1 neighbour pages and warms their image files so
+    /// the next page turn is instant. Runs off the main actor; superseded by the next page turn.
+    private func preloadAdjacentPages(config: MangaPageRenderConfig) {
+        guard let book, !book.pages.isEmpty else { return }
+        let indexes = mangaAdjacentPreloadIndexes(currentIndex: pageIndex, pageCount: book.pages.count)
+        guard !indexes.isEmpty else { return }
+        // Resolve image files on the main actor (needs bookRoot), then hand the URLs to the actor.
+        var imageFiles: [Int: URL] = [:]
+        for index in indexes {
+            if let file = imageFile(forPageIndex: index) { imageFiles[index] = file }
         }
+        preloadTask?.cancel()
+        preloadTask = Task(priority: .utility) { [renderCache, book] in
+            await renderCache.preloadAdjacentPages(
+                book: book,
+                pageIndexes: indexes,
+                config: config,
+                imageFiles: imageFiles
+            )
+        }
+    }
+
+    private func renderConfig(screenSize: CGSize, userConfig: UserConfig) -> MangaPageRenderConfig {
+        MangaPageRenderConfig(
+            backgroundCssColor: "#000000",
+            scanNonJapaneseText: userConfig.mangaScanNonJapaneseText,
+            viewportCssWidth: Int(screenSize.width.rounded()),
+            viewportCssHeight: Int(screenSize.height.rounded()),
+            singleTapLookup: userConfig.mangaSingleTapLookup,
+            useNotoSansJpFont: userConfig.mangaUseNotoSansJpFont,
+            selectionScript: Self.selectionScript
+        )
     }
 
     // MARK: Navigation
@@ -203,7 +236,7 @@ final class MangaReaderViewModel {
 
     func goToPage(_ index: Int) {
         guard index != pageIndex, (0..<pageCount).contains(index) else { return }
-        // The view observes pageIndex to drive the crossfade and re-render.
+        // The view observes pageIndex to drive the directional page-turn slide and re-render.
         pageIndex = index
     }
 
@@ -327,12 +360,6 @@ final class MangaReaderViewModel {
         }
         return js
     }()
-}
-
-private struct MangaRenderKey: Hashable {
-    let pageIndex: Int
-    let width: Int
-    let height: Int
 }
 
 private extension String {
