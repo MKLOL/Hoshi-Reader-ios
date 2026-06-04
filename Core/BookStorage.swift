@@ -18,6 +18,13 @@ enum FileNames: Sendable {
     static let sasayakiMatch = "sasayaki_match.json"
     static let sasayakiPlayback = "sasayaki_playback.json"
     static let highlights = "highlights.json"
+    /// Mokuro manga sidecar (raw mokuro tool output, copied verbatim into the book dir). Its
+    /// presence marks a book directory as a manga volume.
+    static let mokuro = "mokuro.json"
+    /// Per-manga ChatGPT exchange history.
+    static let aiChatLog = "ai_chat_log.json"
+    /// Subfolder of flattened page images inside a mokuro book directory.
+    static let mokuroImages = "images"
 }
 
 struct BookStorage {

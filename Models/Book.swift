@@ -27,14 +27,26 @@ struct BookMetadata: Codable, Identifiable, Hashable {
     let cover: String?
     let folder: String?
     var lastAccess: Date
-    
-    init(id: UUID = UUID(), title: String?, cover: String?, folder: String?, lastAccess: Date) {
+    /// EPUB vs mokuro manga. Optional for backward compatibility: metadata written before this
+    /// field existed decodes as `nil` and is treated as `.epub` (see `resolvedContentType`).
+    var contentType: ContentType?
+    /// RFC 3339 UTC — when the book was first imported on this device. Used by HTTP sync's
+    /// re-import-after-tombstone guard. Optional for legacy metadata.
+    var importedAt: String?
+
+    init(id: UUID = UUID(), title: String?, cover: String?, folder: String?, lastAccess: Date,
+         contentType: ContentType? = nil, importedAt: String? = nil) {
         self.id = id
         self.title = title
         self.cover = cover
         self.folder = folder
         self.lastAccess = lastAccess
+        self.contentType = contentType
+        self.importedAt = importedAt
     }
+
+    /// The content type, defaulting to `.epub` for legacy metadata that predates the field.
+    var resolvedContentType: ContentType { contentType ?? .epub }
 }
 
 struct Bookmark: Codable {
