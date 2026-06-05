@@ -227,7 +227,8 @@ struct MokuroImporter {
                 folder: folderName,
                 lastAccess: Date(),
                 contentType: .mokuro,
-                importedAt: rfc3339Now()
+                importedAt: rfc3339Now(),
+                syncId: deriveSyncId(title, folderName: folderName)
             )
             try BookStorage.save(metadata, inside: targetRoot, as: FileNames.metadata)
 

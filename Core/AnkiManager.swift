@@ -336,7 +336,7 @@ class AnkiManager {
            let dictionaryMedia = try? JSONDecoder().decode([DictionaryMedia].self, from: Data(json.utf8)) {
             for media in dictionaryMedia {
                 let mediaData = LookupEngine.shared.getMediaFile(dictName: media.dictionary, mediaPath: media.path)
-                let ext = media.path.split(separator: ".").last!
+                let ext = media.path.split(separator: ".").last.map(String.init) ?? ""
                 let filename = "hoshi_dict_\(mediaData.sha1).\(ext)"
                 fields = fields.mapValues { $0.replacingOccurrences(of: media.filename, with: filename) }
                 _ = try? await ankiConnectRequest(action: "storeMediaFile", params: [

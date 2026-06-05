@@ -82,10 +82,11 @@ final class HttpSyncSettingsStore {
         set { Keychain.set(newValue.isEmpty ? nil : newValue, for: SecretKeys.httpSyncToken) }
     }
 
-    /// True iff we have both a base URL and a token — the precondition for any network call.
+    /// True iff we have a secure base URL and a token — the precondition for any network call.
     var isConfigured: Bool {
         !baseURL.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !token.trimmingCharacters(in: .whitespaces).isEmpty
+        !token.trimmingCharacters(in: .whitespaces).isEmpty &&
+        Self.isSecureBaseURL(baseURL)
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -112,6 +113,21 @@ final class HttpSyncSettingsStore {
         while s.hasSuffix("/") { s.removeLast() }
         return s
     }
+
+    /// Bearer-token sync must not run over cleartext network links. Plain HTTP is accepted only
+    /// for loopback development where the token never leaves the device.
+    static func isSecureBaseURL(_ raw: String) -> Bool {
+        let normalized = normalizeBaseURL(raw)
+        guard let components = URLComponents(string: normalized),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              !host.isEmpty else { return false }
+        if scheme == "https" { return true }
+        if scheme == "http" {
+            return host == "localhost" || host == "127.0.0.1" || host == "::1"
+        }
+        return false
+    }
 }
 
 /// Sendable snapshot of the bits a transport needs, so the reconciler/manager can build a
@@ -119,5 +135,5 @@ final class HttpSyncSettingsStore {
 struct HttpSyncConfig: Sendable {
     let baseURL: String
     let token: String
-    var isConfigured: Bool { !baseURL.isEmpty && !token.isEmpty }
+    var isConfigured: Bool { !baseURL.isEmpty && !token.isEmpty && HttpSyncSettingsStore.isSecureBaseURL(baseURL) }
 }

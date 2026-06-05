@@ -29,6 +29,8 @@ final class MangaAiController {
         case loading(bubbleText: String, onDevice: Bool)
         case result(AiChatEntry)
         case error(String)
+        /// Popup open in history-only mode (browse this book's past Q&A, no active request).
+        case browsingHistory
 
         /// The bubble text the popup is about, for the loading/error header.
         var bubbleText: String {
@@ -37,6 +39,7 @@ final class MangaAiController {
             case .loading(let text, _): return text
             case .result(let entry): return entry.bubbleText
             case .error: return ""
+            case .browsingHistory: return ""
             }
         }
 
@@ -92,22 +95,20 @@ final class MangaAiController {
         guard !trimmed.isEmpty else { return }
         lastRequest = { [weak self] in self?.ask(bubbleText: trimmed, book: book) }
 
-        // On-device path: when the toggle is on AND a model is available, translate locally.
-        if offlineSettings.useOnDeviceTranslation,
-           !offlineDownloads.downloadedModelIds().isEmpty {
+        // On-device path: when the toggle is on, never silently fall back to the cloud.
+        if offlineSettings.useOnDeviceTranslation {
+            guard !offlineDownloads.downloadedModelIds().isEmpty else {
+                state = .error("On-device translation is on but no model is downloaded. Download "
+                    + "one in Settings → On-device translation.")
+                return
+            }
             askOnDevice(bubbleText: trimmed, book: book)
             return
         }
 
         let apiKey = settings.apiKey
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            // On-device is selected but no model is downloaded → point to settings.
-            if offlineSettings.useOnDeviceTranslation {
-                state = .error("On-device translation is on but no model is downloaded. Download "
-                    + "one in Settings → On-device translation.")
-            } else {
-                state = .error("Set your OpenAI API key in Settings → ChatGPT.")
-            }
+            state = .error("Set your OpenAI API key in Settings → ChatGPT.")
             return
         }
         let model = settings.model
@@ -146,7 +147,6 @@ final class MangaAiController {
     /// lookup and persists the exchange identically to the cloud path (the synced wire shape is
     /// unchanged), attaching a one-line tok/s telemetry footer to `debugInfo` like Android.
     private func askOnDevice(bubbleText trimmed: String, book: BookMetadata) {
-        let model = offlineSettings.selectedModel
         let prompt = settings.promptText
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
@@ -162,7 +162,7 @@ final class MangaAiController {
                     bubbleText: trimmed,
                     prompt: prompt,
                     // Record which on-device model produced the reply (mirrors the cloud `model`).
-                    model: model.id,
+                    model: result.modelId,
                     response: result.text,
                     timestampSeconds: Date().timeIntervalSinceReferenceDate,
                     dictionaryLookup: lookup,
@@ -240,6 +240,13 @@ final class MangaAiController {
     func dismiss() {
         cancel()
         state = .idle
+    }
+
+    /// Opens the popup in history-only mode so the user can browse this book's past Q&A from the
+    /// reader menu, without first tapping a bubble to start a new request.
+    func browseHistory() {
+        cancel()
+        state = .browsingHistory
     }
 
     // MARK: - Persistence

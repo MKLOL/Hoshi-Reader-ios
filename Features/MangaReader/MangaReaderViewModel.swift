@@ -168,7 +168,8 @@ final class MangaReaderViewModel {
 
     // MARK: Rendering
 
-    func renderCurrentPage(controller: MangaWebViewController, screenSize: CGSize, userConfig: UserConfig) {
+    func renderCurrentPage(controller: MangaWebViewController, screenSize: CGSize, userConfig: UserConfig,
+                           onLoadToken: ((Int) -> Void)? = nil) {
         guard let book, !book.pages.isEmpty, screenSize.width > 0, screenSize.height > 0 else { return }
         let index = max(0, min(pageIndex, book.pages.count - 1))
         let page = book.pages[index]
@@ -186,7 +187,8 @@ final class MangaReaderViewModel {
         Task { [renderCache] in
             let html = await renderCache.htmlFor(page: page, config: config)
             guard self.renderGeneration == generation else { return }
-            controller.load(html: html, allowedImagePaths: allowedPaths)
+            let loadToken = controller.load(html: html, allowedImagePaths: allowedPaths)
+            onLoadToken?(loadToken)
             self.preloadAdjacentPages(config: config)
         }
 

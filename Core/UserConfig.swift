@@ -395,8 +395,8 @@ class UserConfig {
         self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false
         self.mangaScanNonJapaneseText = defaults.object(forKey: "mangaScanNonJapaneseText") as? Bool ?? false
 
-        self.popupWidth = defaults.object(forKey: "popupWidth") as? Int ?? 320
-        self.popupHeight = defaults.object(forKey: "popupHeight") as? Int ?? 250
+        self.popupWidth = defaults.object(forKey: "popupWidth") as? Int ?? 240
+        self.popupHeight = defaults.object(forKey: "popupHeight") as? Int ?? 170
         self.popupFullWidth = defaults.object(forKey: "popupFullWidth") as? Bool ?? false
         self.popupSwipeToDismiss = defaults.object(forKey: "popupSwipeToDismiss") as? Bool ?? false
         self.popupSwipeThreshold = defaults.object(forKey: "popupSwipeThreshold") as? Int ?? 40

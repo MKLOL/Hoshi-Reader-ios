@@ -365,9 +365,13 @@ class DictionaryManager {
                             if let currentIndex = self.getDictionaryIndex(title: old, type: type) {
                                 let wasEnabled = self.isDictionaryEnabled(at: currentIndex, type: type)
                                 self.deleteDictionary(indexSet: IndexSet(integer: currentIndex), type: type)
-                                let importedIndex = self.getDictionaryIndex(title: new, type: type)!
-                                self.setDictionaryEnabled(index: importedIndex, enabled: wasEnabled, type: type)
-                                self.moveDictionary(from: IndexSet(integer: importedIndex), to: currentIndex, type: type)
+                                // The re-imported dictionary should be findable by its new title, but
+                                // if a title mismatch/collision means it isn't, skip the enable/move
+                                // rather than force-unwrapping into a crash.
+                                if let importedIndex = self.getDictionaryIndex(title: new, type: type) {
+                                    self.setDictionaryEnabled(index: importedIndex, enabled: wasEnabled, type: type)
+                                    self.moveDictionary(from: IndexSet(integer: importedIndex), to: currentIndex, type: type)
+                                }
                                 AnkiManager.shared.updateHandlebar(old: old, new: new)
                             }
                         } else {

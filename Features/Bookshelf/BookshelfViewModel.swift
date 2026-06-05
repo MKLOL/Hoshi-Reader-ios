@@ -31,10 +31,36 @@ class BookshelfViewModel {
     func loadBooks() {
         do {
             books = try BookStorage.loadAllBooks()
+            backfillMissingMokuroCovers()
             loadBookProgress()
             loadShelves()
         } catch {
             showError(message: error.localizedDescription)
+        }
+    }
+
+    /// Synced mokuro books often arrive without a cover.jpg (cross-platform / ッツ payloads omit it),
+    /// so the shelf shows them blank. Generate a cover from page 1 the first time we encounter such a
+    /// book, then persist it so this runs at most once per book. Tolerant of any per-book failure.
+    private func backfillMissingMokuroCovers() {
+        guard let booksDir = try? BookStorage.getBooksDirectory() else { return }
+        for i in books.indices where books[i].cover == nil {
+            guard let folder = books[i].folder else { continue }
+            let root = booksDir.appendingPathComponent(folder)
+            guard ContentType.detect(bookDir: root) == .mokuro else { continue }
+            let imagesDir = root.appendingPathComponent(FileNames.mokuroImages)
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path(percentEncoded: false)) else { continue }
+            var firstName: String? = nil
+            for name in names.sorted() where !name.hasPrefix(".") { firstName = name; break }
+            guard let firstName else { continue }
+            do {
+                try MokuroCover.generateThumbnail(
+                    from: imagesDir.appendingPathComponent(firstName),
+                    to: root.appendingPathComponent("cover.jpg")
+                )
+                books[i].cover = "Books/\(folder)/cover.jpg"
+                try? BookStorage.save(books[i], inside: root, as: FileNames.metadata)
+            } catch { continue }
         }
     }
     
@@ -177,9 +203,9 @@ class BookshelfViewModel {
             // re-importing this book before that push runs. Mirrors Android's
             // BookshelfRepository.recordHttpSyncTombstone. Only books with a derivable syncId
             // participate in sync, so skip the record when the title yields no syncId.
-            if let title = book.title, let syncId = deriveSyncId(title) {
+            if let title = book.title, let bookSyncId = syncId(for: book) {
                 HttpSyncDeletedBookStore.record(
-                    syncId: syncId,
+                    syncId: bookSyncId,
                     title: title,
                     contentType: book.resolvedContentType,
                     deletedAt: rfc3339Now()
@@ -483,7 +509,8 @@ class BookshelfViewModel {
                 folder: bookFolder.lastPathComponent,
                 lastAccess: Date(),
                 contentType: .epub,
-                importedAt: rfc3339Now()
+                importedAt: rfc3339Now(),
+                syncId: deriveSyncId(document.title, folderName: bookFolder.lastPathComponent)
             )
             
             let bookinfo = BookProcessor.process(document: document)

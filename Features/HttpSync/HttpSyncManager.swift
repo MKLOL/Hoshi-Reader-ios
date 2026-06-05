@@ -17,11 +17,18 @@
 //
 
 import Foundation
+import os
 
 @Observable
 @MainActor
 final class HttpSyncManager {
     static let shared = HttpSyncManager()
+
+    /// Sync diagnostics. Inspect on a connected device with:
+    ///   log stream --predicate 'subsystem == "com.dragosristache.hoshi" && category == "HttpSync"'
+    /// or in Console.app filtered to the Hoshi Reader process. Errors are logged at .error so they
+    /// survive in the persistent log store even when the app isn't attached to a debugger.
+    private let log = Logger(subsystem: "com.dragosristache.hoshi", category: "HttpSync")
 
     /// True while a `syncNow()` reconcile is in flight (drives the settings screen spinner).
     private(set) var isSyncing = false
@@ -62,7 +69,12 @@ final class HttpSyncManager {
             await reconcileTask.value
             return
         }
-        let task = Task { await runReconcile() }
+        // `@MainActor in` is load-bearing: without it this Task runs on the cooperative pool, so the
+        // whole reconcile (which the author intends to be MainActor-isolated for race-free file IO)
+        // executes off the main actor. Every @MainActor closure it then hands to a stdlib generic
+        // trips a dynamic executor check and traps the app (EXC_BREAKPOINT). Pinning the task to the
+        // main actor keeps the reconcile on main, matching its design and removing that crash class.
+        let task = Task { @MainActor in await runReconcile() }
         reconcileTask = task
         await task.value
         reconcileTask = nil
@@ -71,11 +83,13 @@ final class HttpSyncManager {
     private func runReconcile() async {
         guard settings.isConfigured else {
             lastError = "HTTP sync is not configured. Add a base URL and token first."
+            log.error("syncNow aborted: not configured")
             return
         }
         let config = settings.currentConfig()
         let cursor = settings.lastSyncedAt
 
+        log.info("syncNow starting (cursor=\(cursor ?? "nil", privacy: .public))")
         isSyncing = true
         lastError = nil
         progress = HttpSyncProgress(
@@ -116,8 +130,12 @@ final class HttpSyncManager {
         }
         lastErrors = result.errors
         lastStatus = result.summary()
-        if !result.errors.isEmpty {
+        if result.errors.isEmpty {
+            log.info("syncNow done: \(result.summary(), privacy: .public)")
+        } else {
             lastError = result.errors.first
+            log.error("syncNow finished with \(result.errors.count) error(s): \(result.summary(), privacy: .public)")
+            for err in result.errors { log.error("syncNow error: \(err, privacy: .public)") }
         }
     }
 
@@ -128,28 +146,27 @@ final class HttpSyncManager {
     /// server's. No-ops silently when sync is disabled / unconfigured; never throws. Returns
     /// immediately — the PUT happens in a detached task (network IO is off-thread).
     func onPageTurnPersisted(book: BookMetadata) {
-        guard let title = book.title, let folder = book.folder,
-              settings.enabled, settings.isConfigured, deriveSyncId(title) != nil,
+        guard let folder = book.folder, let bookSyncId = syncId(for: book),
+              settings.enabled, settings.isConfigured,
               let booksDir = try? BookStorage.getBooksDirectory() else { return }
         let config = settings.currentConfig()
         let root = booksDir.appendingPathComponent(folder)
-        Task { await Self.pushBookmark(config: config, title: title, root: root) }
+        Task { await Self.pushBookmark(config: config, syncId: bookSyncId, root: root) }
     }
 
     /// Call after a chat entry has been appended to `ai_chat_log.json` for `book`. PUTs the single
     /// content-addressed chat key. Idempotent (re-pushes write identical bytes). No-ops when sync
     /// is disabled / unconfigured; never throws.
     func onChatEntryPersisted(book: BookMetadata, entry: AiChatEntry) {
-        guard let title = book.title,
-              settings.enabled, settings.isConfigured, let syncId = deriveSyncId(title) else { return }
+        guard let bookSyncId = syncId(for: book),
+              settings.enabled, settings.isConfigured else { return }
         let config = settings.currentConfig()
-        Task { await Self.pushChatEntry(config: config, syncId: syncId, entry: entry) }
+        Task { await Self.pushChatEntry(config: config, syncId: bookSyncId, entry: entry) }
     }
 
     // MARK: - Push implementations
 
-    private static func pushBookmark(config: HttpSyncConfig, title: String, root: URL) async {
-        guard let syncId = deriveSyncId(title) else { return }
+    private static func pushBookmark(config: HttpSyncConfig, syncId: String, root: URL) async {
         let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         let key = SyncKeys.bookmark(syncId)
         let decoder = JSONDecoder()

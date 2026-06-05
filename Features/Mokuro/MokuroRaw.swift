@@ -108,13 +108,16 @@ extension RawMokuroPage {
 extension RawMokuroBlock {
     nonisolated func toMokuroTextBox() -> MokuroTextBox? {
         guard box.count >= 4 else { return nil }
-        // mokuro stores box as [xMin, yMin, xMax, yMax] in image-pixel coordinates.
-        let xMin = box[0], yMin = box[1], xMax = box[2], yMax = box[3]
-        let width = max(0, Int(xMax - xMin))
-        let height = max(0, Int(yMax - yMin))
+        // mokuro stores box as [xMin, yMin, xMax, yMax] in image-pixel coordinates. Corrupt files
+        // can carry NaN / infinite / out-of-Int-range values, and Int(Double) traps on those, so
+        // route every conversion through mokuroSafeInt (clamps to a sane pixel range).
+        let xMin = mokuroSafeInt(box[0]), yMin = mokuroSafeInt(box[1])
+        let xMax = mokuroSafeInt(box[2]), yMax = mokuroSafeInt(box[3])
+        let width = max(0, xMax - xMin)
+        let height = max(0, yMax - yMin)
         return MokuroTextBox(
-            left: Int(xMin),
-            top: Int(yMin),
+            left: xMin,
+            top: yMin,
             width: width,
             height: height,
             fontSize: clampMokuroFontSize(mokuroFontSize: fontSize),
@@ -144,14 +147,24 @@ private extension String {
 /// The result depends only on `mokuroFs` — not box size, orientation, or line count — so two
 /// bubbles with the same mokuro-reported glyph height reveal at the same OCR text size. Ported
 /// verbatim from the Android `clampMokuroFontSize` (READABLE_TARGET_PX = 30, BOOST_STRENGTH = 0.5).
+/// Clamp a possibly-NaN / infinite / out-of-range Double (from a corrupt mokuro.json) to a sane
+/// pixel Int. `Int(Double)` traps on non-finite or out-of-Int-range input, so decoded mokuro
+/// values must never be passed to it raw.
+nonisolated func mokuroSafeInt(_ value: Double) -> Int {
+    guard value.isFinite else { return 0 }
+    return Int(min(max(value, -1_000_000), 1_000_000))
+}
+
 nonisolated func clampMokuroFontSize(mokuroFontSize: Double) -> Int {
-    let mokuroFs = max(1, Int(mokuroFontSize))
+    let mokuroFs = max(1, mokuroSafeInt(mokuroFontSize))
     let headroom = max(0.0, MokuroFontTuning.readableTargetPx - Double(mokuroFs))
     return max(1, Int(Double(mokuroFs) + headroom * MokuroFontTuning.boostStrength))
 }
 
 nonisolated enum MokuroFontTuning {
-    /// Target drawn-glyph height (image pixels) considered comfortably tappable.
+    /// Verified against the Android source (MokuroBookParser.kt `clampMokuroFontSize`):
+    /// `mokuroFs + max(0, READABLE_TARGET_PX - mokuroFs) * BOOST_STRENGTH`, constants 30.0 / 0.5.
+    /// The iOS font FORMULA already matches Android exactly — kept identical on purpose.
     static let readableTargetPx = 30.0
     static let boostStrength = 0.5
 }

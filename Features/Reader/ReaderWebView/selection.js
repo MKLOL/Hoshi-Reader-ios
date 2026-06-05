@@ -20,6 +20,23 @@ window.hoshiSelection = {
     isScanBoundary(char) {
         return /^[\s\u3000]$/.test(char) || this.scanDelimiters.includes(char);
     },
+
+    isJapaneseChar(char) {
+        return /[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]/u.test(char);
+    },
+
+    isJapaneseText(text) {
+        for (const char of text) {
+            if (this.isJapaneseChar(char)) {
+                return true;
+            }
+        }
+        return false;
+    },
+
+    allowsScanText(text) {
+        return window.scanNonJapaneseText !== false || this.isJapaneseText(text);
+    },
     
     isFurigana(node) {
         const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
@@ -116,7 +133,11 @@ window.hoshiSelection = {
             charRange.setStart(node, offset);
             charRange.setEnd(node, offset + 1);
             if (this.inCharRange(charRange, x, y)) {
-                if (this.isScanBoundary(text[offset])) {
+                const char = text[offset];
+                if (this.isScanBoundary(char)) {
+                    return null;
+                }
+                if (window.scanNonJapaneseText === false && !this.isJapaneseChar(char)) {
                     return null;
                 }
                 return { node, offset };
@@ -284,6 +305,10 @@ window.hoshiSelection = {
         if (!text) {
             return null;
         }
+        if (!this.allowsScanText(text)) {
+            this.clearSelection();
+            return null;
+        }
         
         this.selection = {
             startNode: hit.node,
@@ -308,7 +333,22 @@ window.hoshiSelection = {
         if (!this.selection?.ranges.length) {
             return null;
         }
-        
+
+        // Manga (mokuro) only: anchor the popup to the WHOLE OCR bubble, not the tapped character,
+        // so it can be placed clear of the bubble being read. EPUB has no `.ocr-box`, so it keeps
+        // using the precise character rect below. Done here at the source (rather than via a fragile
+        // messageHandler shim) so it's reliable. Convert to host coords if the manga bridge is present.
+        const selNode = this.selection.startNode;
+        const selEl = selNode && (selNode.nodeType === 1 ? selNode : selNode.parentElement);
+        const ocrBox = selEl && selEl.closest && selEl.closest('.ocr-box');
+        if (ocrBox) {
+            let r = ocrBox.getBoundingClientRect();
+            if (window.hoshiManga && window.hoshiManga.hostRectFromViewportRect) {
+                r = window.hoshiManga.hostRectFromViewportRect(r);
+            }
+            return { x: r.x, y: r.y, width: r.width, height: r.height };
+        }
+
         const first = this.selection.ranges[0];
         const range = document.createRange();
         range.setStart(first.node, first.start);

@@ -48,7 +48,22 @@ class LocalFileServer {
             return
         }
         
-        let newListener = try! NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+        let newListener: NWListener
+        do {
+            newListener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+        } catch {
+            // The port can still be held by the previous listener on a fast relaunch / audio-server
+            // toggle / background→foreground churn. Retry shortly instead of trapping (this `try!`
+            // crashed the app on relaunch).
+            listener = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self else { return }
+                if self.listener == nil && (self.localAudioEnabled || self.coverData != nil) {
+                    self.startServer()
+                }
+            }
+            return
+        }
         newListener.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 guard let self else {
@@ -88,10 +103,15 @@ class LocalFileServer {
         guard listener != nil, backgroundTask == .invalid else {
             return
         }
-        backgroundTask = UIApplication.shared.beginBackgroundTask {
-            self.listener?.cancel()
-            self.listener = nil
-            self.endBackgroundTask()
+        backgroundTask = UIApplication.shared.beginBackgroundTask { [weak self] in
+            // The expiration handler is invoked on an arbitrary thread; hop to the main actor before
+            // touching this @MainActor type's state (listener/backgroundTask) to avoid a data race.
+            Task { @MainActor in
+                guard let self else { return }
+                self.listener?.cancel()
+                self.listener = nil
+                self.endBackgroundTask()
+            }
         }
     }
     
@@ -171,7 +191,10 @@ class LocalFileServer {
         let term = request.query["term"] ?? ""
         let rawReading = request.query["reading"] ?? ""
         let reading = katakanaToHiragana(rawReading)
-        let dbURL = try! BookStorage.getAppDirectory().appendingPathComponent(Self.localAudioPath)
+        guard let dbURL = try? BookStorage.getAppDirectory().appendingPathComponent(Self.localAudioPath) else {
+            sendEmpty(to: connection)
+            return
+        }
         
         var db: OpaquePointer?
         sqlite3_open(dbURL.path(percentEncoded: false), &db)
@@ -220,14 +243,24 @@ class LocalFileServer {
         }
         
         if sqlite3_step(stmt) == SQLITE_ROW {
-            let source = String(cString: sqlite3_column_text(stmt, 0))
-            let file = String(cString: sqlite3_column_text(stmt, 1))
+            // sqlite3_column_text returns NULL for a SQL NULL column; String(cString:) traps on NULL.
+            // A foreign / partially-populated local-audio DB can have NULL source/file → guard it.
+            guard let sourcePtr = sqlite3_column_text(stmt, 0),
+                  let filePtr = sqlite3_column_text(stmt, 1) else {
+                sendEmpty(to: connection)
+                return
+            }
+            let source = String(cString: sourcePtr)
+            let file = String(cString: filePtr)
             
             let encodedFile = file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file
             let url = "http://localhost:\(Self.port)/localaudio/\(source)/\(encodedFile)"
             
             let response: [String: Any] = ["type": "audioSourceList", "audioSources": [["name": source, "url": url]]]
-            let data = try! JSONSerialization.data(withJSONObject: response)
+            guard let data = try? JSONSerialization.data(withJSONObject: response) else {
+                sendEmpty(to: connection)
+                return
+            }
             send(data, status: "200 OK", contentType: "application/json", to: connection)
             return
         }
@@ -240,10 +273,18 @@ class LocalFileServer {
         let prefix = "/localaudio/"
         let tail = String(path.dropFirst(prefix.count))
         let parts = tail.split(separator: "/", maxSplits: 1)
-        
-        let source = String(parts.first ?? "")
+        // A well-formed request is /localaudio/<source>/<file>. Anything with no second segment
+        // (e.g. /localaudio/foo, or a stray LAN probe) must 404, not trap on parts[1].
+        guard parts.count >= 2 else {
+            send(Data(), status: "404 Not Found", contentType: "text/plain; charset=utf-8", to: connection)
+            return
+        }
+        let source = String(parts[0])
         let file = String(parts[1]).removingPercentEncoding
-        let dbURL = try! BookStorage.getAppDirectory().appendingPathComponent(Self.localAudioPath)
+        guard let dbURL = try? BookStorage.getAppDirectory().appendingPathComponent(Self.localAudioPath) else {
+            send(Data(), status: "404 Not Found", contentType: "text/plain; charset=utf-8", to: connection)
+            return
+        }
         
         var db: OpaquePointer?
         sqlite3_open(dbURL.path(percentEncoded: false), &db)

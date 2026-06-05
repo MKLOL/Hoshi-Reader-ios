@@ -41,10 +41,12 @@ final class MangaWebViewController {
 
     /// Replaces the rendered page. `allowedImagePaths` is the allow-list of book-root-relative
     /// image paths the scheme handler may serve for this page (normally just the page's image).
-    func load(html: String, allowedImagePaths: Set<String>) {
+    @discardableResult
+    func load(html: String, allowedImagePaths: Set<String>) -> Int {
         self.pendingHtml = html
         self.allowedImagePaths = allowedImagePaths
         loadToken += 1
+        return loadToken
     }
 
     /// Hides any revealed OCR plates/buttons before a raw page crop.
@@ -115,8 +117,8 @@ struct MangaReaderWebView: UIViewRepresentable {
     var onAskAi: (String) -> Void
     /// A bubble's copy button was tapped — bubble text to copy.
     var onCopy: (String) -> Void
-    /// Called once the page HTML finished loading.
-    var onPageReady: () -> Void
+    /// Called once the page HTML finished loading, with the controller load token for that navigation.
+    var onPageReady: (Int) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -167,10 +169,13 @@ struct MangaReaderWebView: UIViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.bookRoot = controller.bookRootForScheme
         if context.coordinator.lastLoadToken != controller.loadToken, let html = controller.pendingHtml {
-            context.coordinator.lastLoadToken = controller.loadToken
+            let loadToken = controller.loadToken
+            context.coordinator.lastLoadToken = loadToken
             context.coordinator.allowedImagePaths = controller.allowedImagePaths
             webView.scrollView.setZoomScale(1, animated: false)
-            webView.loadHTMLString(html, baseURL: URL(string: MangaPageHtml.baseURLString))
+            if let navigation = webView.loadHTMLString(html, baseURL: URL(string: MangaPageHtml.baseURLString)) {
+                context.coordinator.trackNavigation(navigation, loadToken: loadToken)
+            }
         }
     }
 
@@ -196,6 +201,9 @@ struct MangaReaderWebView: UIViewRepresentable {
         /// In-flight scheme tasks by identity; a task that WebKit has `stop`ped is removed, so we
         /// never call back into a cancelled task (which throws).
         private var activeSchemeTasks = Set<ObjectIdentifier>()
+        /// WKNavigation -> controller load token. `didFinish` can arrive out of order during fast
+        /// page turns, so the host only trusts completions for the navigation it asked to load.
+        private var navigationLoadTokens: [ObjectIdentifier: Int] = [:]
 
         init(_ parent: MangaReaderWebView) {
             self.parent = parent
@@ -203,9 +211,29 @@ struct MangaReaderWebView: UIViewRepresentable {
 
         // MARK: Navigation
 
+        func trackNavigation(_ navigation: WKNavigation, loadToken: Int) {
+            navigationLoadTokens[ObjectIdentifier(navigation)] = loadToken
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard let navigation else { return }
+            guard let finishedLoadToken = navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation)) else {
+                return
+            }
             parent.controller.syncHostScale()
-            parent.onPageReady()
+            parent.onPageReady(finishedLoadToken)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if let navigation {
+                navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation))
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if let navigation {
+                navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation))
+            }
         }
 
         // MARK: Script messages

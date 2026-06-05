@@ -67,9 +67,9 @@ struct HoshiReaderApp: App {
             }
             .onChange(of: shortcutHandler.pendingType, initial: true) { _, type in
                 switch type {
-                case "de.manhhao.hoshi.books":
+                case "com.dragosristache.hoshi.books":
                     pendingTab = 0
-                case "de.manhhao.hoshi.dictionary":
+                case "com.dragosristache.hoshi.dictionary":
                     pendingLookup = ""
                 default:
                     break

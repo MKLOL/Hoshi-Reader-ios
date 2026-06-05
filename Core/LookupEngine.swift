@@ -58,6 +58,9 @@ class LookupEngine {
     }
     
     func withMediaFile<T>(dictName: String, mediaPath: String, _ body: (Data) -> T) -> T {
+        // dictQuery is nil until buildQuery() runs (e.g. media fetch before any dictionary is built);
+        // every other accessor optional-chains, so don't force-unwrap into a trap here.
+        guard dictQuery != nil else { return body(Data()) }
         let view = dictQuery!.get_media_file_view(std.string(dictName), std.string(mediaPath))
         let size = Int(view.size)
         guard size > 0, let ptr = UnsafeMutableRawPointer(mutating: view.data) else {

@@ -84,7 +84,11 @@ final class OfflineLlmManager {
     /// `true` while a load/translate is in flight; followers park in `gateWaiters` and are resumed
     /// FIFO. Staying on the main actor avoids crossing any actor boundary with non-`Sendable` state.
     private var gateBusy = false
-    private var gateWaiters: [CheckedContinuation<Void, Never>] = []
+    private struct GateWaiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+    private var gateWaiters: [GateWaiter] = []
 
     /// Keeps the memory-warning observer alive for the lifetime of this (singleton) manager.
     private var memoryWarningObserver: NSObjectProtocol?
@@ -118,12 +122,23 @@ final class OfflineLlmManager {
     // MARK: - Serialization gate
 
     /// Acquires the gate, parking FIFO if another operation holds it.
-    private func gateAcquire() async {
+    private func gateAcquire() async throws {
+        try Task.checkCancellation()
         if !gateBusy {
             gateBusy = true
             return
         }
-        await withCheckedContinuation { gateWaiters.append($0) }
+        let waiterId = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                gateWaiters.append(GateWaiter(id: waiterId, continuation: continuation))
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelGateWaiter(id: waiterId)
+            }
+        }
+        try Task.checkCancellation()
     }
 
     /// Releases the gate, waking the next waiter (if any).
@@ -131,8 +146,14 @@ final class OfflineLlmManager {
         if gateWaiters.isEmpty {
             gateBusy = false
         } else {
-            gateWaiters.removeFirst().resume()
+            gateWaiters.removeFirst().continuation.resume(returning: ())
         }
+    }
+
+    private func cancelGateWaiter(id: UUID) {
+        guard let index = gateWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = gateWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
     }
 
     // MARK: - Load
@@ -140,13 +161,15 @@ final class OfflineLlmManager {
     /// Ensures `modelId` is loaded and resident, swapping out a different model if needed. The heavy
     /// `LLM(...)` load runs on a detached background task off the main actor.
     func ensureLoaded(modelId: String) async throws {
-        await gateAcquire()
+        try await gateAcquire()
         defer { gateRelease() }
+        try Task.checkCancellation()
         try await loadLocked(modelId: modelId)
     }
 
     /// Loads `modelId` if it isn't already the resident model. Caller must hold the gate.
     private func loadLocked(modelId: String) async throws {
+        try Task.checkCancellation()
         if loadedModelId == modelId, loaded != nil { return }
 
         guard let model = LlmModelCatalog.byId(modelId) else {
@@ -159,26 +182,11 @@ final class OfflineLlmManager {
             )
         }
 
-        // RAM guard: don't try to load a model larger than this device can hold — otherwise iOS
-        // jetsam-kills the app with no explanation. `os_proc_available_memory()` is this app's
-        // remaining allocatable bytes before the jetsam limit; a loaded GGUF needs roughly its file
-        // size plus headroom for the KV cache + runtime. Checked BEFORE we unload the current model,
-        // so a failed big-model load doesn't also drop a working one. (Returns 0 where unavailable
-        // e.g. the simulator — skip the check then.)
-        let availableMemory = Int64(os_proc_available_memory())
-        if availableMemory > 0 {
-            let needed = model.approxSizeBytes + model.approxSizeBytes / 4
-            if needed > availableMemory {
-                let fmt = ByteCountFormatter()
-                fmt.allowedUnits = [.useGB]
-                fmt.countStyle = .memory
-                throw OfflineLlmError(
-                    message: "Not enough free memory to load \(model.displayName) on this device "
-                        + "(needs ~\(fmt.string(fromByteCount: needed)), ~\(fmt.string(fromByteCount: availableMemory)) free). "
-                        + "Try a smaller model."
-                )
-            }
-        }
+        // No pre-load RAM guard (removed at the user's request). The old guard compared the small
+        // per-app `os_proc_available_memory()` headroom against 1.25× the file size and rejected
+        // models the device can actually run — llama.cpp mmaps the GGUF (it isn't all resident at
+        // once) and the `com.apple.developer.kernel.increased-memory-limit` entitlement raises the
+        // cap. We let the load proceed and rely on iOS to manage memory.
 
         // Free the outgoing model before loading the new one (one resident at a time). Dropping the
         // `LLM` reference doesn't synchronously free its llama context (the heavy state lives in the
@@ -199,6 +207,7 @@ final class OfflineLlmManager {
 
         let template = model.llmTemplate
         let maxCtx = min(Self.contextCap, model.contextLength)
+        try Task.checkCancellation()
         // The synchronous, memory-heavy load is moved off the main actor. `LLM` isn't `Sendable`,
         // so it travels back to the main actor inside an unchecked box; this is safe because the
         // instance is only ever used here (one resident, main-actor-confined) and its heavy state
@@ -206,6 +215,12 @@ final class OfflineLlmManager {
         let boxed = await Task.detached(priority: .userInitiated) { () -> UncheckedBox<LLM?> in
             UncheckedBox(LLM(from: url, template: template, maxTokenCount: maxCtx))
         }.value
+        if Task.isCancelled {
+            boxed.value?.stop()
+            status = .idle
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
         let llm = boxed.value
 
         guard let llm else {
@@ -249,10 +264,12 @@ final class OfflineLlmManager {
 
         // Hold the gate across BOTH the (re)load and the generation so a concurrent delete or model
         // swap can't free the model mid-translation.
-        await gateAcquire()
+        try await gateAcquire()
         defer { gateRelease() }
 
+        try Task.checkCancellation()
         try await loadLocked(modelId: model.id)
+        try Task.checkCancellation()
         guard let llm = loaded else {
             throw OfflineLlmError(message: "On-device model is not loaded.")
         }

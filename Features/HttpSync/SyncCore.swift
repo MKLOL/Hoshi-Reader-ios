@@ -50,6 +50,28 @@ nonisolated func deriveSyncId(_ title: String?) -> String? {
     return "\(prefix)_\(hash)"
 }
 
+/// Computes the initial persisted sync id for a local import. The base title-only algorithm stays
+/// Android-compatible for ordinary books; if the actual on-disk folder was uniquified for a title
+/// collision, append a deterministic folder hash so the two local books do not share one server key.
+nonisolated func deriveSyncId(_ title: String?, folderName: String?) -> String? {
+    guard let base = deriveSyncId(title) else { return nil }
+    let folder = (folderName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !folder.isEmpty, let folderDerived = deriveSyncId(folder), folderDerived != base else {
+        return base
+    }
+
+    let hash = shortTitleHash(folder)
+    let prefixLength = syncIdMaxSegmentLength - hash.count - 1
+    var prefix = trimUnderscores(String(base.prefix(max(1, prefixLength))))
+    if prefix.isEmpty { prefix = "book" }
+    return "\(prefix)_\(hash)"
+}
+
+/// Returns the stable sync id for a metadata record, backfilling legacy records from title+folder.
+nonisolated func syncId(for metadata: BookMetadata) -> String? {
+    metadata.syncId ?? deriveSyncId(metadata.title, folderName: metadata.folder)
+}
+
 nonisolated private func collapseUnderscores(_ s: String) -> String {
     var out = ""
     out.reserveCapacity(s.count)

@@ -47,8 +47,12 @@ struct HttpSyncKvFileFetched {
 /// All sync transport failures funnel through this so callers can `try?`/`catch` one type.
 struct HttpSyncError: LocalizedError {
     let message: String
+    /// When true, the reconciler advances its cursor PAST this item instead of retrying it on every
+    /// sync (e.g. the device can't fit this book). Prevents the "re-download the same GB payload
+    /// forever" loop on a storage-starved device.
+    let skip: Bool
     var errorDescription: String? { message }
-    init(_ message: String) { self.message = message }
+    init(_ message: String, skip: Bool = false) { self.message = message; self.skip = skip }
 }
 
 // MARK: - Transport protocol
@@ -132,6 +136,13 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             config.timeoutIntervalForRequest = 30
             config.timeoutIntervalForResource = 600
             config.waitsForConnectivity = false
+            // Never persist sync responses to the on-disk URL cache. Caching KV GETs is pointless
+            // (the reconciler does its own LWW comparison and re-lists every pass), and when the
+            // device's Caches volume is full or its cache DB is wedged, every response write fails
+            // with SQLITE_IOERR. That flood previously trapped the app (signal 5) mid-sync. Opting
+            // out of the URL cache removes both the noise and the crash trigger.
+            config.urlCache = nil
+            config.requestCachePolicy = .reloadIgnoringLocalCacheData
             self.session = URLSession(configuration: config)
         }
         self.multipartPartSizeBytes = multipartPartSizeBytes

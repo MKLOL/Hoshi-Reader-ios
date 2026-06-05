@@ -163,16 +163,21 @@ struct HttpSyncReconciler {
         var minUnhandled: String?
     }
 
+    // Plain loops, NOT compactMap/filter/reduce. Under the project's default-MainActor isolation
+    // (SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor) every closure here is @MainActor, and handing a
+    // @MainActor closure to a stdlib generic inserts a *dynamic* executor check
+    // (swift_task_isCurrentExecutor). When the reconcile resumes off the main actor after an
+    // `await`, that check trips dispatch_assert_queue and traps (EXC_BREAKPOINT — the sync crash).
+    // Plain loops carry no such check, so this pure string/date math runs safely on any executor.
     private func safeNewCursor(currentCursor: String?, inbound: InboundCursor) -> String? {
-        let candidates = [currentCursor, inbound.maxHandled].compactMap { $0 }
+        var result: String? = nil
         let firstUnhandled = inbound.minUnhandled
-        let safe: [String]
-        if let firstUnhandled {
-            safe = candidates.filter { compareRfc3339($0, firstUnhandled) < 0 }
-        } else {
-            safe = candidates
+        for candidate in [currentCursor, inbound.maxHandled] {
+            guard let candidate else { continue }
+            if let firstUnhandled, compareRfc3339(candidate, firstUnhandled) >= 0 { continue }
+            result = maxRfc(result, candidate)
         }
-        return safe.reduce(nil) { acc, ts in maxRfc(acc, ts) }
+        return result
     }
 
     // MARK: - Key parsing
@@ -227,15 +232,37 @@ struct HttpSyncReconciler {
         var out: [LocalBook] = []
         for meta in metadatas {
             guard let title = meta.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  let folder = meta.folder, let syncId = deriveSyncId(title) else { continue }
+                  let folder = meta.folder, let bookSyncId = syncId(for: meta) else { continue }
             let root = booksDir.appendingPathComponent(folder)
+            // Backfill a missing importedAt (legacy books predating the field) ONCE, PERSISTED, so the
+            // tombstone-vs-local guard has a stable value. A nil importedAt makes the delete win and
+            // silently removes a present book the user still wants — but recomputing now() every
+            // reconcile would make a legacy book always beat any tombstone (deletes never propagate,
+            // and the outbound pass resurrects it). Persisting it once gives a fixed first-seen stamp:
+            // a future delete (deletedAt > stamp) then correctly wins.
+            var importedAt = meta.importedAt
+            var updated = meta
+            var shouldPersistMetadata = false
+            if importedAt == nil {
+                let stamp = rfc3339Now()
+                importedAt = stamp
+                updated.importedAt = stamp
+                shouldPersistMetadata = true
+            }
+            if updated.syncId == nil {
+                updated.syncId = bookSyncId
+                shouldPersistMetadata = true
+            }
+            if shouldPersistMetadata {
+                try? BookStorage.save(updated, inside: root, as: FileNames.metadata)
+            }
             out.append(LocalBook(
                 id: meta.id,
                 title: title,
-                syncId: syncId,
+                syncId: bookSyncId,
                 root: root,
                 contentType: ContentType.detect(bookDir: root),
-                importedAt: meta.importedAt
+                importedAt: importedAt
             ))
         }
         return out
@@ -365,7 +392,13 @@ struct HttpSyncReconciler {
                 }
             } catch {
                 result.errors.append("payload \(parsed.syncId): \(errorText(error))")
-                markUnhandled(meta)
+                // A `skip` error (e.g. can't ever fit this book) advances the cursor so we don't
+                // re-list and re-download it every sync; transient errors stay unhandled to retry.
+                if (error as? HttpSyncError)?.skip == true {
+                    markHandled(meta)
+                } else {
+                    markUnhandled(meta)
+                }
             }
         }
 
@@ -421,12 +454,21 @@ struct HttpSyncReconciler {
             }
         }
 
-        result.remoteOnlyBooks = remoteSyncIds.filter { rootsBySyncId[$0] == nil && !deletedSyncIds.contains($0) }.count
+        // Plain loop, not `.filter{}.count`: a @MainActor closure into a stdlib generic carries a
+        // dynamic executor check that traps if this runs off the main actor (see safeNewCursor).
+        var remoteOnly = 0
+        for id in remoteSyncIds where rootsBySyncId[id] == nil && !deletedSyncIds.contains(id) {
+            remoteOnly += 1
+        }
+        result.remoteOnlyBooks = remoteOnly
         return cursor
     }
 
     private func localBookId(_ books: [LocalBook], _ syncId: String) -> UUID? {
-        books.first { $0.syncId == syncId }?.id
+        // Plain loop, not `.first {…}` — a @MainActor closure into a stdlib generic traps when this
+        // runs off the main actor (this exact site crashed; see safeNewCursor).
+        for book in books where book.syncId == syncId { return book.id }
+        return nil
     }
 
     private struct RemoteMetadata { let blob: HttpSyncMetadataBlob; let hasShelfName: Bool }
@@ -451,7 +493,8 @@ struct HttpSyncReconciler {
             throw HttpSyncError("Bookmark at \(meta.key): malformed JSON.")
         }
         let local = BookStorage.loadBookmark(root: root)
-        let localModified = local?.lastModified.map { rfc3339(from: $0) }
+        var localModified: String? = nil
+        if let lm = local?.lastModified { localModified = rfc3339(from: lm) }
         if compareRfc3339(blob.lastModified, localModified) <= 0 { return false } // don't downgrade
         let bookmark = Bookmark(
             chapterIndex: blob.chapterIndex,
@@ -474,7 +517,7 @@ struct HttpSyncReconciler {
         }
         let incoming = blob.toEntry()
         var log = loadChatLog(root: root)
-        if log.entries.contains(where: { $0.matchesEntry(incoming) }) { return false }
+        for existingEntry in log.entries where existingEntry.matchesEntry(incoming) { return false }
         log.entries.append(incoming)
         saveChatLog(log, root: root)
         return true
@@ -543,9 +586,17 @@ struct HttpSyncReconciler {
     /// (creating the shelf if needed). `nil` shelfName leaves the book unshelved.
     private func applyShelfPlacement(bookId: UUID, shelfName: String?) {
         var shelves = BookStorage.loadShelves() ?? []
-        for i in shelves.indices { shelves[i].bookIds.removeAll { $0 == bookId } }
+        // Plain loops, not removeAll{…}/firstIndex(where:) — @MainActor closures into stdlib
+        // generics trap when this runs off the main actor (see safeNewCursor).
+        for i in shelves.indices {
+            var kept: [UUID] = []
+            for id in shelves[i].bookIds where id != bookId { kept.append(id) }
+            shelves[i].bookIds = kept
+        }
         if let shelfName {
-            if let idx = shelves.firstIndex(where: { $0.name == shelfName }) {
+            var targetIdx: Int? = nil
+            for i in shelves.indices where shelves[i].name == shelfName { targetIdx = i; break }
+            if let idx = targetIdx {
                 if !shelves[idx].bookIds.contains(bookId) { shelves[idx].bookIds.append(bookId) }
             } else {
                 shelves.append(BookShelf(name: shelfName, bookIds: [bookId]))
@@ -559,13 +610,33 @@ struct HttpSyncReconciler {
 
     private func importRemoteOnlyBook(syncId: String) async throws -> URL? {
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return nil }
+        // Free-space preflight: refuse a multi-GB download we could never unpack. Without this, a
+        // low-storage device downloads the whole payload, fails to unzip (disk full), deletes it,
+        // and — because the cursor never advances past it — re-downloads the SAME GB on every sync,
+        // forever. Throwing `skip: true` makes Pass 3 advance the cursor and surface an error instead.
+        if let manifest = try await payloadCodec.fetchManifest(transport: transport, syncId: syncId),
+           manifest.sizeBytes > 0 {
+            // 3× the (compressed) zip size: zip on disk during download + the unzipped copy (which can
+            // be larger than the zip for the text/JSON parts) + headroom. Erring high here keeps a
+            // book that won't fit out of the download→fail→delete→re-download loop the user hit.
+            let needed = Int64(Double(manifest.sizeBytes) * 3.0)
+            if let free = availableCapacityBytes(at: booksDir), free < needed {
+                let needGB = String(format: "%.1f", Double(needed) / 1_000_000_000)
+                let freeGB = String(format: "%.1f", Double(free) / 1_000_000_000)
+                throw HttpSyncError("Skipped \(syncId): need ~\(needGB) GB free to import, only \(freeGB) GB available.", skip: true)
+            }
+        }
         let targetRoot = booksDir.appendingPathComponent(syncId, isDirectory: true)
         // Avoid colliding with an existing directory; uniquify if needed.
         let root = uniqueDirectory(base: targetRoot)
         do {
             let manifest = try await payloadCodec.downloadAndUnpack(transport: transport, syncId: syncId, targetDir: root)
             let detected = ContentType.detect(bookDir: root)
+            // Prefer a cover.jpg shipped in the payload; otherwise generate one from page 1 (mokuro)
+            // so synced books show a cover like locally-imported ones do. Cross-platform / ッツ
+            // payloads frequently omit cover.jpg, which is why synced book covers were blank.
             let cover = resolveImportedCoverPath(root: root, folder: root.lastPathComponent)
+                ?? generateMokuroCoverIfMissing(root: root, contentType: detected)
             let metadata = BookMetadata(
                 id: UUID(),
                 title: manifest.originalName,
@@ -573,7 +644,8 @@ struct HttpSyncReconciler {
                 folder: root.lastPathComponent,
                 lastAccess: Date(timeIntervalSince1970: 0),
                 contentType: detected,
-                importedAt: rfc3339Now()
+                importedAt: rfc3339Now(),
+                syncId: syncId
             )
             try? BookStorage.save(metadata, inside: root, as: FileNames.metadata)
             // Page-based progress for mokuro so the shelf shows a progress bar before first open.
@@ -589,6 +661,35 @@ struct HttpSyncReconciler {
             try? FileManager.default.removeItem(at: root)
             throw error
         }
+    }
+
+    /// Generates `cover.jpg` from the first mokuro page when the synced payload didn't ship one, so
+    /// synced manga show a cover instead of a blank placeholder. Returns the relative cover path, or
+    /// nil (non-mokuro / no pages / generation failed — the shelf tolerates a nil cover).
+    private func generateMokuroCoverIfMissing(root: URL, contentType: ContentType) -> String? {
+        guard contentType == .mokuro else { return nil }
+        let imagesDir = root.appendingPathComponent(FileNames.mokuroImages)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path(percentEncoded: false)) else { return nil }
+        // First image by sorted filename ≈ page 1 (manga pages are zero-padded). Plain loop, no
+        // stdlib closure (off-main executor-trap safety).
+        var firstName: String? = nil
+        for name in names.sorted() where !name.hasPrefix(".") { firstName = name; break }
+        guard let firstName else { return nil }
+        do {
+            try MokuroCover.generateThumbnail(
+                from: imagesDir.appendingPathComponent(firstName),
+                to: root.appendingPathComponent("cover.jpg")
+            )
+            return "Books/\(root.lastPathComponent)/cover.jpg"
+        } catch {
+            return nil
+        }
+    }
+
+    /// Bytes the OS will let us use on the volume backing `url` (accounts for purgeable space).
+    private func availableCapacityBytes(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage
     }
 
     private func resolveImportedCoverPath(root: URL, folder: String) -> String? {
@@ -624,7 +725,8 @@ struct HttpSyncReconciler {
         let localBooks = loadLocalBooks()
         let snapshot = ShelfSnapshot.load()
         var shelfState = HttpSyncShelfStateStore.load()
-        let payloadBookCount = localBooks.filter { $0.contentType == .mokuro }.count
+        var payloadBookCount = 0
+        for b in localBooks where b.contentType == .mokuro { payloadBookCount += 1 }
         var payloadBookIndex = 0
 
         // Pass 0: push pending deleted-book tombstones. For each staged delete, PUT a metadata
@@ -634,7 +736,8 @@ struct HttpSyncReconciler {
         // a push so the live book's normal metadata push wins. Mirrors Android's tombstone loop.
         let pendingDeleted = HttpSyncDeletedBookStore.all()
         if !pendingDeleted.isEmpty {
-            let liveLocalSyncIds = Set(localBooks.map { $0.syncId })
+            var liveLocalSyncIds: Set<String> = []
+            for b in localBooks { liveLocalSyncIds.insert(b.syncId) }
             for syncId in pendingDeleted.keys where liveLocalSyncIds.contains(syncId) {
                 HttpSyncDeletedBookStore.remove(syncId: syncId)
                 shelfState.removeValue(forKey: syncId)
@@ -759,10 +862,13 @@ struct HttpSyncReconciler {
                         try await transport.listAll(prefix: SyncKeys.chatPrefix(book.syncId), since: nil) { meta in
                             existing.insert(meta.key)
                         }
-                        let missing: [(key: String, entry: AiChatEntry)] = entries.compactMap { entry in
+                        // Plain loop (not compactMap) so no @MainActor closure hits a stdlib generic
+                        // and trips the off-main executor check — same crash class as safeNewCursor.
+                        var missing: [(key: String, entry: AiChatEntry)] = []
+                        for entry in entries {
                             let suffix = chatEntryKeySuffix(timestampAppleSeconds: entry.timestampSeconds, bubbleText: entry.bubbleText, response: entry.response)
                             let key = SyncKeys.chat(book.syncId, suffix: suffix)
-                            return existing.contains(key) ? nil : (key, entry)
+                            if !existing.contains(key) { missing.append((key, entry)) }
                         }
                         for (chatIndex, upload) in missing.enumerated() {
                             await onProgress(HttpSyncProgress(
@@ -805,7 +911,8 @@ struct HttpSyncReconciler {
         let key = SyncKeys.bookmark(syncId)
         if let remote = try await transport.get(key: key),
            let remoteBlob = try? jsonDecoder.decode(HttpSyncBookmarkBlob.self, from: remote.body) {
-            let localStamp = local.lastModified.map { rfc3339(from: $0) }
+            var localStamp: String? = nil
+            if let lm = local.lastModified { localStamp = rfc3339(from: lm) }
             if compareRfc3339(remoteBlob.lastModified, localStamp) > 0 {
                 let bookmark = Bookmark(
                     chapterIndex: remoteBlob.chapterIndex,
@@ -925,7 +1032,9 @@ struct HttpSyncReconciler {
             var changed = false
             for i in shelves.indices {
                 let before = shelves[i].bookIds.count
-                shelves[i].bookIds.removeAll { $0 == bookId }
+                var kept: [UUID] = []
+                for id in shelves[i].bookIds where id != bookId { kept.append(id) }
+                shelves[i].bookIds = kept
                 if shelves[i].bookIds.count != before { changed = true }
             }
             if changed, let booksDir = try? BookStorage.getBooksDirectory() {

@@ -29,7 +29,7 @@
 			<string>Default</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>de.manhhao.hoshi.colpkg</string>
+				<string>com.dragosristache.hoshi.colpkg</string>
 			</array>
 		</dict>
 		<dict>
@@ -39,7 +39,7 @@
 			<string>Default</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>de.manhhao.hoshi.cbz</string>
+				<string>com.dragosristache.hoshi.cbz</string>
 				<string>public.zip-archive</string>
 			</array>
 		</dict>
@@ -50,7 +50,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>de.manhhao.hoshi</string>
+			<string>com.dragosristache.hoshi</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>hoshi</string>
@@ -65,7 +65,7 @@
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Books</string>
 			<key>UIApplicationShortcutItemType</key>
-			<string>de.manhhao.hoshi.books</string>
+				<string>com.dragosristache.hoshi.books</string>
 		</dict>
 		<dict>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
@@ -73,7 +73,7 @@
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Dictionary</string>
 			<key>UIApplicationShortcutItemType</key>
-			<string>de.manhhao.hoshi.dictionary</string>
+				<string>com.dragosristache.hoshi.dictionary</string>
 		</dict>
 	</array>
 	<key>UIBackgroundModes</key>
@@ -92,7 +92,7 @@
 			<key>UTTypeIconFiles</key>
 			<array/>
 			<key>UTTypeIdentifier</key>
-			<string>de.manhhao.hoshi.colpkg</string>
+			<string>com.dragosristache.hoshi.colpkg</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -112,7 +112,7 @@
 			<key>UTTypeIconFiles</key>
 			<array/>
 			<key>UTTypeIdentifier</key>
-			<string>de.manhhao.hoshi.cbz</string>
+			<string>com.dragosristache.hoshi.cbz</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

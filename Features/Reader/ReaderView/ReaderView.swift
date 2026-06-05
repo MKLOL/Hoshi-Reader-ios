@@ -607,7 +607,11 @@ struct ReaderView: View {
             }
         }
         .task(id: viewModel.isTracking) {
-            guard viewModel.isTracking, !viewModel.isPaused else {
+            // Don't gate the loop's EXISTENCE on isPaused: if the app was backgrounded (isPaused=true)
+            // before this task first ran, the early return killed reading-time tracking for the whole
+            // session even after returning to foreground. The inner `if !isPaused` already skips
+            // accrual while paused, so just keep the loop alive whenever tracking is on.
+            guard viewModel.isTracking else {
                 return
             }
             while !Task.isCancelled {

@@ -41,6 +41,7 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "ai_chat_log.json",         // synced as …/chat/…
     "metadata.json",            // per-device id + lastAccess; receiver makes its own
     "statistics.json",          // mutates as the user reads
+    "manga_statistics.json",    // mutates as the user reads manga
     "sasayaki_match.json",      // per-device audiobook alignment
     "sasayaki_playback.json",   // per-device playhead
     "bookinfo.json",            // derived locally at import

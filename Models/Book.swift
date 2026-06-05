@@ -24,7 +24,7 @@ enum SortOption: String, CaseIterable, Identifiable {
 struct BookMetadata: Codable, Identifiable, Hashable {
     let id: UUID
     let title: String?
-    let cover: String?
+    var cover: String?
     let folder: String?
     var lastAccess: Date
     /// EPUB vs mokuro manga. Optional for backward compatibility: metadata written before this
@@ -33,9 +33,12 @@ struct BookMetadata: Codable, Identifiable, Hashable {
     /// RFC 3339 UTC — when the book was first imported on this device. Used by HTTP sync's
     /// re-import-after-tombstone guard. Optional for legacy metadata.
     var importedAt: String?
+    /// Stable HTTP-sync key for this local book. Optional for legacy metadata; sync backfills it
+    /// from title + folder so duplicate/sanitized-colliding manga volumes do not share one key.
+    var syncId: String?
 
     init(id: UUID = UUID(), title: String?, cover: String?, folder: String?, lastAccess: Date,
-         contentType: ContentType? = nil, importedAt: String? = nil) {
+         contentType: ContentType? = nil, importedAt: String? = nil, syncId: String? = nil) {
         self.id = id
         self.title = title
         self.cover = cover
@@ -43,6 +46,7 @@ struct BookMetadata: Codable, Identifiable, Hashable {
         self.lastAccess = lastAccess
         self.contentType = contentType
         self.importedAt = importedAt
+        self.syncId = syncId
     }
 
     /// The content type, defaulting to `.epub` for legacy metadata that predates the field.

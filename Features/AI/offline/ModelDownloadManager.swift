@@ -56,7 +56,9 @@ final class ModelDownloadManager {
 
     /// Identifier of the single, process-global background session. Stable so the system can
     /// reattach outstanding tasks to a freshly-created session after the app is relaunched.
-    private static let sessionIdentifier = "de.manhhao.hoshi.modeldownload.background"
+    private static let sessionIdentifier = "com.dragosristache.hoshi.modeldownload.background"
+    private nonisolated static let deletedModelIdsStoreKey = "com.dragosristache.hoshi.deletedOfflineModelDownloadIds"
+    private nonisolated static let cancelledModelIdsStoreKey = "com.dragosristache.hoshi.cancelledOfflineModelDownloadIds"
 
     /// Per-model-id download state. Models not present are implicitly `.idle`.
     private(set) var states: [String: ModelDownloadState] = [:]
@@ -68,6 +70,15 @@ final class ModelDownloadManager {
     /// Model ids with a live background task, so `cancel(_:)`/`isAnyDownloading` know what's running.
     /// Survives only in-memory; on relaunch it is rebuilt from the session's outstanding tasks.
     private var activeModelIds: Set<String> = []
+    /// Active URLSession task id per model id. This lets late callbacks from an older task be
+    /// ignored even if the user immediately starts a new download for the same model.
+    private var activeTaskIdsByModelId: [String: Int] = [:]
+    /// URLSession task ids cancelled/deleted by the user; their terminal callbacks are suppressed.
+    private var suppressedTaskIds: Set<Int> = []
+    /// Model ids whose in-flight background callbacks must not finalize after the user cancelled.
+    private var cancelledModelIds: Set<String> = ModelDownloadManager.loadCancelledModelIds()
+    /// Model ids whose late callbacks must leave no final or partial file behind after delete.
+    private var deletedModelIds: Set<String> = ModelDownloadManager.loadDeletedModelIds()
 
     /// The system's stored completion handler from
     /// `application(_:handleEventsForBackgroundURLSession:completionHandler:)`, called once all
@@ -99,6 +110,39 @@ final class ModelDownloadManager {
         // the app was suspended, or one still in flight). Touching `session` recreates it under the
         // shared identifier, which is what binds those outstanding tasks back to our delegate.
         reattachOutstandingTasks()
+    }
+
+    // MARK: - Persisted cancellation/deletion tombstones
+
+    private nonisolated static func loadDeletedModelIds() -> Set<String> {
+        loadModelIds(forKey: deletedModelIdsStoreKey)
+    }
+
+    private nonisolated static func loadCancelledModelIds() -> Set<String> {
+        loadModelIds(forKey: cancelledModelIdsStoreKey)
+    }
+
+    private nonisolated static func loadModelIds(forKey key: String) -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    private func persistDeletedModelIds() {
+        UserDefaults.standard.set(Array(deletedModelIds).sorted(), forKey: Self.deletedModelIdsStoreKey)
+    }
+
+    private func persistCancelledModelIds() {
+        UserDefaults.standard.set(Array(cancelledModelIds).sorted(), forKey: Self.cancelledModelIdsStoreKey)
+    }
+
+    private nonisolated static func removeModelFiles(for model: LlmModel) {
+        guard let appDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first else { return }
+        let modelsDirectory = appDirectory.appendingPathComponent(modelsDirName)
+        let finalURL = modelsDirectory.appendingPathComponent(model.fileName)
+        let partURL = modelsDirectory.appendingPathComponent(model.fileName + partSuffix)
+        try? FileManager.default.removeItem(at: finalURL)
+        try? FileManager.default.removeItem(at: partURL)
     }
 
     // MARK: - Paths
@@ -181,6 +225,10 @@ final class ModelDownloadManager {
         }
 
         let existing = fileSize(partURL) ?? 0
+        let removedCancelledTombstone = cancelledModelIds.remove(model.id) != nil
+        let removedDeletedTombstone = deletedModelIds.remove(model.id) != nil
+        if removedCancelledTombstone { persistCancelledModelIds() }
+        if removedDeletedTombstone { persistDeletedModelIds() }
         states[model.id] = .downloading(downloadedBytes: existing, totalBytes: model.approxSizeBytes)
         activeModelIds.insert(model.id)
 
@@ -194,10 +242,12 @@ final class ModelDownloadManager {
         // Register the per-task append/replace context the delegate needs, then start the task. The
         // task is tagged with the model id so the delegate (and a post-relaunch reattach) can map it
         // back even with no other in-memory bookkeeping.
-        delegate.beginTask(modelId: model.id, partURL: partURL, existingBytes: existing,
-                           fallbackTotal: model.approxSizeBytes)
         let task = session.downloadTask(with: request)
         task.taskDescription = model.id
+        activeTaskIdsByModelId[model.id] = task.taskIdentifier
+        delegate.beginTask(modelId: model.id, taskIdentifier: task.taskIdentifier,
+                           partURL: partURL, existingBytes: existing,
+                           fallbackTotal: model.approxSizeBytes)
         task.resume()
     }
 
@@ -205,10 +255,18 @@ final class ModelDownloadManager {
     /// `download(_:)` resumes rather than restarting.
     func cancel(_ model: LlmModel) {
         let modelId = model.id
+        let activeTaskId = activeTaskIdsByModelId.removeValue(forKey: modelId)
+        if let activeTaskId {
+            suppressedTaskIds.insert(activeTaskId)
+            delegate.suppressTask(taskIdentifier: activeTaskId)
+        }
+        if cancelledModelIds.insert(modelId).inserted {
+            persistCancelledModelIds()
+        }
         activeModelIds.remove(modelId)
-        delegate.dropTask(modelId: modelId)
         session.getTasksWithCompletionHandler { _, _, downloadTasks in
-            for task in downloadTasks where task.taskDescription == modelId {
+            for task in downloadTasks where task.taskDescription == modelId &&
+                (activeTaskId == nil || task.taskIdentifier == activeTaskId) {
                 task.cancel()
             }
         }
@@ -218,6 +276,9 @@ final class ModelDownloadManager {
     /// Deletes `model` from disk (both the final file and any leftover `.part`). If the model is the
     /// one currently loaded for inference it is unloaded first so the file handle is released.
     func delete(_ model: LlmModel) {
+        if deletedModelIds.insert(model.id).inserted {
+            persistDeletedModelIds()
+        }
         cancel(model)
         if OfflineLlmManager.shared.loadedModelId == model.id {
             OfflineLlmManager.shared.unload()
@@ -248,18 +309,37 @@ final class ModelDownloadManager {
     /// Reattaches in-memory state to whatever tasks the system kept alive across a relaunch, so the
     /// settings UI shows the right "downloading" rows without the user re-tapping Download.
     private func reattachOutstandingTasks() {
-        session.getTasksWithCompletionHandler { [weak self] _, _, downloadTasks in
-            let ids = downloadTasks.compactMap(\.taskDescription)
+        let delegate = delegate
+        session.getTasksWithCompletionHandler { [weak self, delegate] _, _, downloadTasks in
+            let deletedModelIds = Self.loadDeletedModelIds()
+            let cancelledModelIds = Self.loadCancelledModelIds()
+            var tasks: [(modelId: String, taskIdentifier: Int)] = []
+            for task in downloadTasks {
+                guard let id = task.taskDescription else { continue }
+                if deletedModelIds.contains(id) || cancelledModelIds.contains(id) {
+                    delegate.suppressTask(taskIdentifier: task.taskIdentifier)
+                    task.cancel()
+                    if deletedModelIds.contains(id),
+                       let model = LlmModelCatalog.byId(id) {
+                        Self.removeModelFiles(for: model)
+                    }
+                    continue
+                }
+                tasks.append((id, task.taskIdentifier))
+            }
             Task { @MainActor in
                 guard let self else { return }
-                for id in ids {
+                for task in tasks {
+                    let id = task.modelId
                     guard let model = LlmModelCatalog.byId(id),
                           let partURL = self.partURL(for: model) else { continue }
                     self.activeModelIds.insert(id)
+                    self.activeTaskIdsByModelId[id] = task.taskIdentifier
                     let existing = self.fileSize(partURL) ?? 0
                     // Rebuild the delegate context (the `.part` baseline is its current size, since
                     // the file is untouched mid-transfer until didFinishDownloadingTo).
-                    self.delegate.beginTask(modelId: id, partURL: partURL, existingBytes: existing,
+                    self.delegate.beginTask(modelId: id, taskIdentifier: task.taskIdentifier,
+                                            partURL: partURL, existingBytes: existing,
                                             fallbackTotal: model.approxSizeBytes)
                     if case .downloading = self.downloadState(for: model) {} else {
                         self.states[id] = .downloading(downloadedBytes: existing,
@@ -273,8 +353,12 @@ final class ModelDownloadManager {
     // MARK: - Delegate callbacks (main actor)
 
     /// Throttled progress from the delegate. Ignored once the download has been cancelled/removed.
-    fileprivate func handleProgress(modelId: String, downloaded: Int64, total: Int64) {
-        guard activeModelIds.contains(modelId) else { return }
+    fileprivate func handleProgress(modelId: String, taskIdentifier: Int, downloaded: Int64, total: Int64) {
+        guard activeModelIds.contains(modelId),
+              activeTaskIdsByModelId[modelId] == taskIdentifier,
+              !suppressedTaskIds.contains(taskIdentifier),
+              !cancelledModelIds.contains(modelId),
+              !deletedModelIds.contains(modelId) else { return }
         states[modelId] = .downloading(downloadedBytes: downloaded, totalBytes: max(total, downloaded))
     }
 
@@ -282,10 +366,38 @@ final class ModelDownloadManager {
     /// failure). On success, atomically move `.part` → final and mark complete; on cancel keep
     /// `.part`; on failure keep `.part` and surface the message. The delegate pre-reduces the outcome
     /// to a `Sendable` value (no `Error` existential crosses the actor boundary).
-    fileprivate func finishDownload(modelId: String, outcome: TerminalOutcome) {
-        activeModelIds.remove(modelId)
-        delegate.dropTask(modelId: modelId)
+    fileprivate func finishDownload(modelId: String, taskIdentifier: Int, outcome: TerminalOutcome) {
+        let wasSuppressedTask = suppressedTaskIds.remove(taskIdentifier) != nil
+        let wasActiveTask = activeTaskIdsByModelId[modelId] == taskIdentifier
+        let isTombstoned = deletedModelIds.contains(modelId) || cancelledModelIds.contains(modelId)
+        if wasActiveTask {
+            activeTaskIdsByModelId.removeValue(forKey: modelId)
+            activeModelIds.remove(modelId)
+        } else if !wasSuppressedTask && !isTombstoned {
+            return
+        }
+        delegate.dropTask(modelId: modelId, taskIdentifier: taskIdentifier)
+        let wasDeleted = deletedModelIds.remove(modelId) != nil
+        let removedCancelled = cancelledModelIds.remove(modelId) != nil
+        if wasDeleted { persistDeletedModelIds() }
+        if removedCancelled { persistCancelledModelIds() }
+        let wasCancelled = removedCancelled || wasSuppressedTask
         guard let model = LlmModelCatalog.byId(modelId) else { return }
+        if wasDeleted {
+            if let finalURL = fileURL(for: model) {
+                try? FileManager.default.removeItem(at: finalURL)
+            }
+            if let partURL = partURL(for: model) {
+                try? FileManager.default.removeItem(at: partURL)
+            }
+            states[modelId] = .idle
+            downloadedRevision += 1
+            return
+        }
+        if wasCancelled {
+            states[modelId] = .idle
+            return
+        }
         guard let finalURL = fileURL(for: model) else {
             states[modelId] = .failed(message: "On-device storage is unavailable.")
             return
@@ -356,8 +468,8 @@ enum TerminalOutcome: Sendable {
 /// Drives the single background `URLSession`. The system writes each response body to its own temp
 /// file out of process and reports byte counts via `didWriteData`; we append/replace the model's
 /// `.part` file in `didFinishDownloadingTo` honoring the 200/206/416 status, then call back into the
-/// manager (on the main actor). Per-task append/replace state is keyed by model id so one delegate
-/// can serve every download (and reattach tasks the system kept across a relaunch).
+/// manager (on the main actor). Per-task append/replace state is keyed by URLSession task id so a
+/// late callback for an old task cannot mutate a newly-started download for the same model.
 ///
 /// `@unchecked Sendable` because the per-task context map is guarded by `contextsLock` (it's touched
 /// both from the manager's main actor — `beginTask`/`dropTask` — and from the session's delegate
@@ -366,8 +478,9 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
     /// Set once by the manager after init; only dereferenced on the main actor (via `MainActor.run`).
     weak var manager: ModelDownloadManager?
 
-    /// Per-task append/replace context, keyed by model id.
+    /// Per-task append/replace context, keyed by URLSession task id.
     private struct TaskContext {
+        let modelId: String
         let partURL: URL
         let existingBytes: Int64
         let fallbackTotal: Int64
@@ -377,48 +490,83 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
         var lastEmitBytes: Int64 = 0
         var finished = false
     }
-    /// Guards `contexts`, which is read/written from both the main actor and the delegate queue.
+    /// Guards task state, which is read/written from both the main actor and the delegate queue.
     private let contextsLock = NSLock()
-    private var contexts: [String: TaskContext] = [:]
+    private var contexts: [Int: TaskContext] = [:]
+    private var suppressedTaskIds: Set<Int> = []
+    private var finishedTaskIds: Set<Int> = []
 
-    private func withContexts<T>(_ body: (inout [String: TaskContext]) -> T) -> T {
+    private func withTaskState<T>(
+        _ body: (inout [Int: TaskContext], inout Set<Int>, inout Set<Int>) -> T
+    ) -> T {
         contextsLock.lock()
         defer { contextsLock.unlock() }
-        return body(&contexts)
+        return body(&contexts, &suppressedTaskIds, &finishedTaskIds)
     }
 
     /// Registers the context for a (re)started download of `modelId` (called from the main actor,
     /// before `resume()`). The lock makes the cross-queue write safe.
-    func beginTask(modelId: String, partURL: URL, existingBytes: Int64, fallbackTotal: Int64) {
-        withContexts { $0[modelId] = TaskContext(partURL: partURL, existingBytes: existingBytes,
-                                                 fallbackTotal: fallbackTotal) }
+    func beginTask(modelId: String, taskIdentifier: Int, partURL: URL,
+                   existingBytes: Int64, fallbackTotal: Int64) {
+        withTaskState { contexts, suppressed, finished in
+            suppressed.remove(taskIdentifier)
+            finished.remove(taskIdentifier)
+            contexts[taskIdentifier] = TaskContext(
+                modelId: modelId,
+                partURL: partURL,
+                existingBytes: existingBytes,
+                fallbackTotal: fallbackTotal
+            )
+        }
     }
 
-    /// Forgets the context for `modelId` (cancel / terminal completion). May run on either queue.
-    func dropTask(modelId: String) {
-        withContexts { $0[modelId] = nil }
+    /// Suppresses a user-cancelled/deleted task before its late callbacks can append/replace `.part`.
+    func suppressTask(taskIdentifier: Int) {
+        withTaskState { contexts, suppressed, _ in
+            suppressed.insert(taskIdentifier)
+            contexts[taskIdentifier] = nil
+        }
     }
 
-    /// Reads the current context for `modelId`, lazily rebuilding it for a task the system reattached
-    /// after relaunch (the manager hadn't run `beginTask` for it). The `.part` baseline is its current
-    /// size — untouched mid-transfer. The models directory is deterministic, so this resolves the
-    /// `.part` URL itself without hopping to the (main-actor) manager.
-    private func ensureContext(for modelId: String) -> TaskContext? {
-        withContexts { contexts in
-            if let existing = contexts[modelId] { return existing }
+    /// Forgets the context for a task (terminal completion). May run on either queue.
+    func dropTask(modelId: String, taskIdentifier: Int? = nil) {
+        withTaskState { contexts, _, _ in
+            if let taskIdentifier {
+                contexts[taskIdentifier] = nil
+            } else {
+                let keys = contexts.keys.filter { contexts[$0]?.modelId == modelId }
+                for key in keys {
+                    contexts[key] = nil
+                }
+            }
+        }
+    }
+
+    /// Reads the current context for `taskIdentifier`, lazily rebuilding it for a task the system
+    /// reattached after relaunch (the manager hadn't run `beginTask` for it). The `.part` baseline is
+    /// its current size — untouched mid-transfer. The models directory is deterministic, so this
+    /// resolves the `.part` URL itself without hopping to the (main-actor) manager.
+    private func ensureContext(for modelId: String, taskIdentifier: Int) -> TaskContext? {
+        withTaskState { contexts, suppressed, _ in
+            if suppressed.contains(taskIdentifier) { return nil }
+            if let existing = contexts[taskIdentifier] { return existing }
             guard let model = LlmModelCatalog.byId(modelId),
                   let partURL = Self.partURL(for: model) else { return nil }
             let existing = fileSize(partURL) ?? 0
-            let context = TaskContext(partURL: partURL, existingBytes: existing,
+            let context = TaskContext(modelId: modelId, partURL: partURL, existingBytes: existing,
                                       fallbackTotal: model.approxSizeBytes)
-            contexts[modelId] = context
+            contexts[taskIdentifier] = context
             return context
         }
     }
 
-    /// Stores back a mutated copy of `modelId`'s context (no-op if it was dropped meanwhile).
-    private func storeContext(_ context: TaskContext, for modelId: String) {
-        withContexts { if $0[modelId] != nil { $0[modelId] = context } }
+    /// Stores back a mutated copy of a task context (no-op if it was dropped/suppressed meanwhile).
+    private func storeContext(_ context: TaskContext, taskIdentifier: Int) {
+        withTaskState { contexts, suppressed, _ in
+            if contexts[taskIdentifier] != nil, !suppressed.contains(taskIdentifier) {
+                contexts[taskIdentifier] = context
+            }
+        }
     }
 
     /// Deterministic `.part` URL for a reattached task (mirrors `ModelDownloadManager.partURL`).
@@ -443,8 +591,9 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
                     didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
+        let taskIdentifier = downloadTask.taskIdentifier
         guard let modelId = downloadTask.taskDescription,
-              var context = ensureContext(for: modelId) else { return }
+              var context = ensureContext(for: modelId, taskIdentifier: taskIdentifier) else { return }
         let http = downloadTask.response as? HTTPURLResponse
         let resuming = isResuming(http, existingBytes: context.existingBytes)
 
@@ -469,30 +618,44 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
             context.lastEmitBytes = downloaded
             let total = max(context.resolvedTotal, downloaded)
             Task { @MainActor [weak manager] in
-                manager?.handleProgress(modelId: modelId, downloaded: downloaded, total: total)
+                manager?.handleProgress(
+                    modelId: modelId,
+                    taskIdentifier: taskIdentifier,
+                    downloaded: downloaded,
+                    total: total
+                )
             }
         }
-        storeContext(context, for: modelId)
+        storeContext(context, taskIdentifier: taskIdentifier)
     }
 
     func urlSession(_ session: URLSession,
                     downloadTask: URLSessionDownloadTask,
                     didFinishDownloadingTo location: URL) {
+        let taskIdentifier = downloadTask.taskIdentifier
         guard let modelId = downloadTask.taskDescription,
-              var context = ensureContext(for: modelId) else { return }
+              var context = ensureContext(for: modelId, taskIdentifier: taskIdentifier) else {
+            if let modelId = downloadTask.taskDescription {
+                finishOnce(taskIdentifier: taskIdentifier, modelId: modelId, .cancelled)
+            }
+            return
+        }
         let http = downloadTask.response as? HTTPURLResponse
         let status = http?.statusCode ?? 0
 
         do {
             // 416: the `.part` already holds the whole file — nothing to append, it's complete.
             if context.existingBytes > 0, status == 416 {
-                finishOnce(modelId: modelId,
+                finishOnce(taskIdentifier: taskIdentifier,
+                           modelId: modelId,
                            .success(bytesOnDisk: context.existingBytes,
                                     expectedTotal: context.existingBytes))
                 return
             }
             guard status == 200 || status == 206 else {
-                finishOnce(modelId: modelId, .failed(message: "Download failed (HTTP \(status))."))
+                finishOnce(taskIdentifier: taskIdentifier,
+                           modelId: modelId,
+                           .failed(message: "Download failed (HTTP \(status))."))
                 return
             }
             let resuming = isResuming(http, existingBytes: context.existingBytes)
@@ -510,11 +673,14 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
                 // 200: the server ignored the Range (or there was no `.part`) — replace wholesale.
                 bytesOnDisk = try replacePartWithTemp(location, partURL: context.partURL)
             }
-            storeContext(context, for: modelId)
-            finishOnce(modelId: modelId,
+            storeContext(context, taskIdentifier: taskIdentifier)
+            finishOnce(taskIdentifier: taskIdentifier,
+                       modelId: modelId,
                        .success(bytesOnDisk: bytesOnDisk, expectedTotal: context.expectedTotal))
         } catch {
-            finishOnce(modelId: modelId, .failed(message: friendlyMessage(error)))
+            finishOnce(taskIdentifier: taskIdentifier,
+                       modelId: modelId,
+                       .failed(message: friendlyMessage(error)))
         }
     }
 
@@ -522,13 +688,14 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
                     task: URLSessionTask,
                     didCompleteWithError error: Error?) {
         // didFinishDownloadingTo already resolved success; this fires for failures/cancellation.
+        let taskIdentifier = task.taskIdentifier
         guard let modelId = task.taskDescription, let error else { return }
         // Map user/system cancellation to `.cancelled` (keep `.part`, go idle); everything else to a
         // user-facing failure message. Reduced to `Sendable` here so no `Error` crosses to the actor.
         if (error as NSError).code == NSURLErrorCancelled || error is CancellationError {
-            finishOnce(modelId: modelId, .cancelled)
+            finishOnce(taskIdentifier: taskIdentifier, modelId: modelId, .cancelled)
         } else {
-            finishOnce(modelId: modelId, .failed(message: friendlyMessage(error)))
+            finishOnce(taskIdentifier: taskIdentifier, modelId: modelId, .failed(message: friendlyMessage(error)))
         }
     }
 
@@ -593,19 +760,22 @@ private final class DownloadDelegate: NSObject, URLSessionDownloadDelegate, @unc
         return size
     }
 
-    private func finishOnce(modelId: String, _ outcome: TerminalOutcome) {
+    private func finishOnce(taskIdentifier: Int, modelId: String, _ outcome: TerminalOutcome) {
         // Mark terminal exactly once under the lock so a near-simultaneous didFinishDownloadingTo +
         // didCompleteWithError can't both report. The manager's `finishDownload` then drops the
         // context, but marking `finished` here is enough to dedupe.
-        let shouldReport = withContexts { contexts -> Bool in
-            guard var context = contexts[modelId], !context.finished else { return false }
-            context.finished = true
-            contexts[modelId] = context
+        let shouldReport = withTaskState { contexts, _, finished -> Bool in
+            guard !finished.contains(taskIdentifier) else { return false }
+            finished.insert(taskIdentifier)
+            if var context = contexts[taskIdentifier] {
+                context.finished = true
+                contexts[taskIdentifier] = context
+            }
             return true
         }
         guard shouldReport else { return }
         Task { @MainActor [weak manager] in
-            manager?.finishDownload(modelId: modelId, outcome: outcome)
+            manager?.finishDownload(modelId: modelId, taskIdentifier: taskIdentifier, outcome: outcome)
         }
     }
 }

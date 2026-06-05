@@ -63,7 +63,11 @@ struct MangaAiPopupView: View {
                 }
             }
         }
-        .onAppear(perform: reloadHistory)
+        .onAppear {
+            // Opened from the reader's "Chat history" menu item → start in the history list.
+            if controller.state == .browsingHistory { showHistory = true }
+            reloadHistory()
+        }
     }
 
     // MARK: - Card
@@ -75,7 +79,7 @@ struct MangaAiPopupView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    if showHistory {
+                    if showHistory || controller.state == .browsingHistory {
                         historyBody
                     } else {
                         currentBody
@@ -98,6 +102,12 @@ struct MangaAiPopupView: View {
                 .font(.headline)
             Spacer()
             Button {
+                guard controller.state != .browsingHistory else {
+                    showHistory = true
+                    reloadHistory()
+                    wordLookup = nil
+                    return
+                }
                 showHistory.toggle()
                 if showHistory { reloadHistory() }
                 wordLookup = nil
@@ -119,7 +129,7 @@ struct MangaAiPopupView: View {
     /// translation reads "On-device translation"; the cloud path keeps "ChatGPT"). Mirrors Android
     /// `AiChatPopupView`'s `if (state.onDevice) "On-device translation" else "ChatGPT"`.
     private var headerTitle: String {
-        if showHistory { return "ChatGPT history" }
+        if showHistory || controller.state == .browsingHistory { return "ChatGPT history" }
         return controller.state.isOnDevice ? "On-device translation" : "ChatGPT"
     }
 
@@ -137,6 +147,10 @@ struct MangaAiPopupView: View {
             entryView(entry)
         case .error(let message):
             errorBody(message)
+        case .browsingHistory:
+            // Opened straight into history (from the reader menu); the history list is shown via
+            // `showHistory`, so there's no "current" exchange to render here.
+            EmptyView()
         }
     }
 

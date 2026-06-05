@@ -35,7 +35,7 @@ What to exercise manually (the parts not yet visually verified):
 - Sparkles button → ChatGPT popup (set an API key in Settings → ChatGPT first).
 - Screenshot-translate: crop a region → vision translation.
 - Settings → ChatGPT and Settings → Sync (HTTP) screens.
-- RTL paging (right-swipe = forward), pinch-zoom, e-ink mode, go-to-page.
+- RTL paging (right-swipe = forward), pinch-zoom, go-to-page.
 - HTTP sync round-trip against the server, ideally diffing blobs vs the Android client.
 
 ## Reader confidence without a screenshot

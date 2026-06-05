@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01DFBF552FD2710700CE1CD2 /* LLM in Frameworks */ = {isa = PBXBuildFile; productRef = D11A0000000000000000BBBB /* LLM */; };
 		482B74F22F4664CB00398222 /* SwiftUIIntrospect in Frameworks */ = {isa = PBXBuildFile; productRef = 482B74F12F4664CB00398222 /* SwiftUIIntrospect */; };
 		48568A5B2F1E7F5C00F9C126 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 48568A462F1E7F5C00F9C126 /* Assets.xcassets */; };
 		48568A5C2F1E7F5C00F9C126 /* HoshiIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 48568A472F1E7F5C00F9C126 /* HoshiIcon.icon */; };
@@ -152,6 +153,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				01DFBF552FD2710700CE1CD2 /* LLM in Frameworks */,
 				48568CD32F1EC9A400F9C126 /* EPUBKit in Frameworks */,
 				482B74F22F4664CB00398222 /* SwiftUIIntrospect in Frameworks */,
 				48BC0BDF2F5C316B00EDAC3F /* CHoshiDicts in Frameworks */,
@@ -269,7 +271,7 @@
 				48568CD12F1EC9A400F9C126 /* XCLocalSwiftPackageReference "Libraries/EPUBKit" */,
 				48A18AB92F465F1F00AC8514 /* XCRemoteSwiftPackageReference "SwiftUI-Introspect" */,
 				48BC0BDD2F5C316B00EDAC3F /* XCRemoteSwiftPackageReference "hoshidicts" */,
-				D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM.swift" */,
+				D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 48107AAE2F114021009E12D1;
@@ -461,11 +463,11 @@
 		48107AC32F114021009E12D1 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = HoshiIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = GPLBDQ2MBT;
+				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "HoshiReader-Info.plist";
@@ -486,7 +488,8 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				PRODUCT_BUNDLE_IDENTIFIER = de.manhhao.hoshi;
+				CODE_SIGN_ENTITLEMENTS = HoshiReader.entitlements;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -502,10 +505,11 @@
 		48107AC42F114021009E12D1 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = HoshiIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "HoshiReader-Info.plist";
@@ -526,7 +530,8 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				PRODUCT_BUNDLE_IDENTIFIER = de.manhhao.hoshi;
+				CODE_SIGN_ENTITLEMENTS = HoshiReader.entitlements;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -545,7 +550,7 @@
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = GPLBDQ2MBT;
+				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ShareExtension;
@@ -556,7 +561,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = de.manhhao.hoshi.ShareExtension;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi.ShareExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -574,6 +579,7 @@
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ShareExtension;
@@ -584,7 +590,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = de.manhhao.hoshi.ShareExtension;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi.ShareExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -652,7 +658,7 @@
 				kind = branch;
 			};
 		};
-		D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM.swift" */ = {
+		D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/eastriverlee/LLM.swift";
 			requirement = {
@@ -679,7 +685,7 @@
 		};
 		D11A0000000000000000BBBB /* LLM */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM.swift" */;
+			package = D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM" */;
 			productName = LLM;
 		};
 /* End XCSwiftPackageProductDependency section */

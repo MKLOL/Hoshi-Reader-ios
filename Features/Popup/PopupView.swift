@@ -46,24 +46,30 @@ struct PopupLayout {
         spaceBelow >= height
     }
     
+    // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
+    // user's configured max. A definition panel that filled most of the page was overwhelming and
+    // sat on top of the surrounding art.
+    private var cappedMaxWidth: CGFloat { min(maxWidth, screenSize.width * 0.58) }
+    private var cappedMaxHeight: CGFloat { min(maxHeight, screenSize.height * 0.20) }
+
     var width: CGFloat {
         if isFullWidth {
             return screenSize.width - screenBorderPadding * 2
         }
-        
+
         if isVertical {
-            return min(max(spaceLeft, spaceRight) - screenBorderPadding, maxWidth)
+            return min(max(spaceLeft, spaceRight) - screenBorderPadding, cappedMaxWidth)
         }
-        
-        return min(screenSize.width - screenBorderPadding * 2, maxWidth)
+
+        return min(screenSize.width - screenBorderPadding * 2, cappedMaxWidth)
     }
-    
+
     var height: CGFloat {
         if isVertical || isFullWidth {
-            return maxHeight
+            return cappedMaxHeight
         }
-        
-        return min(max(spaceAbove, spaceBelow) - screenBorderPadding, maxHeight)
+
+        return min(max(spaceAbove, spaceBelow) - screenBorderPadding, cappedMaxHeight)
     }
     
     var position: CGPoint {
@@ -81,13 +87,15 @@ struct PopupLayout {
                     x = selectionRect.minX - popupPadding - (width / 2)
                 }
                 x = max(width / 2, min(x, screenSize.width - width / 2))
-                
+
                 y = selectionRect.minY + (height / 2)
                 y = max(height / 2 + screenBorderPadding + topInset, min(y, screenSize.height - bottomInset - height / 2 - screenBorderPadding))
             } else {
                 x = selectionRect.minX + (width / 2)
                 x = max(width / 2 + screenBorderPadding, min(x, screenSize.width - width / 2 - screenBorderPadding))
-                
+
+                // Sit just below the tapped word (or just above if there's no room below): close to
+                // the word so it doesn't feel disconnected, but the word itself stays visible.
                 if showBelow {
                     y = selectionRect.maxY + popupPadding + (height / 2)
                 } else {

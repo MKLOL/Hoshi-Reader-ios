@@ -38,7 +38,6 @@ struct MangaReaderView: View {
     @State private var aiController = MangaAiController()
     @State private var focusMode = false
     @State private var showGoToPageDialog = false
-    @State private var showOverflowMenu = false
     @State private var screenshotCropMode = false
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
@@ -61,6 +60,8 @@ struct MangaReaderView: View {
     /// The page index whose `onPageReady` should kick off the slide — the incoming page must finish
     /// its first draw before the slide starts, or the artwork would visibly resize mid-slide.
     @State private var pendingSlideIndex: Int?
+    /// The exact WebView load token that must finish before the pending slide can start.
+    @State private var pendingSlideLoadToken: Int?
     /// Bumped per page change so a stale snapshot task for a superseded turn is discarded.
     @State private var slideGeneration = 0
     /// Safety net for a page that never reports `onPageReady` (e.g. an image that fails to load):
@@ -170,7 +171,7 @@ struct MangaReaderView: View {
     /// Height reserved (within the safe area) for the top bar content; reclaimed by the page in
     /// focus mode and while cropping (the crop overlay needs the full screen).
     private var topChromeHeight: CGFloat {
-        (focusMode || screenshotCropMode) ? 0 : 52
+        (focusMode || screenshotCropMode) ? 0 : 76
     }
 
     /// Height reserved (within the safe area) for the page indicator / focus-toggle strip.
@@ -283,7 +284,7 @@ struct MangaReaderView: View {
                     else { aiController.ask(bubbleText: text, book: metadata) }
                 },
                 onCopy: { text in UIPasteboard.general.string = text },
-                onPageReady: { onPageReady() }
+                onPageReady: { loadToken in onPageReady(loadToken: loadToken) }
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)
@@ -350,8 +351,16 @@ struct MangaReaderView: View {
                 slideSnapshot = snapshot
                 pendingSlideIndex = newIndex
                 pageOpacity = 1
-                // Reload underneath the snapshot; the slide starts on the new page's onPageReady.
-                model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+                // Reload underneath the snapshot; the slide starts on this load's onPageReady.
+                model.renderCurrentPage(
+                    controller: controller,
+                    screenSize: lastSize,
+                    userConfig: userConfig,
+                    onLoadToken: { token in
+                        guard generation == slideGeneration, pendingSlideIndex == newIndex else { return }
+                        pendingSlideLoadToken = token
+                    }
+                )
             } else {
                 // No snapshot: instant swap with a brief opacity dip as a graceful fallback.
                 clearSlide()
@@ -381,14 +390,17 @@ struct MangaReaderView: View {
 
     /// Invoked when the WebView finishes rendering a page. Drives the slide for a pending turn, or
     /// restores opacity for the no-snapshot fallback path.
-    private func onPageReady() {
-        // The page drew — the stuck-page backstop is no longer needed.
-        pageReadyTimeoutTask?.cancel()
-        pageReadyTimeoutTask = nil
+    private func onPageReady(loadToken: Int) {
         if let pending = pendingSlideIndex, slideSnapshot != nil {
             // The slide only starts once the page it is waiting on has actually drawn.
             guard pending == model.pageIndex else { return }
+            guard let pendingLoadToken = pendingSlideLoadToken else { return }
+            guard loadToken == pendingLoadToken else { return }
+            // The expected page drew — the stuck-page backstop is no longer needed.
+            pageReadyTimeoutTask?.cancel()
+            pageReadyTimeoutTask = nil
             pendingSlideIndex = nil
+            pendingSlideLoadToken = nil
             let generation = slideGeneration
             // Animate the WebView in / snapshot out, then drop the snapshot.
             withAnimation(.easeOut(duration: slideDuration)) {
@@ -398,6 +410,9 @@ struct MangaReaderView: View {
                 if generation == slideGeneration { clearSlide() }
             }
         } else if slideSnapshot == nil {
+            // The page drew — the stuck-page backstop is no longer needed.
+            pageReadyTimeoutTask?.cancel()
+            pageReadyTimeoutTask = nil
             // Fallback path (or first load): restore full opacity.
             withAnimation(.easeInOut(duration: 0.18)) { pageOpacity = 1 }
         }
@@ -410,6 +425,7 @@ struct MangaReaderView: View {
         slideSnapshot = nil
         slideProgress = 0
         pendingSlideIndex = nil
+        pendingSlideLoadToken = nil
         pageOpacity = 1
     }
 
@@ -435,12 +451,29 @@ struct MangaReaderView: View {
                 Spacer()
             }
 
-            CircleButton(systemName: "slider.horizontal.3")
-                .contentShape(Circle())
-                .onTapGesture {
+            // A real Menu anchors the dropdown to this button. The old `.confirmationDialog`
+            // presented detached (mid-screen / bottom), which is what looked wrong.
+            Menu {
+                Button {
                     model.closePopups()
-                    showOverflowMenu = true
-                }
+                    goToPageText = "\(model.pageIndex + 1)"
+                    showGoToPageDialog = true
+                } label: { Label("Go to page", systemImage: "arrow.right.to.line") }
+                Button {
+                    model.closePopups()
+                    screenshotCropMode = true
+                } label: { Label("Screenshot translate", systemImage: "camera.viewfinder") }
+                Button {
+                    model.closePopups()
+                    aiController.browseHistory()
+                } label: { Label("Chat history", systemImage: "clock.arrow.circlepath") }
+                Button {
+                    model.closePopups()
+                    showStatisticsSheet = true
+                } label: { Label("Statistics", systemImage: "chart.bar") }
+            } label: {
+                CircleButton(systemName: "slider.horizontal.3")
+            }
         }
         .padding(.horizontal, 20)
         // The inset region already starts at the safe-area edge; a small gap hugs the status bar.
@@ -448,21 +481,6 @@ struct MangaReaderView: View {
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity)
         .background(backgroundColor.opacity(0.001))
-        .confirmationDialog("", isPresented: $showOverflowMenu, titleVisibility: .hidden) {
-            Button("Go to page") {
-                goToPageText = "\(model.pageIndex + 1)"
-                showGoToPageDialog = true
-            }
-            Button("Screenshot translate") {
-                model.closePopups()
-                screenshotCropMode = true
-            }
-            Button("Statistics") {
-                model.closePopups()
-                showStatisticsSheet = true
-            }
-            Button("Cancel", role: .cancel) {}
-        }
     }
 
     private var bottomBar: some View {

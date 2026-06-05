@@ -208,9 +208,12 @@ class ReaderViewModel {
             return 0
         }
         
-        return chapterInfo.currentTotal + Int(Double(chapterInfo.chapterCount) * currentProgress)
+        // Clamp: a synced/corrupt bookmark can carry an out-of-[0,1] progress; Int(Double) traps on
+        // a non-finite or out-of-range product.
+        let p = currentProgress.isFinite ? min(max(currentProgress, 0), 1) : 0
+        return chapterInfo.currentTotal + Int(Double(chapterInfo.chapterCount) * p)
     }
-    
+
     var coverURL: URL? {
         if let book = BookStorage.loadMetadata(root: rootURL) {
             return book.coverURL
@@ -723,10 +726,14 @@ class ReaderViewModel {
     }
     
     private func calculateCharacterProgress(for position: Position) -> Int {
+        // A Position can be stale (e.g. a bookmark synced from a different EPUB build) or reference
+        // a chapter whose info isn't populated yet; degrade to 0 instead of trapping.
+        guard document.spine.items.indices.contains(position.index) else { return 0 }
         let spineItem = document.spine.items[position.index]
-        let manifestItem = document.manifest.items[spineItem.idref]!
-        let chapterInfo = bookInfo.chapterInfo[manifestItem.path]!
-        return chapterInfo.currentTotal + Int(Double(chapterInfo.chapterCount) * position.progress)
+        guard let manifestItem = document.manifest.items[spineItem.idref],
+              let chapterInfo = bookInfo.chapterInfo[manifestItem.path] else { return 0 }
+        let p = position.progress.isFinite ? min(max(position.progress, 0), 1) : 0
+        return chapterInfo.currentTotal + Int(Double(chapterInfo.chapterCount) * p)
     }
     
     private static func getDefaultStatistic(title: String) -> Statistics {

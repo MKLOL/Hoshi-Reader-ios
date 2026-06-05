@@ -30,21 +30,34 @@ struct SasayakiParser {
                 }
                 
                 let times = lines[1].components(separatedBy: "-->")
+                // A malformed/non-standard subtitle (bad or missing timestamps) must be skipped,
+                // not crash the import. parseTimestamp returns nil on anything unparseable.
+                guard times.count >= 2,
+                      let startTime = parseTimestamp(times[0]),
+                      let endTime = parseTimestamp(times[1]) else {
+                    return nil
+                }
                 let text = lines[2].trimmingCharacters(in: .whitespaces)
                 return SasayakiCue(
                     id: String(index),
-                    startTime: parseTimestamp(times[0]),
-                    endTime: parseTimestamp(times[1]),
+                    startTime: startTime,
+                    endTime: endTime,
                     text: text
                 )
             }
     }
     
-    private static func parseTimestamp(_ timestamp: String) -> Double {
+    private static func parseTimestamp(_ timestamp: String) -> Double? {
         let parts = timestamp
             .replacingOccurrences(of: ",", with: ".")
             .trimmingCharacters(in: .whitespaces)
             .components(separatedBy: ":")
-        return Double(parts[0])! * 3600 + Double(parts[1])! * 60 + Double(parts[2])!
+        guard parts.count == 3,
+              let hours = Double(parts[0]),
+              let minutes = Double(parts[1]),
+              let seconds = Double(parts[2]) else {
+            return nil
+        }
+        return hours * 3600 + minutes * 60 + seconds
     }
 }

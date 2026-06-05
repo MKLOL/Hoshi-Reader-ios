@@ -108,17 +108,73 @@ struct BackupView: View {
         guard url.startAccessingSecurityScopedResource() else { return }
         isLoading = true
         loadingString = "Restoring..."
-        let destination = try! BookStorage.getAppDirectory().appendingPathComponent(folder)
+        guard let destination = try? BookStorage.getAppDirectory().appendingPathComponent(folder) else {
+            isLoading = false
+            url.stopAccessingSecurityScopedResource()
+            return
+        }
         Task.detached {
             defer { url.stopAccessingSecurityScopedResource() }
-            try? FileManager.default.removeItem(at: destination)
-            try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-            SSZipArchive.unzipFile(atPath: url.path(percentEncoded: false), toDestination: destination.path(percentEncoded: false))
+            let fm = FileManager.default
+            // Unzip into a temp staging dir FIRST and only swap it into place if it fully succeeds.
+            // The old code deleted the live library before unzipping and ignored the unzip result, so
+            // a corrupt/truncated archive (or a disk-full mid-unzip) wiped everything with no recovery.
+            let staging = fm.temporaryDirectory.appendingPathComponent("hoshi-restore-\(UUID().uuidString)", isDirectory: true)
+            defer { try? fm.removeItem(at: staging) }
+            let ok = SSZipArchive.unzipFile(atPath: url.path(percentEncoded: false), toDestination: staging.path(percentEncoded: false))
+            // Require at least one NON-hidden entry: a corrupt archive that only yields junk like
+            // `.DS_Store` / `__MACOSX` must not count as a successful extraction (it would still
+            // replace the live library with effectively-empty content).
+            let staged = (try? fm.contentsOfDirectory(atPath: staging.path(percentEncoded: false))) ?? []
+            let extractedSomething = staged.contains { !$0.hasPrefix(".") && $0 != "__MACOSX" }
+            let restored: Bool
+            if ok && extractedSomething {
+                do {
+                    try replaceRestoredFolder(staging: staging, destination: destination, fileManager: fm)
+                    restored = true
+                } catch {
+                    restored = false
+                }
+            } else {
+                restored = false
+            }
             await MainActor.run {
                 isLoading = false
-                DictionaryManager.shared.loadDictionaries()
-                DictionaryManager.shared.rebuildLookupQuery()
+                if restored {
+                    DictionaryManager.shared.loadDictionaries()
+                    DictionaryManager.shared.rebuildLookupQuery()
+                }
             }
         }
     }
+}
+
+nonisolated private func replaceRestoredFolder(staging: URL, destination: URL, fileManager fm: FileManager) throws {
+    try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let movedDestination = try moveExistingDestinationAside(destination: destination, fileManager: fm)
+    do {
+        try fm.moveItem(at: staging, to: destination)
+        if let movedDestination {
+            try? fm.removeItem(at: movedDestination)
+        }
+    } catch {
+        restoreMovedDestination(movedDestination, to: destination, fileManager: fm)
+        throw error
+    }
+}
+
+nonisolated private func moveExistingDestinationAside(destination: URL, fileManager fm: FileManager) throws -> URL? {
+    guard fm.fileExists(atPath: destination.path(percentEncoded: false)) else { return nil }
+    let backupName = ".hoshi-restore-\(destination.lastPathComponent)-\(UUID().uuidString)"
+    let backupURL = destination.deletingLastPathComponent().appendingPathComponent(backupName, isDirectory: true)
+    try fm.moveItem(at: destination, to: backupURL)
+    return backupURL
+}
+
+nonisolated private func restoreMovedDestination(_ movedDestination: URL?, to destination: URL, fileManager fm: FileManager) {
+    guard let movedDestination else { return }
+    if fm.fileExists(atPath: destination.path(percentEncoded: false)) {
+        try? fm.removeItem(at: destination)
+    }
+    try? fm.moveItem(at: movedDestination, to: destination)
 }
