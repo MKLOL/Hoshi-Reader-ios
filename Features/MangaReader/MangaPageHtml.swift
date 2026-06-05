@@ -245,26 +245,31 @@ nonisolated enum MangaPageHtml {
         }
         .ocr-actions {
           display: none;
-          position: absolute;
-          bottom: 100%;
-          right: 0;
-          margin-bottom: 3px;
+          position: fixed;
+          left: 0;
+          top: 0;
+          margin: 0;
+          /* Keep the toolbar in viewport coordinates. This avoids WebKit resolving the action
+             buttons through a vertical-rl containing block, which can stack the two controls and
+             clip the copy button on narrow bubbles. */
           writing-mode: horizontal-tb;
-          text-orientation: mixed;
-          flex-direction: row-reverse;
-          gap: 3px;
-          z-index: 2;
+          width: 52px;
+          height: 24px;
+          z-index: 50;
+          overflow: visible;
         }
         .ocr-box.revealed .ocr-actions {
-          display: flex;
+          display: block;
         }
+        .ocr-copy-btn { position: absolute; top: 0; left: 0; }
+        .ocr-ai-btn { position: absolute; top: 0; left: 28px; }
         .ocr-action-btn {
           box-sizing: border-box;
-          width: 1.7em;
-          height: 1.7em;
-          min-width: 20px;
-          min-height: 20px;
-          padding: 0.3em;
+          /* Fixed, compact size (was 1.7em → ballooned into a big blob on boosted OCR fonts;
+             then 30px → too big on small bubbles). */
+          width: 24px;
+          height: 24px;
+          padding: 4px;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -281,6 +286,20 @@ nonisolated enum MangaPageHtml {
           height: 100%;
           display: block;
           pointer-events: none;
+        }
+        /* The copy icon is stroke-only; its stroke-width is in viewBox units (24) but the svg
+           renders at ~14px, scaling a 2-unit stroke down to a ~1px hairline that reads as
+           invisible over the dark button. Pin the stroke to screen pixels so it stays a crisp,
+           visible line at any rendered size. The selector targets only the copy svg (it carries
+           the `stroke` attribute); the AI icon is fill-based with no `stroke` attr, so it is
+           untouched. vector-effect/stroke-width are inherited by the child rect+path. */
+        .ocr-action-btn svg[stroke] {
+          vector-effect: non-scaling-stroke;
+          stroke-width: 2px;
+        }
+        .ocr-action-btn svg[stroke] rect,
+        .ocr-action-btn svg[stroke] path {
+          vector-effect: non-scaling-stroke;
         }
         ::selection { background: rgba(70, 130, 220, 0.45); }
         \(matchedWordHighlight)
@@ -490,6 +509,44 @@ nonisolated enum MangaPageHtml {
             box.style.fontSize = originalInlineFontSize;
           }
         },
+        placeActions: function(box) {
+          var actions = box.querySelector('.ocr-actions');
+          if (!actions) return;
+          var boxRect = box.getBoundingClientRect();
+          var viewport = window.visualViewport;
+          var viewportLeft = viewport && typeof viewport.offsetLeft === 'number'
+            ? viewport.offsetLeft
+            : 0;
+          var viewportTop = viewport && typeof viewport.offsetTop === 'number'
+            ? viewport.offsetTop
+            : 0;
+          var viewportWidth = viewport && typeof viewport.width === 'number'
+            ? viewport.width
+            : window.innerWidth;
+          var viewportHeight = viewport && typeof viewport.height === 'number'
+            ? viewport.height
+            : window.innerHeight;
+          var gap = 4;
+          var actionsWidth = actions.offsetWidth || 52;
+          var actionsHeight = actions.offsetHeight || 24;
+          var left = boxRect.right - actionsWidth;
+          var top = boxRect.top - actionsHeight - gap;
+
+          if (top < viewportTop + gap) {
+            top = boxRect.bottom + gap;
+          }
+          if (top + actionsHeight > viewportTop + viewportHeight - gap) {
+            top = Math.max(viewportTop + gap, boxRect.top - actionsHeight - gap);
+          }
+
+          left = Math.max(
+            viewportLeft + gap,
+            Math.min(left, viewportLeft + viewportWidth - actionsWidth - gap)
+          );
+
+          actions.style.left = Math.round(left) + 'px';
+          actions.style.top = Math.round(top) + 'px';
+        },
         installTapListener: function(maxLength) {
           if (this.tapListenerInstalled) return;
           this.tapListenerInstalled = true;
@@ -534,6 +591,7 @@ nonisolated enum MangaPageHtml {
               window.hoshiManga.tryWrapFallback(box);
               box.classList.add('revealed');
               box.setAttribute('aria-pressed', 'true');
+              window.hoshiManga.placeActions(box);
             }
             if (alreadyRevealed || window.hoshiManga.singleTapLookupValue) {
               return window.hoshiSelection.selectText(x, y, maxLength);
