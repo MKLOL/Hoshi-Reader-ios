@@ -18,7 +18,7 @@
 //  Everything else faithfully follows the Android renderer: definite-px sized `.page` flexbox
 //  (no vw/vh/%), `.frame` aspect-fit, `.ocr-box` absolute %-positioning + cqw font-size,
 //  vertical-rl writing mode, transparent-until-tapped reveal with action buttons, the
-//  wrap-fallback binary-search JS, the crop/host-rect mapping JS, and `setHostScale`.
+//  wrap-fallback binary-search JS, the crop/host-rect mapping JS, and host zoom/pan geometry.
 //
 
 import Foundation
@@ -345,11 +345,22 @@ nonisolated enum MangaPageHtml {
       function handlers() { return window.webkit && window.webkit.messageHandlers; }
       window.hoshiManga = {
         hostScaleValue: 1,
+        hostOffsetLeftValue: 0,
+        hostOffsetTopValue: 0,
         singleTapLookupValue: false,
         setHostScale: function(scale) {
-          if (typeof scale === 'number' && isFinite(scale) && scale > 0) {
-            this.hostScaleValue = scale;
-          }
+          this.setHostViewport(scale, this.hostOffsetLeftValue, this.hostOffsetTopValue);
+        },
+        setHostViewport: function(scale, offsetLeft, offsetTop) {
+          this.hostScaleValue = (typeof scale === 'number' && isFinite(scale) && scale > 0)
+            ? scale
+            : 1;
+          this.hostOffsetLeftValue = (typeof offsetLeft === 'number' && isFinite(offsetLeft))
+            ? offsetLeft
+            : 0;
+          this.hostOffsetTopValue = (typeof offsetTop === 'number' && isFinite(offsetTop))
+            ? offsetTop
+            : 0;
         },
         setSingleTapLookup: function(enabled) {
           this.singleTapLookupValue = !!enabled;
@@ -358,18 +369,26 @@ nonisolated enum MangaPageHtml {
           var scale = this.hostScaleValue;
           return isFinite(scale) && scale > 0 ? scale : 1;
         },
+        hostOffsetLeft: function() {
+          var offset = this.hostOffsetLeftValue;
+          return isFinite(offset) ? offset : 0;
+        },
+        hostOffsetTop: function() {
+          var offset = this.hostOffsetTopValue;
+          return isFinite(offset) ? offset : 0;
+        },
+        isHostZoomedOrPanned: function() {
+          return this.hostScale() > 1.01 ||
+            Math.abs(this.hostOffsetLeft()) > 1 ||
+            Math.abs(this.hostOffsetTop()) > 1;
+        },
         hostRectFromViewportRect: function(rect) {
           var scale = this.hostScale();
-          var viewport = window.visualViewport;
-          var offsetLeft = viewport && typeof viewport.offsetLeft === 'number'
-            ? viewport.offsetLeft
-            : 0;
-          var offsetTop = viewport && typeof viewport.offsetTop === 'number'
-            ? viewport.offsetTop
-            : 0;
+          var x = typeof rect.x === 'number' ? rect.x : rect.left;
+          var y = typeof rect.y === 'number' ? rect.y : rect.top;
           return {
-            x: (rect.x - offsetLeft) * scale,
-            y: (rect.y - offsetTop) * scale,
+            x: x * scale - this.hostOffsetLeft(),
+            y: y * scale - this.hostOffsetTop(),
             width: rect.width * scale,
             height: rect.height * scale
           };
@@ -377,20 +396,7 @@ nonisolated enum MangaPageHtml {
         imageCropFromHostRect: function(left, top, right, bottom, hostWidth, hostHeight) {
           var frame = document.querySelector('.frame');
           if (!frame) return null;
-          var viewport = window.visualViewport;
           var scale = this.hostScale();
-          var viewportWidth = viewport && typeof viewport.width === 'number'
-            ? viewport.width
-            : window.innerWidth / scale;
-          var viewportHeight = viewport && typeof viewport.height === 'number'
-            ? viewport.height
-            : window.innerHeight / scale;
-          var offsetLeft = viewport && typeof viewport.offsetLeft === 'number'
-            ? viewport.offsetLeft
-            : 0;
-          var offsetTop = viewport && typeof viewport.offsetTop === 'number'
-            ? viewport.offsetTop
-            : 0;
           var frameRect = frame.getBoundingClientRect();
           var pageIndex = parseInt(frame.dataset.pageIndex || '-1', 10);
           var imageWidth = parseInt(frame.dataset.imageWidth || '0', 10);
@@ -398,16 +404,14 @@ nonisolated enum MangaPageHtml {
           if (!isFinite(scale) || scale <= 0 ||
               !isFinite(hostWidth) || hostWidth <= 0 ||
               !isFinite(hostHeight) || hostHeight <= 0 ||
-              !isFinite(viewportWidth) || viewportWidth <= 0 ||
-              !isFinite(viewportHeight) || viewportHeight <= 0 ||
               !isFinite(pageIndex) || pageIndex < 0 ||
               !isFinite(imageWidth) || imageWidth <= 0 ||
               !isFinite(imageHeight) || imageHeight <= 0 ||
               frameRect.width <= 0 || frameRect.height <= 0) {
             return null;
           }
-          function hostX(x) { return x / hostWidth * viewportWidth + offsetLeft; }
-          function hostY(y) { return y / hostHeight * viewportHeight + offsetTop; }
+          function hostX(x) { return (x + window.hoshiManga.hostOffsetLeft()) / scale; }
+          function hostY(y) { return (y + window.hoshiManga.hostOffsetTop()) / scale; }
           var cropLeft = Math.min(hostX(left), hostX(right));
           var cropRight = Math.max(hostX(left), hostX(right));
           var cropTop = Math.min(hostY(top), hostY(bottom));
@@ -506,12 +510,6 @@ nonisolated enum MangaPageHtml {
           if (!actions) return;
           var boxRect = box.getBoundingClientRect();
           var viewport = window.visualViewport;
-          var viewportLeft = viewport && typeof viewport.offsetLeft === 'number'
-            ? viewport.offsetLeft
-            : 0;
-          var viewportTop = viewport && typeof viewport.offsetTop === 'number'
-            ? viewport.offsetTop
-            : 0;
           var viewportWidth = viewport && typeof viewport.width === 'number'
             ? viewport.width
             : window.innerWidth;
@@ -524,16 +522,16 @@ nonisolated enum MangaPageHtml {
           var left = boxRect.right - actionsWidth;
           var top = boxRect.top - actionsHeight - gap;
 
-          if (top < viewportTop + gap) {
+          if (top < gap) {
             top = boxRect.bottom + gap;
           }
-          if (top + actionsHeight > viewportTop + viewportHeight - gap) {
-            top = Math.max(viewportTop + gap, boxRect.top - actionsHeight - gap);
+          if (top + actionsHeight > viewportHeight - gap) {
+            top = Math.max(gap, boxRect.top - actionsHeight - gap);
           }
 
           left = Math.max(
-            viewportLeft + gap,
-            Math.min(left, viewportLeft + viewportWidth - actionsWidth - gap)
+            gap,
+            Math.min(left, viewportWidth - actionsWidth - gap)
           );
 
           actions.style.left = Math.round(left) + 'px';

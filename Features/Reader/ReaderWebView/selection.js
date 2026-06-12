@@ -335,6 +335,30 @@ window.hoshiSelection = {
         return text;
     },
     
+    getPointSelectionRect(x, y) {
+        if (!this.selection?.ranges.length) {
+            return null;
+        }
+
+        const first = this.selection.ranges[0];
+        const range = document.createRange();
+        range.setStart(first.node, first.start);
+        range.setEnd(first.node, first.start + 1);
+
+        const rects = Array.from(range.getClientRects());
+        const rect = rects.find(rect => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) ?? range.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    },
+
+    inflateRect(rect, margin) {
+        return {
+            x: rect.x - margin,
+            y: rect.y - margin,
+            width: rect.width + 2 * margin,
+            height: rect.height + 2 * margin
+        };
+    },
+
     getSelectionRect(x, y) {
         if (!this.selection?.ranges.length) {
             return null;
@@ -342,32 +366,39 @@ window.hoshiSelection = {
 
         // Manga (mokuro) only: anchor the popup to the WHOLE OCR bubble, not the tapped character,
         // so it can be placed clear of the bubble being read. EPUB has no `.ocr-box`, so it keeps
-        // using the precise character rect below. Done here at the source (rather than via a fragile
+        // using the precise character rect below. When the native WKWebView is zoomed/panned, the
+        // whole bubble may be mostly off-screen; anchor to the tapped character so the native popup
+        // stays near the word the user pressed. Done here at the source (rather than via a fragile
         // messageHandler shim) so it's reliable. Convert to host coords if the manga bridge is present.
         const selNode = this.selection.startNode;
         const selEl = selNode && (selNode.nodeType === 1 ? selNode : selNode.parentElement);
         const ocrBox = selEl && selEl.closest && selEl.closest('.ocr-box');
         this.lastBlockVertical = null;
         if (ocrBox) {
-            let r = ocrBox.getBoundingClientRect();
-            // The revealed (boosted) text can overflow the box; union with the rendered
-            // text's own rect so the popup clears the glyphs actually on screen.
-            const textEl = ocrBox.querySelector('p');
-            if (textEl) {
-                const tr = textEl.getBoundingClientRect();
-                const left = Math.min(r.left, tr.left);
-                const top = Math.min(r.top, tr.top);
-                r = {
-                    x: left,
-                    y: top,
-                    width: Math.max(r.right, tr.right) - left,
-                    height: Math.max(r.bottom, tr.bottom) - top
-                };
+            let r = null;
+            const pointRect = this.getPointSelectionRect(x, y);
+            if (window.hoshiManga?.isHostZoomedOrPanned?.() && pointRect) {
+                r = this.inflateRect(pointRect, 8);
+            } else {
+                r = ocrBox.getBoundingClientRect();
+                // The revealed (boosted) text can overflow the box; union with the rendered
+                // text's own rect so the popup clears the glyphs actually on screen.
+                const textEl = ocrBox.querySelector('p');
+                if (textEl) {
+                    const tr = textEl.getBoundingClientRect();
+                    const left = Math.min(r.left, tr.left);
+                    const top = Math.min(r.top, tr.top);
+                    r = {
+                        x: left,
+                        y: top,
+                        width: Math.max(r.right, tr.right) - left,
+                        height: Math.max(r.bottom, tr.bottom) - top
+                    };
+                }
+                // Inflate a touch: the mokuro box hugs the text but the drawn balloon extends
+                // past it, so a margin keeps the popup off the balloon outline.
+                r = this.inflateRect(r, 8);
             }
-            // Inflate a touch: the mokuro box hugs the text but the drawn balloon extends
-            // past it, so a margin keeps the popup off the balloon outline.
-            const m = 8;
-            r = { x: r.x - m, y: r.y - m, width: r.width + 2 * m, height: r.height + 2 * m };
             if (window.hoshiManga && window.hoshiManga.hostRectFromViewportRect) {
                 r = window.hoshiManga.hostRectFromViewportRect(r);
             }
@@ -375,14 +406,7 @@ window.hoshiSelection = {
             return { x: r.x, y: r.y, width: r.width, height: r.height };
         }
 
-        const first = this.selection.ranges[0];
-        const range = document.createRange();
-        range.setStart(first.node, first.start);
-        range.setEnd(first.node, first.start + 1);
-        
-        const rects = Array.from(range.getClientRects());
-        const rect = rects.find(rect => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) ?? range.getBoundingClientRect();
-        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        return this.getPointSelectionRect(x, y);
     },
     
     highlightSelection(charCount) {

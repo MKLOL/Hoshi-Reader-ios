@@ -157,6 +157,34 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("maximumZoomScale = 6", popup)
         self.assertIn("zoom(to: rect, animated: true)", popup)
 
+    def test_ai_screenshot_translation_persists_attached_image(self):
+        controller = read("Features/AI/MangaAiController.swift")
+        history = read("Features/AI/AiChatHistoryStore.swift")
+        types = read("Features/AI/AiChatTypes.swift")
+
+        translate = method_body(controller, "func translateCrop")
+        self.assertIn("screenshotImage: image", translate)
+        self.assertIn("self.persist(entry, book: book)", translate)
+        self.assertIn("func append(_ entry: AiChatEntry, folder: String)", history)
+        self.assertIn("FileNames.aiChatLog", history)
+        self.assertIn("var screenshotImage: AiChatImage?", types)
+
+    def test_manga_popup_and_crop_mapping_accounts_for_native_zoom_pan(self):
+        webview = read("Features/MangaReader/MangaReaderWebView.swift")
+        html = read("Features/MangaReader/MangaPageHtml.swift")
+        selection = read("Features/Reader/ReaderWebView/selection.js")
+
+        self.assertIn("syncHostViewport", webview)
+        self.assertIn("contentOffset.x.isFinite", webview)
+        self.assertIn("setHostViewport", webview)
+        self.assertIn("hostOffsetLeftValue", html)
+        self.assertIn("x: x * scale - this.hostOffsetLeft()", html)
+        self.assertIn("function hostX(x) { return (x + window.hoshiManga.hostOffsetLeft()) / scale; }", html)
+        self.assertIn("isHostZoomedOrPanned", html)
+        self.assertNotIn("visualViewport.offsetLeft", html)
+        self.assertIn("getPointSelectionRect", selection)
+        self.assertIn("window.hoshiManga?.isHostZoomedOrPanned?.() && pointRect", selection)
+
     def test_ipad_dictionary_popup_gets_taller_floor(self):
         popup = read("Features/Popup/PopupView.swift")
         self.assertIn("preferTallPopup", popup)

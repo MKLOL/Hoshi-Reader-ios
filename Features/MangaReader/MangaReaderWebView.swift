@@ -16,7 +16,7 @@
 //     posts to the others.
 //   - Per-page HTML is loaded via `loadHTMLString(_, baseURL: hoshi-img://manga/)`.
 //   - Pinch-zoom is the scrollView's own min/max zoom; when zoomed/scrollable, swipe-to-turn is
-//     gated, and the scrollView's zoomScale feeds JS `setHostScale` for correct crop mapping.
+//     gated, and the scrollView's zoomScale/contentOffset feed JS for correct popup/crop mapping.
 //
 
 import SwiftUI
@@ -87,15 +87,20 @@ final class MangaWebViewController {
         return parseMangaImageCropRect(result as? [String: Any])
     }
 
-    fileprivate func syncHostScale() {
+    fileprivate func syncHostViewport() {
         guard let webView else { return }
         let raw = webView.scrollView.zoomScale
         let scale = raw.isFinite && raw > 0 ? raw : 1
-        webView.evaluateJavaScript("window.hoshiManga && window.hoshiManga.setHostScale(\(scale))") { _, _ in }
-        // Zoomed-in, or panned away from a fitted origin: gate page turns.
         let contentOffset = webView.scrollView.contentOffset
+        let offsetX = contentOffset.x.isFinite ? contentOffset.x : 0
+        let offsetY = contentOffset.y.isFinite ? contentOffset.y : 0
+        let script = """
+        window.hoshiManga && window.hoshiManga.setHostViewport(\(Double(scale)), \(Double(offsetX)), \(Double(offsetY)))
+        """
+        webView.evaluateJavaScript(script) { _, _ in }
+        // Zoomed-in, or panned away from a fitted origin: gate page turns.
         let zoomed = raw > webView.scrollView.minimumZoomScale + 0.01
-        let panned = contentOffset.x > 1 || contentOffset.y > 1
+        let panned = abs(contentOffset.x) > 1 || abs(contentOffset.y) > 1
         isZoomedOrScrollable = zoomed || panned
     }
 
@@ -220,7 +225,7 @@ struct MangaReaderWebView: UIViewRepresentable {
             guard let finishedLoadToken = navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation)) else {
                 return
             }
-            parent.controller.syncHostScale()
+            parent.controller.syncHostViewport()
             parent.onPageReady(finishedLoadToken)
         }
 
@@ -326,11 +331,11 @@ struct MangaReaderWebView: UIViewRepresentable {
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            parent.controller.syncHostScale()
+            parent.controller.syncHostViewport()
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            parent.controller.syncHostScale()
+            parent.controller.syncHostViewport()
         }
 
         // MARK: Swipe navigation (gated when zoomed/scrollable)
