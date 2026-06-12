@@ -104,6 +104,17 @@ final class MangaWebViewController {
         isZoomedOrScrollable = zoomed || panned
     }
 
+    func uiTestViewportProbeLabel() -> String {
+        guard let webView else { return "zoom=nil;offsetX=nil;offsetY=nil" }
+        let scrollView = webView.scrollView
+        return String(
+            format: "zoom=%.3f;offsetX=%.1f;offsetY=%.1f",
+            Double(scrollView.zoomScale),
+            Double(scrollView.contentOffset.x),
+            Double(scrollView.contentOffset.y)
+        )
+    }
+
     fileprivate func attach(_ webView: WKWebView) {
         self.webView = webView
     }
@@ -144,9 +155,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         webView.scrollView.backgroundColor = backgroundColor
         webView.navigationDelegate = context.coordinator
         webView.scrollView.delegate = context.coordinator
-        webView.scrollView.minimumZoomScale = 1
-        webView.scrollView.maximumZoomScale = 5
-        webView.scrollView.bouncesZoom = true
+        Self.configureZoom(for: webView.scrollView)
         webView.scrollView.showsVerticalScrollIndicator = false
         webView.scrollView.showsHorizontalScrollIndicator = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -166,6 +175,11 @@ struct MangaReaderWebView: UIViewRepresentable {
         swipeRight.cancelsTouchesInView = false
         webView.addGestureRecognizer(swipeRight)
 
+        let pinch = UIPinchGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.delegate = coordinator
+        pinch.cancelsTouchesInView = false
+        webView.addGestureRecognizer(pinch)
+
         controller.attach(webView)
         return webView
     }
@@ -182,6 +196,13 @@ struct MangaReaderWebView: UIViewRepresentable {
                 context.coordinator.trackNavigation(navigation, loadToken: loadToken)
             }
         }
+    }
+
+    private static func configureZoom(for scrollView: UIScrollView) {
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 5
+        scrollView.bouncesZoom = true
+        scrollView.pinchGestureRecognizer?.isEnabled = false
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -225,6 +246,7 @@ struct MangaReaderWebView: UIViewRepresentable {
             guard let finishedLoadToken = navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation)) else {
                 return
             }
+            MangaReaderWebView.configureZoom(for: webView.scrollView)
             parent.controller.syncHostViewport()
             parent.onPageReady(finishedLoadToken)
         }
@@ -336,6 +358,55 @@ struct MangaReaderWebView: UIViewRepresentable {
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             parent.controller.syncHostViewport()
+        }
+
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            guard let webView = gesture.view as? WKWebView else { return }
+            let scrollView = webView.scrollView
+            MangaReaderWebView.configureZoom(for: scrollView)
+
+            switch gesture.state {
+            case .began, .changed:
+                let currentScale = scrollView.zoomScale
+                let rawScale = currentScale * gesture.scale
+                let newScale = min(max(rawScale, scrollView.minimumZoomScale), scrollView.maximumZoomScale)
+                if abs(newScale - currentScale) > 0.001 {
+                    let anchor = gesture.location(in: webView)
+                    zoom(scrollView, to: newScale, anchoredAt: anchor)
+                }
+                gesture.scale = 1
+                parent.controller.syncHostViewport()
+            case .ended, .cancelled, .failed:
+                parent.controller.syncHostViewport()
+            default:
+                break
+            }
+        }
+
+        private func zoom(_ scrollView: UIScrollView, to scale: CGFloat, anchoredAt anchor: CGPoint) {
+            let oldScale = max(scrollView.zoomScale, 0.001)
+            let contentPoint = CGPoint(
+                x: (anchor.x + scrollView.contentOffset.x) / oldScale,
+                y: (anchor.y + scrollView.contentOffset.y) / oldScale
+            )
+            scrollView.setZoomScale(scale, animated: false)
+            let proposedOffset = CGPoint(
+                x: contentPoint.x * scale - anchor.x,
+                y: contentPoint.y * scale - anchor.y
+            )
+            scrollView.setContentOffset(clamped(proposedOffset, in: scrollView), animated: false)
+        }
+
+        private func clamped(_ offset: CGPoint, in scrollView: UIScrollView) -> CGPoint {
+            let inset = scrollView.adjustedContentInset
+            let minX = -inset.left
+            let minY = -inset.top
+            let maxX = max(minX, scrollView.contentSize.width - scrollView.bounds.width + inset.right)
+            let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height + inset.bottom)
+            return CGPoint(
+                x: min(max(offset.x, minX), maxX),
+                y: min(max(offset.y, minY), maxY)
+            )
         }
 
         // MARK: Swipe navigation (gated when zoomed/scrollable)

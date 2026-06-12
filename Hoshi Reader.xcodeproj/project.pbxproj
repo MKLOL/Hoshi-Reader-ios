@@ -15,6 +15,7 @@
 		48BC0BDF2F5C316B00EDAC3F /* CHoshiDicts in Frameworks */ = {isa = PBXBuildFile; productRef = 48BC0BDE2F5C316B00EDAC3F /* CHoshiDicts */; };
 		48C8125F2F5F47C000127630 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 48C8125E2F5F47C000127630 /* PrivacyInfo.xcprivacy */; };
 		48FE8D502F76AB88002C2C49 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 48FE8D462F76AB88002C2C49 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		5784FD089920275CA0864F51 /* ZoomPopupUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -24,6 +25,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = 48FE8D452F76AB88002C2C49;
 			remoteInfo = ShareExtension;
+		};
+		946BC1630EF4A48AAED02269 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 48107AAF2F114021009E12D1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 48107AB62F114021009E12D1;
+			remoteInfo = "Hoshi Reader";
 		};
 /* End PBXContainerItemProxy section */
 
@@ -47,6 +55,8 @@
 		48C8125E2F5F47C000127630 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		48D95BC52F1BF4D80074AD70 /* Hoshi Reader.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Hoshi Reader.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		48FE8D462F76AB88002C2C49 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		CBD5157D77EA7484B5A145F1 /* HoshiReaderUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HoshiReaderUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ZoomPopupUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -167,6 +177,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E8BD5327DC51853DB280619F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -184,7 +201,18 @@
 				48C8125E2F5F47C000127630 /* PrivacyInfo.xcprivacy */,
 				48FE8D462F76AB88002C2C49 /* ShareExtension.appex */,
 				48FE8D472F76AB88002C2C49 /* ShareExtension */,
+				937B9310E9D6E712C5243510 /* UITests */,
+				CBD5157D77EA7484B5A145F1 /* HoshiReaderUITests.xctest */,
 			);
+			sourceTree = "<group>";
+		};
+		937B9310E9D6E712C5243510 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */,
+			);
+			name = UITests;
+			path = UITests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -240,6 +268,24 @@
 			productReference = 48FE8D462F76AB88002C2C49 /* ShareExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		8EC4C6A0FF73A14FAB0DD522 /* HoshiReaderUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E19B682D76730B5DD761FF81 /* Build configuration list for PBXNativeTarget "HoshiReaderUITests" */;
+			buildPhases = (
+				4AC489ABAEA1DCCFBC5109FB /* Sources */,
+				E8BD5327DC51853DB280619F /* Frameworks */,
+				42C956CB528C8BF8073FBC36 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9ED40DC4670D1E46FABB54DB /* PBXTargetDependency */,
+			);
+			name = HoshiReaderUITests;
+			productName = HoshiReaderUITests;
+			productReference = CBD5157D77EA7484B5A145F1 /* HoshiReaderUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -255,6 +301,10 @@
 					};
 					48FE8D452F76AB88002C2C49 = {
 						CreatedOnToolsVersion = 26.4;
+					};
+					8EC4C6A0FF73A14FAB0DD522 = {
+						CreatedOnToolsVersion = 26.5;
+						TestTargetID = 48107AB62F114021009E12D1;
 					};
 				};
 			};
@@ -280,11 +330,19 @@
 			targets = (
 				48107AB62F114021009E12D1 /* Hoshi Reader */,
 				48FE8D452F76AB88002C2C49 /* ShareExtension */,
+				8EC4C6A0FF73A14FAB0DD522 /* HoshiReaderUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		42C956CB528C8BF8073FBC36 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		48107AB52F114021009E12D1 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -319,6 +377,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		4AC489ABAEA1DCCFBC5109FB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5784FD089920275CA0864F51 /* ZoomPopupUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -327,9 +393,30 @@
 			target = 48FE8D452F76AB88002C2C49 /* ShareExtension */;
 			targetProxy = 48FE8D4E2F76AB88002C2C49 /* PBXContainerItemProxy */;
 		};
+		9ED40DC4670D1E46FABB54DB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Hoshi Reader";
+			target = 48107AB62F114021009E12D1 /* Hoshi Reader */;
+			targetProxy = 946BC1630EF4A48AAED02269 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		0390BE73B577D78E77A34455 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi.HoshiReaderUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "Hoshi Reader";
+			};
+			name = Debug;
+		};
 		48107AC02F114021009E12D1 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -602,6 +689,22 @@
 			};
 			name = Release;
 		};
+		501C6A4E5AEB58C94AF8BED9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi.HoshiReaderUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "Hoshi Reader";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -628,6 +731,15 @@
 			buildConfigurations = (
 				48FE8D522F76AB88002C2C49 /* Debug */,
 				48FE8D532F76AB88002C2C49 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E19B682D76730B5DD761FF81 /* Build configuration list for PBXNativeTarget "HoshiReaderUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				501C6A4E5AEB58C94AF8BED9 /* Release */,
+				0390BE73B577D78E77A34455 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

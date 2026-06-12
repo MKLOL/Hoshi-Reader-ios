@@ -386,9 +386,11 @@ nonisolated enum MangaPageHtml {
           var scale = this.hostScale();
           var x = typeof rect.x === 'number' ? rect.x : rect.left;
           var y = typeof rect.y === 'number' ? rect.y : rect.top;
+          // WKWebView's DOM viewport rects already include the native UIScrollView pan, but
+          // their dimensions are still in unzoomed CSS pixels. Map to host pixels by scale only.
           return {
-            x: x * scale - this.hostOffsetLeft(),
-            y: y * scale - this.hostOffsetTop(),
+            x: x * scale,
+            y: y * scale,
             width: rect.width * scale,
             height: rect.height * scale
           };
@@ -410,8 +412,8 @@ nonisolated enum MangaPageHtml {
               frameRect.width <= 0 || frameRect.height <= 0) {
             return null;
           }
-          function hostX(x) { return (x + window.hoshiManga.hostOffsetLeft()) / scale; }
-          function hostY(y) { return (y + window.hoshiManga.hostOffsetTop()) / scale; }
+          function hostX(x) { return x / scale; }
+          function hostY(y) { return y / scale; }
           var cropLeft = Math.min(hostX(left), hostX(right));
           var cropRight = Math.max(hostX(left), hostX(right));
           var cropTop = Math.min(hostY(top), hostY(bottom));

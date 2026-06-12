@@ -18,6 +18,7 @@
 //   - `onTranslateCrop`: invoked with an `AiChatImage` PNG when a screenshot crop is confirmed.
 //
 
+import Foundation
 import SwiftUI
 
 struct MangaReaderView: View {
@@ -42,6 +43,8 @@ struct MangaReaderView: View {
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
     @State private var pageOpacity: Double = 1
+    @State private var uiTestSelectionProbe = "none"
+    @State private var uiTestCropProbe = "none"
 
     // MARK: Directional page-turn slide
     //
@@ -87,6 +90,10 @@ struct MangaReaderView: View {
         return "\(model.pageIndex + 1) / \(model.pageCount)"
     }
 
+    private var uiTestingEnabled: Bool {
+        ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1"
+    }
+
     var body: some View {
         ZStack {
             backgroundColor.ignoresSafeArea()
@@ -115,6 +122,24 @@ struct MangaReaderView: View {
         .overlay {
             if showGoToPageDialog {
                 goToPageDialog
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if uiTestingEnabled {
+                VStack(spacing: 0) {
+                    Text(uiTestSelectionProbe)
+                        .font(.system(size: 1))
+                        .foregroundStyle(.clear)
+                        .frame(width: 1, height: 1)
+                        .accessibilityIdentifier("manga-selection-probe")
+                        .accessibilityLabel(uiTestSelectionProbe)
+                    Text(uiTestCropProbe)
+                        .font(.system(size: 1))
+                        .foregroundStyle(.clear)
+                        .frame(width: 1, height: 1)
+                        .accessibilityIdentifier("manga-crop-probe")
+                        .accessibilityLabel(uiTestCropProbe)
+                }
             }
         }
         .sheet(isPresented: $showStatisticsSheet) {
@@ -255,6 +280,9 @@ struct MangaReaderView: View {
                     model.navigate(direction)
                 },
                 onTextSelected: { selection in
+                    if uiTestingEnabled {
+                        uiTestSelectionProbe = uiTestProbeLabel(for: selection)
+                    }
                     model.closePopups()
                     return model.handleTextSelection(
                         selection,
@@ -306,6 +334,26 @@ struct MangaReaderView: View {
             model.viewportSize = newSize
             model.renderCurrentPage(controller: controller, screenSize: newSize, userConfig: userConfig)
         }
+    }
+
+    private func uiTestProbeLabel(for selection: SelectionData) -> String {
+        let rect = selection.rect
+        let vertical: String
+        if let verticalBlock = selection.verticalBlock {
+            vertical = verticalBlock ? "true" : "false"
+        } else {
+            vertical = "nil"
+        }
+        return String(
+            format: "text=%@;x=%.1f;y=%.1f;width=%.1f;height=%.1f;vertical=%@;%@",
+            selection.text,
+            Double(rect.minX),
+            Double(rect.minY),
+            Double(rect.width),
+            Double(rect.height),
+            vertical,
+            controller.uiTestViewportProbeLabel()
+        )
     }
 
     // MARK: Page-turn slide
@@ -467,6 +515,8 @@ struct MangaReaderView: View {
                 CircleButton(systemName: "slider.horizontal.3")
                     .background(Circle().fill(.black.opacity(0.28)).padding(6))
             }
+            .accessibilityIdentifier("manga-options-menu")
+            .accessibilityLabel("Manga options")
         }
         // Hug the corners: the page is full-bleed, so every point of bar inset covers manga art.
         .padding(.horizontal, 6)
@@ -549,7 +599,25 @@ struct MangaReaderView: View {
         }.value
         guard let png else { return }
         let image = mangaScreenshotAiImage(pngData: png)
+        if uiTestingEnabled {
+            uiTestCropProbe = uiTestCropProbeLabel(crop: crop, image: image)
+            return
+        }
         if let onTranslateCrop { onTranslateCrop(image) }
         else { aiController.translateCrop(image: image, book: metadata) }
+    }
+
+    private func uiTestCropProbeLabel(crop: MangaImageCropRect, image: AiChatImage) -> String {
+        String(
+            format: "mime=%@;base64=%d;left=%d;top=%d;width=%d;height=%d;page=%d;%@",
+            image.mimeType,
+            image.base64Data.count,
+            crop.left,
+            crop.top,
+            crop.width,
+            crop.height,
+            crop.pageIndex,
+            controller.uiTestViewportProbeLabel()
+        )
     }
 }
