@@ -59,10 +59,14 @@ nonisolated struct RawMokuroBlock: Decodable {
     let vertical: Bool
     let fontSize: Double
     let lines: [String]
+    /// Per-line quadrilateral `[[x, y], ...]` in image pixels — the measured extent of each
+    /// drawn line. For vertical text the quad's width is the drawn glyph size.
+    let linesCoords: [[[Double]]]
 
     enum CodingKeys: String, CodingKey {
         case box, vertical, lines
         case fontSize = "font_size"
+        case linesCoords = "lines_coords"
     }
 
     init(from decoder: Decoder) throws {
@@ -71,6 +75,9 @@ nonisolated struct RawMokuroBlock: Decodable {
         vertical = try c.decodeIfPresent(Bool.self, forKey: .vertical) ?? false
         fontSize = try c.decodeIfPresent(Double.self, forKey: .fontSize) ?? 0
         lines = try c.decodeIfPresent([String].self, forKey: .lines) ?? []
+        // try? (not decodeIfPresent): a malformed lines_coords anywhere in the file must not
+        // fail the whole book parse — sizing falls back to geometry/font_size instead.
+        linesCoords = (try? c.decode([[[Double]]].self, forKey: .linesCoords)) ?? []
     }
 }
 
@@ -120,7 +127,14 @@ extension RawMokuroBlock {
             top: yMin,
             width: width,
             height: height,
-            fontSize: clampMokuroFontSize(mokuroFontSize: fontSize),
+            fontSize: clampMokuroFontSize(
+                mokuroFontSize: fontSize,
+                boxWidth: width,
+                boxHeight: height,
+                vertical: vertical,
+                lines: lines,
+                linesCoords: linesCoords
+            ),
             vertical: vertical,
             lines: lines
         )
@@ -136,17 +150,6 @@ private extension String {
 
 // MARK: - Font-size boost curve
 
-/// Continuous boost curve over mokuro's reported drawn-glyph height (image pixels) so the
-/// OCR-text reveal stays tappable for tiny chars without ballooning the plate for already-big
-/// chars:
-///
-///  - `result = mokuroFs + max(0, READABLE_TARGET_PX - mokuroFs) × BOOST_STRENGTH`
-///  - at `mokuroFs = 30` the boost is zero (bubbles already big reveal at mokuro's size)
-///  - at `mokuroFs >= 30` the boost stays zero
-///
-/// The result depends only on `mokuroFs` — not box size, orientation, or line count — so two
-/// bubbles with the same mokuro-reported glyph height reveal at the same OCR text size. Ported
-/// verbatim from the Android `clampMokuroFontSize` (READABLE_TARGET_PX = 30, BOOST_STRENGTH = 0.5).
 /// Clamp a possibly-NaN / infinite / out-of-range Double (from a corrupt mokuro.json) to a sane
 /// pixel Int. `Int(Double)` traps on non-finite or out-of-Int-range input, so decoded mokuro
 /// values must never be passed to it raw.
@@ -155,16 +158,75 @@ nonisolated func mokuroSafeInt(_ value: Double) -> Int {
     return Int(min(max(value, -1_000_000), 1_000_000))
 }
 
-nonisolated func clampMokuroFontSize(mokuroFontSize: Double) -> Int {
-    let mokuroFs = max(1, mokuroSafeInt(mokuroFontSize))
-    let headroom = max(0.0, MokuroFontTuning.readableTargetPx - Double(mokuroFs))
-    return max(1, Int(Double(mokuroFs) + headroom * MokuroFontTuning.boostStrength))
+/// The art's drawn-glyph size (image pixels) — a pure measurement, deliberately free of any
+/// readability boost. Readability is a *rendered-points* property, so the zoom curve lives at
+/// page-build time in `MangaPageHtml.textBoxHtml`, where the image-px → rendered-pt scale is
+/// known; this function's job is only to defeat mokuro's noise.
+///
+/// **Measured estimate.** mokuro's reported `font_size` is noisy — for some multi-column
+/// bubbles it returns the column *pitch* (spacing included), nearly 2× the drawn glyph, so two
+/// bubbles whose art is the same size could reveal wildly differently. But mokuro also ships
+/// `lines_coords`, the measured quadrilateral of every drawn line: for vertical text the quad's
+/// width IS the drawn glyph size (CJK glyphs are ~square, one per cell); for horizontal text,
+/// its height. Per-block estimate = lower-median over the lines, which discards the occasional
+/// fat outlier quad (merged furigana / slanted lines — the same quads that fool mokuro's own
+/// `font_size`). The measured ink is divided by `glyphInkRatio` so a font at the returned size
+/// renders the same ink extent as the art (an em box pads its ink ~10%).
+///
+/// Fallbacks when `lines_coords` is missing/degenerate: char-count geometry
+/// `min(across/lineCount, along/maxLineLen)`, then mokuro's `font_size`.
+nonisolated func clampMokuroFontSize(
+    mokuroFontSize: Double,
+    boxWidth: Int,
+    boxHeight: Int,
+    vertical: Bool,
+    lines: [String],
+    linesCoords: [[[Double]]] = []
+) -> Int {
+    var estimate = max(1, mokuroSafeInt(mokuroFontSize))
+
+    // Primary: measured per-line glyph size from lines_coords (lower-median across lines).
+    var measured: [Int] = []
+    for quad in linesCoords {
+        let xs = quad.compactMap { $0.count >= 2 ? $0[0] : nil }.filter(\.isFinite)
+        let ys = quad.compactMap { $0.count >= 2 ? $0[1] : nil }.filter(\.isFinite)
+        guard let minX = xs.min(), let maxX = xs.max(),
+              let minY = ys.min(), let maxY = ys.max() else { continue }
+        let size = mokuroSafeInt(vertical ? maxX - minX : maxY - minY)
+        if size > 0 { measured.append(size) }
+    }
+    if !measured.isEmpty {
+        let sorted = measured.sorted()
+        // The quad measures the drawn glyphs' INK extent, but a font's em box pads its ink
+        // (a 38px-ink drawn glyph needs ~font-size 42 to render the same ink). Dividing by
+        // the ink ratio keeps the reveal from ever looking smaller than the art.
+        estimate = max(1, Int(Double(sorted[(sorted.count - 1) / 2]) / MokuroFontTuning.glyphInkRatio))
+    } else {
+        // Fallback: char-count geometry. Underestimates lines holding sub-cell punctuation
+        // (．．． draws as one tight run), so it only applies without measured quads.
+        let lineCount = lines.count
+        let maxLineLen = lines.map(\.count).max() ?? 0
+        if lineCount > 0, maxLineLen > 0, boxWidth > 0, boxHeight > 0 {
+            let along = vertical ? boxHeight : boxWidth
+            let across = vertical ? boxWidth : boxHeight
+            let geometric = min(across / lineCount, along / maxLineLen)
+            if geometric > 0 {
+                estimate = geometric
+            }
+        }
+    }
+
+    return max(1, estimate)
 }
 
 nonisolated enum MokuroFontTuning {
-    /// Verified against the Android source (MokuroBookParser.kt `clampMokuroFontSize`):
-    /// `mokuroFs + max(0, READABLE_TARGET_PX - mokuroFs) * BOOST_STRENGTH`, constants 30.0 / 0.5.
-    /// The iOS font FORMULA already matches Android exactly — kept identical on purpose.
-    static let readableTargetPx = 30.0
-    static let boostStrength = 0.5
+    /// Fraction of a CJK font's em box its ink typically fills. lines_coords quads measure the
+    /// art's ink; dividing the measured size by this ratio yields the font-size whose rendered
+    /// ink matches the art (font-size == ink would render visibly smaller).
+    ///
+    /// NOTE: the readability zoom curve intentionally does NOT live here — it operates in
+    /// rendered points and lives in `MangaPageHtml` (`MangaFontTuning`), where the rendered
+    /// scale is known. This diverges from Android (which boosts in image px at parse time);
+    /// image-px targets are meaningless across scan resolutions, so iOS does it right.
+    static let glyphInkRatio = 0.9
 }

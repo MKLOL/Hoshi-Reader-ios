@@ -28,9 +28,22 @@ struct MangaAiPopupView: View {
     @State private var historyEntries: [AiChatEntry] = []
     /// The currently open dictionary lookup (from tapping a Japanese word), if any.
     @State private var wordLookup: WordLookupState?
+    /// Screenshot opened in the fullscreen pinch-zoom viewer, if any.
+    @State private var zoomedScreenshot: UIImage?
 
     var body: some View {
         GeometryReader { geometry in
+            let isPad = UIDevice.current.userInterfaceIdiom == .pad
+            let sideMargin: CGFloat = isPad ? 36 : 16
+            let maxCardWidth: CGFloat = isPad ? 680 : 520
+            let width = min(maxCardWidth, max(1, geometry.size.width - sideMargin * 2))
+            let availableHeight = max(
+                1,
+                geometry.size.height - geometry.safeAreaInsets.top - geometry.safeAreaInsets.bottom - sideMargin * 2
+            )
+            let targetHeight = max(isPad ? 520 : 320, geometry.size.height * (isPad ? 0.84 : 0.78))
+            let height = min(availableHeight, targetHeight)
+
             ZStack {
                 // Dim + tap-to-dismiss backdrop.
                 Color.black.opacity(0.35)
@@ -39,8 +52,14 @@ struct MangaAiPopupView: View {
                     .onTapGesture { dismiss() }
 
                 card
-                    .frame(maxWidth: 480)
-                    .padding(24)
+                    .frame(width: width, height: height)
+
+                // Fullscreen pinch-zoom viewer for a tapped screenshot, above everything.
+                if let zoomed = zoomedScreenshot {
+                    ZoomableScreenshotViewer(image: zoomed) { zoomedScreenshot = nil }
+                        .transition(.opacity)
+                        .zIndex(50)
+                }
 
                 // The dictionary lookup popup, layered above the card.
                 if let lookup = wordLookup {
@@ -87,10 +106,12 @@ struct MangaAiPopupView: View {
                 }
                 .padding(16)
             }
+            .scrollIndicators(.visible)
+            .scrollBounceBehavior(.basedOnSize)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.15), lineWidth: 1))
-        .frame(maxHeight: 560)
         // Swallow taps so they don't fall through to the dismiss backdrop.
         .contentShape(Rectangle())
         .onTapGesture { wordLookup = nil }
@@ -192,6 +213,16 @@ struct MangaAiPopupView: View {
                 .aspectRatio(contentMode: .fit)
                 .frame(maxHeight: 160)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.caption2)
+                        .padding(5)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .padding(6)
+                }
+                .contentShape(Rectangle())
+                // Tap to open fullscreen with pinch-zoom + pan (parity ask from Android).
+                .onTapGesture { zoomedScreenshot = uiImage }
         }
         if !entry.bubbleText.isEmpty {
             bubbleHeader(entry.bubbleText)
@@ -268,22 +299,25 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private func lineView(_ line: String) -> some View {
-        // Split a line into Japanese / non-Japanese runs. Japanese runs are tappable; non-Japanese
-        // runs render as inline markdown.
-        let runs = Self.splitRuns(line)
-        WrapHStack(runs: runs) { run in
-            if run.isJapanese {
-                Text(run.text)
+        // Fine-grained tokens so the flow layout can wrap ANY line: Japanese characters are
+        // individual tokens (CJK wraps anywhere; each is a tap target that scans forward from
+        // itself, Yomitan-style), non-Japanese text breaks per word with markdown attributes
+        // preserved across the split. Whole-run tokens used to clip — a long run was one
+        // unbreakable element wider than the card.
+        let tokens = Self.tokenize(line)
+        WrapHStack(runs: tokens) { token in
+            if let scanText = token.scanText {
+                Text(token.attributed)
                     .foregroundStyle(.primary)
                     .background(
                         GeometryReader { proxy in
                             Color.clear
                                 .contentShape(Rectangle())
-                                .onTapGesture { lookUp(word: run.text, sentence: line, frame: proxy.frame(in: .global)) }
+                                .onTapGesture { lookUp(word: scanText, sentence: line, frame: proxy.frame(in: .global)) }
                         }
                     )
             } else {
-                Text(markdown(run.text))
+                Text(token.attributed)
                     .foregroundStyle(.primary)
             }
         }
@@ -336,6 +370,68 @@ struct MangaAiPopupView: View {
         let rect: CGRect
         let results: [LookupResult]
         let styles: [String: String]
+    }
+
+    /// One layout token: an attributed fragment plus, for Japanese characters, the text to
+    /// scan from that character on tap (the rest of its run, clipped to a sane scan window).
+    struct Token: Identifiable {
+        let id = UUID()
+        let attributed: AttributedString
+        let scanText: String?
+    }
+
+    /// Tokenizes a line for the wrapping layout. Japanese runs become per-character tokens
+    /// (tap target each, scanning forward); other runs are markdown-parsed once and split into
+    /// word tokens, so attributes like **bold** survive wrapping.
+    static func tokenize(_ line: String) -> [Token] {
+        var tokens: [Token] = []
+        for run in splitRuns(line) {
+            if run.isJapanese {
+                let chars = Array(run.text)
+                for (index, ch) in chars.enumerated() {
+                    let scan = String(chars[index..<min(chars.count, index + 16)])
+                    tokens.append(Token(attributed: AttributedString(String(ch)), scanText: scan))
+                }
+            } else {
+                let attributed = (try? AttributedString(markdown: run.text)) ?? AttributedString(run.text)
+                // Split into word tokens at spaces, preserving attributes. Very long words
+                // (URLs, hashes, code) are chunked so no single token can out-measure the card.
+                var index = attributed.characters.startIndex
+                var wordStart = index
+                while index < attributed.characters.endIndex {
+                    let ch = attributed.characters[index]
+                    let next = attributed.characters.index(after: index)
+                    if ch == " " {
+                        let word = AttributedString(attributed[wordStart..<next])
+                        appendWrappedNonJapanese(word, to: &tokens)
+                        wordStart = next
+                    }
+                    index = next
+                }
+                if wordStart < attributed.characters.endIndex {
+                    appendWrappedNonJapanese(AttributedString(attributed[wordStart...]), to: &tokens)
+                }
+            }
+        }
+        return tokens
+    }
+
+    private static func appendWrappedNonJapanese(_ text: AttributedString, to tokens: inout [Token]) {
+        let maxCharactersPerToken = 8
+        var start = text.characters.startIndex
+        while start < text.characters.endIndex {
+            var end = start
+            var count = 0
+            while end < text.characters.endIndex, count < maxCharactersPerToken {
+                end = text.characters.index(after: end)
+                count += 1
+            }
+            let fragment = AttributedString(text[start..<end])
+            if !fragment.characters.isEmpty {
+                tokens.append(Token(attributed: fragment, scanText: nil))
+            }
+            start = end
+        }
     }
 
     /// Splits a line into maximal Japanese / non-Japanese runs in order.
@@ -436,5 +532,146 @@ private extension Character {
             if !isJapanese { return false }
         }
         return true
+    }
+}
+
+
+// MARK: - Fullscreen zoomable screenshot viewer
+
+/// Fullscreen overlay showing one screenshot with native pinch-zoom + pan (UIScrollView-backed,
+/// 1x-6x, double-tap toggles 1x/3x). Tap the close button or the dimmed border to dismiss.
+struct ZoomableScreenshotViewer: View {
+    let image: UIImage
+    let onDismiss: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.opacity(0.85).ignoresSafeArea()
+            ZoomableImageScrollView(image: image)
+                .ignoresSafeArea()
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+            .padding(.top, max(UIApplication.topSafeArea, 12))
+            .padding(.trailing, 16)
+        }
+    }
+}
+
+private struct ZoomableImageScrollView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> ZoomingImageScrollView {
+        let scroll = ZoomingImageScrollView()
+        scroll.setImage(image)
+        return scroll
+    }
+
+    func updateUIView(_ uiView: ZoomingImageScrollView, context: Context) {
+        uiView.setImage(image)
+    }
+}
+
+private final class ZoomingImageScrollView: UIScrollView, UIScrollViewDelegate {
+    private let imageView = UIImageView()
+    private var currentImage: UIImage?
+    private var lastLayoutSize: CGSize = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    func setImage(_ image: UIImage) {
+        guard currentImage !== image else { return }
+        currentImage = image
+        imageView.image = image
+        lastLayoutSize = .zero
+        setZoomScale(1, animated: false)
+        setNeedsLayout()
+    }
+
+    private func setup() {
+        backgroundColor = .clear
+        minimumZoomScale = 1
+        maximumZoomScale = 6
+        bouncesZoom = true
+        showsVerticalScrollIndicator = false
+        showsHorizontalScrollIndicator = false
+        delegate = self
+
+        imageView.contentMode = .scaleAspectFit
+        imageView.isUserInteractionEnabled = true
+        addSubview(imageView)
+
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        addGestureRecognizer(doubleTap)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.size.width > 0, bounds.size.height > 0 else { return }
+        if bounds.size != lastLayoutSize || imageView.frame == .zero {
+            lastLayoutSize = bounds.size
+            layoutImage(resetZoom: true)
+        }
+        centerImage()
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        imageView
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        centerImage()
+    }
+
+    private func layoutImage(resetZoom: Bool) {
+        guard let image = currentImage, image.size.width > 0, image.size.height > 0 else { return }
+        let scale = min(bounds.width / image.size.width, bounds.height / image.size.height)
+        let fittedSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        if resetZoom {
+            minimumZoomScale = 1
+            maximumZoomScale = 6
+            zoomScale = 1
+        }
+        imageView.frame = CGRect(origin: .zero, size: fittedSize)
+        contentSize = fittedSize
+    }
+
+    private func centerImage() {
+        let horizontalInset = max((bounds.width - contentSize.width) / 2, 0)
+        let verticalInset = max((bounds.height - contentSize.height) / 2, 0)
+        contentInset = UIEdgeInsets(
+            top: verticalInset,
+            left: horizontalInset,
+            bottom: verticalInset,
+            right: horizontalInset
+        )
+    }
+
+    @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+        if zoomScale > minimumZoomScale + 0.01 {
+            setZoomScale(minimumZoomScale, animated: true)
+        } else {
+            let targetScale = min(maximumZoomScale, 3)
+            let point = gesture.location(in: imageView)
+            let rectSize = CGSize(width: bounds.width / targetScale, height: bounds.height / targetScale)
+            let rect = CGRect(
+                x: point.x - rectSize.width / 2,
+                y: point.y - rectSize.height / 2,
+                width: rectSize.width,
+                height: rectSize.height
+            )
+            zoom(to: rect, animated: true)
+        }
     }
 }

@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import UIKit
 import CHoshiDicts
 
 struct PopupLayout {
@@ -33,6 +34,13 @@ struct PopupLayout {
     private var showOnRight: Bool {
         spaceRight >= spaceLeft
     }
+
+    /// Side placement (vertical text) is only viable when the bigger side gap can hold a
+    /// readable popup. Wide bubbles, edge-flush bubbles, or zoomed pages can leave both gaps
+    /// tiny or negative — falling back to above/below placement instead of rendering a sliver.
+    private var useSidePlacement: Bool {
+        isVertical && max(spaceLeft, spaceRight) - screenBorderPadding >= 120
+    }
     
     private var spaceAbove: CGFloat {
         selectionRect.minY - topInset - popupPadding
@@ -46,18 +54,27 @@ struct PopupLayout {
         spaceBelow >= height
     }
     
+    /// iPad gets a taller popup floor: the user wants the definition readable WITHOUT scrolling,
+    /// and a phone-tuned popupHeight setting (default 170pt) is tiny on a 1210pt screen.
+    var preferTallPopup = false
+
     // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
     // user's configured max. A definition panel that filled most of the page was overwhelming and
     // sat on top of the surrounding art.
     private var cappedMaxWidth: CGFloat { min(maxWidth, screenSize.width * 0.58) }
-    private var cappedMaxHeight: CGFloat { min(maxHeight, screenSize.height * 0.20) }
+    private var cappedMaxHeight: CGFloat {
+        if preferTallPopup {
+            return max(1, min(max(maxHeight, screenSize.height * 0.32), screenSize.height * 0.42))
+        }
+        return max(1, min(maxHeight, screenSize.height * 0.20))
+    }
 
     var width: CGFloat {
         if isFullWidth {
             return screenSize.width - screenBorderPadding * 2
         }
 
-        if isVertical {
+        if useSidePlacement {
             return min(max(spaceLeft, spaceRight) - screenBorderPadding, cappedMaxWidth)
         }
 
@@ -65,22 +82,22 @@ struct PopupLayout {
     }
 
     var height: CGFloat {
-        if isVertical || isFullWidth {
+        if useSidePlacement || isFullWidth {
             return cappedMaxHeight
         }
 
-        return min(max(spaceAbove, spaceBelow) - screenBorderPadding, cappedMaxHeight)
+        return max(1, min(max(spaceAbove, spaceBelow) - screenBorderPadding, cappedMaxHeight))
     }
-    
+
     var position: CGPoint {
         var x: CGFloat
         var y: CGFloat
-        
+
         if isFullWidth {
             x = width / 2 + screenBorderPadding
-            y = screenSize.height - height / 2 - screenBorderPadding
+            y = screenSize.height - bottomInset - height / 2 - screenBorderPadding
         } else {
-            if isVertical {
+            if useSidePlacement {
                 if showOnRight {
                     x = selectionRect.maxX + popupPadding + (width / 2)
                 } else {
@@ -186,7 +203,7 @@ struct PopupView: View {
             return nil
         }
         
-        let result = PopupLayout(
+        var result = PopupLayout(
             selectionRect: selectionData.rect,
             screenSize: screenSize,
             maxWidth: CGFloat(userConfig.popupWidth),
@@ -196,6 +213,7 @@ struct PopupView: View {
             topInset: topInset,
             bottomInset: bottomInset
         )
+        result.preferTallPopup = UIDevice.current.userInterfaceIdiom == .pad
         
         guard result.width.isFinite,
               result.height.isFinite,

@@ -70,7 +70,7 @@ nonisolated enum MangaPageHtml {
         let frameWidthCss = formatNumber(Double(imageWidth) * fitScale)
         let frameHeightCss = formatNumber(Double(imageHeight) * fitScale)
         let boxes = page.textBoxes
-            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight) }
+            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight, fitScale: fitScale) }
             .joined(separator: "\n")
 
         let css = pageCss(
@@ -105,52 +105,10 @@ nonisolated enum MangaPageHtml {
         </div>
         <script>
         window.scanNonJapaneseText = \(scanNonJapaneseText);
-        (function() {
-          // Place the dictionary popup clear of the whole OCR text box (the sentence being
-          // read), not just the tapped character. selection.js posts the tapped character's
-          // tiny rect to webkit.messageHandlers.textSelected; here we substitute the containing
-          // .ocr-box's host rect into the payload before it reaches native, so the popup layout
-          // positions above/below the entire bubble. We intercept at the `messageHandlers`
-          // object so it works regardless of whether the host hands back a fresh wrapper on
-          // each property access. This is a cosmetic enhancement — if interception fails for
-          // any reason, the popup simply opens at the tapped-character rect instead.
-          function substituteRect(payload) {
-            try {
-              var sel = window.hoshiSelection && window.hoshiSelection.selection;
-              var node = sel && sel.startNode;
-              var el = node && (node.nodeType === 1 ? node : node.parentElement);
-              var box = el && el.closest && el.closest('.ocr-box');
-              if (box && payload) {
-                var r = box.getBoundingClientRect();
-                payload.rect = window.hoshiManga && window.hoshiManga.hostRectFromViewportRect
-                  ? window.hoshiManga.hostRectFromViewportRect(r)
-                  : { x: r.x, y: r.y, width: r.width, height: r.height };
-              }
-            } catch (e) {}
-            return payload;
-          }
-          var mh = window.webkit && window.webkit.messageHandlers;
-          var nativeTextSelected = mh && mh.textSelected;
-          if (!nativeTextSelected || !nativeTextSelected.postMessage) return;
-          var shim = {
-            postMessage: function(payload) {
-              return nativeTextSelected.postMessage(substituteRect(payload));
-            }
-          };
-          // Prefer redefining the property so selection.js's later access returns the shim.
-          try {
-            Object.defineProperty(mh, 'textSelected', {
-              configurable: true,
-              get: function() { return shim; }
-            });
-          } catch (e) {
-            // Fall back to mutating the captured wrapper's postMessage in place.
-            try {
-              var originalPost = nativeTextSelected.postMessage.bind(nativeTextSelected);
-              nativeTextSelected.postMessage = function(payload) { originalPost(substituteRect(payload)); };
-            } catch (e2) {}
-          }
-        })();
+        // NOTE: anchoring the popup to the whole OCR bubble (rect substitution + the block's
+        // verticalBlock orientation) happens at the source in selection.js `getSelectionRect`
+        // — see the `.ocr-box` branch there. A messageHandlers shim that used to live here
+        // never fired reliably and has been removed.
         \(selectionScript)
         \(mangaTapHandlerScript)
         window.hoshiManga && window.hoshiManga.setSingleTapLookup(\(singleTapLookup));
@@ -219,6 +177,7 @@ nonisolated enum MangaPageHtml {
           color: transparent;
           background: transparent;
           border-radius: 3px;
+          font-size: var(--hoshi-drawn-fs);
           padding: 0.08em;
           \(ocrBoxFontFamilyRule)
           -webkit-user-select: text;
@@ -232,9 +191,17 @@ nonisolated enum MangaPageHtml {
         .ocr-box.revealed {
           color: #000;
           background: #fff;
+          /* The readability zoom (see textBoxHtml) applies only once revealed; unrevealed
+             transparent text stays at drawn size so it can't steal neighbours' taps. */
+          font-size: var(--hoshi-reveal-fs);
+          /* The white halo carries legibility wherever boosted text spills past the plate;
+             the extra 3px ring makes it read slightly stronger over busy art. NO box-shadow /
+             plate apron here: a hard-edged white square stamped over the balloon reads as a
+             rendering glitch (user-reported) — the per-glyph halo is the only emphasis. */
           text-shadow:
             1px 1px 1px #fff, -1px 1px 1px #fff, 1px -1px 1px #fff, -1px -1px 1px #fff,
-            2px 0 2px #fff, -2px 0 2px #fff, 0 2px 2px #fff, 0 -2px 2px #fff;
+            2px 0 2px #fff, -2px 0 2px #fff, 0 2px 2px #fff, 0 -2px 2px #fff,
+            3px 0 3px #fff, -3px 0 3px #fff, 0 3px 3px #fff, 0 -3px 3px #fff;
         }
         .ocr-box.vertical {
           writing-mode: vertical-rl;
@@ -309,15 +276,34 @@ nonisolated enum MangaPageHtml {
     private static func textBoxHtml(
         _ box: MokuroTextBox,
         imageWidth: Int,
-        imageHeight: Int
+        imageHeight: Int,
+        fitScale: Double
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
         let topPct = percent(box.top, imageHeight)
         let widthPct = percent(box.width, imageWidth)
         let heightPct = percent(box.height, imageHeight)
-        // Font size is in image pixels; express it relative to image width so it scales with
-        // the rendered frame (cqw = 1% of the container's width).
-        let fontCqw = percent(box.fontSize, imageWidth)
+        // Readability zoom, computed in RENDERED points (fitScale = rendered pt per image px;
+        // the viewport is initial-scale=1, so CSS px == pt). `box.fontSize` is the art's
+        // measured glyph size (see MokuroRaw.clampMokuroFontSize); small-on-screen text is
+        // lifted toward the readable target, big text reveals at art size:
+        //
+        //   revealPt = drawnPt + max(0, target - drawnPt) × boost
+        //
+        // The lift is additive-only, so the reveal is NEVER smaller than the drawn art, and
+        // the zoom multiplier strictly decreases as drawn size grows (smaller art zooms more).
+        // Defined in pt so it self-adjusts across scan resolutions and devices.
+        let drawnPt = Double(max(1, box.fontSize)) * fitScale
+        let revealPt = drawnPt + max(0, MangaFontTuning.targetRevealPt - drawnPt) * MangaFontTuning.revealBoost
+        // fitScale > 0 always (build() clamps image and viewport dims to >= 1).
+        let revealImagePx = revealPt / fitScale
+        // Express relative to image width so it scales with the rendered frame
+        // (cqw = 1% of the container's width). The UNREVEALED box renders at the art's drawn
+        // size — its transparent text must hug the box for elementFromPoint hit-testing, or
+        // boosted invisible glyphs from one bubble would steal taps meant for a neighbour.
+        // The readability zoom kicks in via `.revealed` (--hoshi-reveal-fs in the CSS).
+        let drawnCqw = percent(box.fontSize, imageWidth)
+        let revealCqw = formatNumber(revealImagePx * 100.0 / Double(imageWidth))
         let verticalClass = box.vertical ? " vertical" : ""
         // Join with literal `\n` so the shared selection scanner sees mokuro's line boundaries
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
@@ -325,7 +311,8 @@ nonisolated enum MangaPageHtml {
         return """
             <div class="ocr-box\(verticalClass)" role="button" tabindex="0" \
         aria-pressed="false" style="left: \(leftPct)%; top: \(topPct)%; \
-        width: \(widthPct)%; height: \(heightPct)%; font-size: \(fontCqw)cqw;">\
+        width: \(widthPct)%; height: \(heightPct)%; --hoshi-drawn-fs: \(drawnCqw)cqw; \
+        --hoshi-reveal-fs: \(revealCqw)cqw;">\
         <p>\(text)</p>\(actionButtonsHtml)</div>
         """
     }
@@ -443,6 +430,11 @@ nonisolated enum MangaPageHtml {
           for (var i = 0; i < revealed.length; i++) {
             revealed[i].classList.remove('revealed');
             revealed[i].setAttribute('aria-pressed', 'false');
+            // Drop any inline font the wrap fallback pinned at reveal size, so the
+            // unrevealed box returns to drawn size (keeps hit-testing honest).
+            revealed[i].style.fontSize = '';
+            revealed[i].classList.remove('wrap');
+            delete revealed[i].dataset.wrapTried;
           }
           if (window.hoshiSelection) {
             window.hoshiSelection.clearSelection();
@@ -588,8 +580,10 @@ nonisolated enum MangaPageHtml {
           if (box) {
             var alreadyRevealed = box.classList.contains('revealed');
             if (!alreadyRevealed) {
-              window.hoshiManga.tryWrapFallback(box);
+              // Reveal BEFORE the wrap fallback: the fallback fits from the computed
+              // font-size, which only becomes the boosted reveal size once .revealed applies.
               box.classList.add('revealed');
+              window.hoshiManga.tryWrapFallback(box);
               box.setAttribute('aria-pressed', 'true');
               window.hoshiManga.placeActions(box);
             }
@@ -607,6 +601,14 @@ nonisolated enum MangaPageHtml {
 
     private static func percent(_ value: Int, _ total: Int) -> String {
         formatNumber(percentValue(value, total))
+    }
+
+    /// Readability zoom tuning for the OCR reveal, in RENDERED points (see `textBoxHtml`).
+    /// The only two knobs: raise/lower `targetRevealPt` (sane band 24–28) for the floor small
+    /// text is lifted toward; `revealBoost` (0.55–0.7) for how firmly the gap is closed.
+    nonisolated enum MangaFontTuning {
+        static let targetRevealPt = 26.0
+        static let revealBoost = 0.65
     }
 
     private static func percentValue(_ value: Int, _ total: Int) -> Double {

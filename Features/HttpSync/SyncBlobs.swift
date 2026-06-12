@@ -34,19 +34,25 @@ nonisolated struct HttpSyncMetadataBlob: Codable, Equatable {
     var importedAt: String?
     /// RFC 3339 UTC — set when the user deletes the book; other devices honour it (tombstone).
     var deletedAt: String?
+    /// Edit-depth revision (Lamport counter). Each deliberate local edit sets
+    /// `rev = max(localRev, lastSeenRemoteRev) + 1`; the deeper edit chain wins regardless of
+    /// wall clocks. `nil` (legacy blobs) is treated as 0; timestamps remain the tiebreaker.
+    var rev: Int?
 
     init(title: String, contentType: ContentType, shelfName: String? = nil,
-         shelfUpdatedAt: String? = nil, importedAt: String? = nil, deletedAt: String? = nil) {
+         shelfUpdatedAt: String? = nil, importedAt: String? = nil, deletedAt: String? = nil,
+         rev: Int? = nil) {
         self.title = title
         self.contentType = contentType
         self.shelfName = shelfName
         self.shelfUpdatedAt = shelfUpdatedAt
         self.importedAt = importedAt
         self.deletedAt = deletedAt
+        self.rev = rev
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, contentType, shelfName, shelfUpdatedAt, importedAt, deletedAt
+        case title, contentType, shelfName, shelfUpdatedAt, importedAt, deletedAt, rev
     }
 
     init(from decoder: Decoder) throws {
@@ -57,6 +63,7 @@ nonisolated struct HttpSyncMetadataBlob: Codable, Equatable {
         shelfUpdatedAt = try c.decodeIfPresent(String.self, forKey: .shelfUpdatedAt)
         importedAt = try c.decodeIfPresent(String.self, forKey: .importedAt)
         deletedAt = try c.decodeIfPresent(String.self, forKey: .deletedAt)
+        rev = try? c.decodeIfPresent(Int.self, forKey: .rev)
     }
 
     /// Explicit encode so EVERY key is always emitted, with `null` for absent values. Android's
@@ -73,6 +80,7 @@ nonisolated struct HttpSyncMetadataBlob: Codable, Equatable {
         try c.encode(shelfUpdatedAt, forKey: .shelfUpdatedAt)
         try c.encode(importedAt, forKey: .importedAt)
         try c.encode(deletedAt, forKey: .deletedAt)
+        try c.encode(rev, forKey: .rev)
     }
 }
 
@@ -80,8 +88,38 @@ nonisolated struct HttpSyncBookmarkBlob: Codable, Equatable {
     let chapterIndex: Int
     let progress: Double
     let characterCount: Int
-    /// RFC 3339 UTC — LWW tiebreaker when pulling.
+    /// RFC 3339 UTC — LWW tiebreaker when pulling (used when `rev`s tie or are absent).
     let lastModified: String
+    /// Edit-depth revision — see HttpSyncMetadataBlob.rev. nil (legacy) == 0.
+    var rev: Int?
+
+    init(chapterIndex: Int, progress: Double, characterCount: Int, lastModified: String, rev: Int? = nil) {
+        self.chapterIndex = chapterIndex
+        self.progress = progress
+        self.characterCount = characterCount
+        self.lastModified = lastModified
+        self.rev = rev
+    }
+
+    enum CodingKeys: String, CodingKey { case chapterIndex, progress, characterCount, lastModified, rev }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        chapterIndex = try c.decode(Int.self, forKey: .chapterIndex)
+        progress = try c.decode(Double.self, forKey: .progress)
+        characterCount = try c.decode(Int.self, forKey: .characterCount)
+        lastModified = try c.decode(String.self, forKey: .lastModified)
+        rev = try? c.decodeIfPresent(Int.self, forKey: .rev)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(chapterIndex, forKey: .chapterIndex)
+        try c.encode(progress, forKey: .progress)
+        try c.encode(characterCount, forKey: .characterCount)
+        try c.encode(lastModified, forKey: .lastModified)
+        try c.encode(rev, forKey: .rev)
+    }
 }
 
 nonisolated struct HttpSyncChatEntryBlob: Codable, Equatable {
@@ -143,15 +181,18 @@ nonisolated struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
     let promptText: String
     var imagePromptText: String
     let lastModified: String
+    /// Edit-depth revision — see HttpSyncMetadataBlob.rev. nil (legacy) == 0.
+    var rev: Int?
 
-    init(model: String, promptText: String, imagePromptText: String, lastModified: String) {
+    init(model: String, promptText: String, imagePromptText: String, lastModified: String, rev: Int? = nil) {
         self.model = model
         self.promptText = promptText
         self.imagePromptText = imagePromptText
         self.lastModified = lastModified
+        self.rev = rev
     }
 
-    enum CodingKeys: String, CodingKey { case model, promptText, imagePromptText, lastModified }
+    enum CodingKeys: String, CodingKey { case model, promptText, imagePromptText, lastModified, rev }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -159,6 +200,16 @@ nonisolated struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
         promptText = try c.decode(String.self, forKey: .promptText)
         imagePromptText = try c.decodeIfPresent(String.self, forKey: .imagePromptText) ?? ""
         lastModified = try c.decode(String.self, forKey: .lastModified)
+        rev = try? c.decodeIfPresent(Int.self, forKey: .rev)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(model, forKey: .model)
+        try c.encode(promptText, forKey: .promptText)
+        try c.encode(imagePromptText, forKey: .imagePromptText)
+        try c.encode(lastModified, forKey: .lastModified)
+        try c.encode(rev, forKey: .rev)
     }
 }
 

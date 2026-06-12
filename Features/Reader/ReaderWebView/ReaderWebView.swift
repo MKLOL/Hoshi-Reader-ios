@@ -20,6 +20,9 @@ struct SelectionData {
     let sentence: String
     let rect: CGRect
     var normalizedOffset: Int?
+    /// The tapped OCR block's true writing orientation (manga only, from the mokuro data).
+    /// `nil` when the source can't report it — callers fall back to the rect-aspect heuristic.
+    var verticalBlock: Bool?
 }
 
 struct HighlightData {

@@ -211,3 +211,43 @@ nonisolated enum SyncKeys {
     static func payloadZip(_ syncId: String) -> String { "books/\(syncId)/payload.zip" }
     static func payloadManifest(_ syncId: String) -> String { "books/\(syncId)/payload.manifest" }
 }
+
+// MARK: - Edit-depth revision comparison (cross-device-critical; mirror of Android)
+
+/// Which side of a sync comparison should win for a revisioned blob.
+nonisolated enum SyncComparison {
+    case localWins
+    case remoteWins
+    case tie
+}
+
+/// Compares two revisioned blob states: edit-depth (`rev`, a per-key Lamport counter) first,
+/// RFC 3339 timestamps as the tiebreaker. `nil` revs (legacy blobs) count as 0, which preserves
+/// the old pure-timestamp LWW ordering until both sides have written a revisioned blob.
+///
+/// This is the rule that stops a stale device from clobbering: a device that last synced a month
+/// ago carries low revs for every key it did NOT touch (so it can never overwrite fresher remote
+/// state), while the one key it deliberately edited gets `max(localRev, lastSeenRemoteRev) + 1`
+/// and wins exactly that key.
+nonisolated func compareRevisioned(
+    localRev: Int?,
+    remoteRev: Int?,
+    localStamp: String?,
+    remoteStamp: String?
+) -> SyncComparison {
+    let lr = localRev ?? 0
+    let rr = remoteRev ?? 0
+    if lr != rr { return lr > rr ? .localWins : .remoteWins }
+    let cmp = compareRfc3339(localStamp, remoteStamp)
+    if cmp > 0 { return .localWins }
+    if cmp < 0 { return .remoteWins }
+    return .tie
+}
+
+/// Shelf-placement LWW: apply the remote placement iff it is at least as fresh as the local
+/// one (ties go to remote). Shared by the reconciler and the fire-and-forget metadata push.
+nonisolated func shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: String?, localShelvesUpdatedAt: String?) -> Bool {
+    guard let localShelvesUpdatedAt else { return true }
+    guard let remoteShelfUpdatedAt else { return false }
+    return compareRfc3339(remoteShelfUpdatedAt, localShelvesUpdatedAt) >= 0
+}

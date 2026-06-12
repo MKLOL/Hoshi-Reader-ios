@@ -131,6 +131,8 @@ final class HttpSyncManager {
         lastErrors = result.errors
         lastStatus = result.summary()
         if result.errors.isEmpty {
+            // A successful reconcile proves the server is reachable — reopen the breaker.
+            notePushOutcome(success: true)
             log.info("syncNow done: \(result.summary(), privacy: .public)")
         } else {
             lastError = result.errors.first
@@ -139,46 +141,186 @@ final class HttpSyncManager {
         }
     }
 
-    // MARK: - Fire-and-forget push hooks (reader-hot)
+    // MARK: - Fire-and-forget circuit breaker
+
+    /// After `maxConsecutiveFailures` failed fire-and-forget pushes, suppress further pushes for
+    /// `suppressInterval` so a down server isn't hammered on every page turn / shelf move.
+    /// Mirrors Android's HttpSyncReaderHooks breaker. Reset by any success or a manual sync.
+    private var consecutiveFailures = 0
+    private var suppressedUntil: Date?
+    private let maxConsecutiveFailures = 3
+    private let suppressInterval: TimeInterval = 5 * 60
+
+    private var pushesSuppressed: Bool {
+        if let until = suppressedUntil {
+            if Date() < until { return true }
+            suppressedUntil = nil
+            consecutiveFailures = 0
+        }
+        return false
+    }
+
+    private func notePushOutcome(success: Bool) {
+        if success {
+            consecutiveFailures = 0
+            suppressedUntil = nil
+        } else {
+            consecutiveFailures += 1
+            if consecutiveFailures >= maxConsecutiveFailures {
+                suppressedUntil = Date().addingTimeInterval(suppressInterval)
+                log.error("auto-push circuit breaker tripped; suppressed for \(Int(self.suppressInterval))s")
+            }
+        }
+    }
+
+    /// True when fire-and-forget hooks may run.
+    private var autoPushReady: Bool {
+        settings.enabled && settings.isConfigured && !pushesSuppressed
+    }
+
+    // MARK: - Fire-and-forget push hooks (reader-hot + metadata edits)
 
     /// Call after a bookmark has been persisted to disk for `book` (e.g. the page-turn debounce
-    /// fired). PUTs `books/{syncId}/bookmark` if the local bookmark is strictly newer than the
-    /// server's. No-ops silently when sync is disabled / unconfigured; never throws. Returns
-    /// immediately — the PUT happens in a detached task (network IO is off-thread).
+    /// fired, EPUB or manga). Bumps the bookmark key's edit-depth rev, then PUTs
+    /// `books/{syncId}/bookmark` unless the server copy out-revisions the local one (in which
+    /// case the remote bookmark is applied locally instead). No-ops silently when sync is
+    /// disabled / unconfigured / suppressed; never throws.
     func onPageTurnPersisted(book: BookMetadata) {
-        guard let folder = book.folder, let bookSyncId = syncId(for: book),
-              settings.enabled, settings.isConfigured,
+        guard let bookSyncId = syncId(for: book) else { return }
+        // Bump whenever a sync-participating install makes a deliberate edit — even while the
+        // breaker is suppressing pushes or auto-sync is disabled. Otherwise edits made while
+        // silent pushes are unavailable stay rev-invisible and can lose to an older remote
+        // position at the next manual sync.
+        let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.bookmark(bookSyncId))
+        guard let folder = book.folder, autoPushReady,
               let booksDir = try? BookStorage.getBooksDirectory() else { return }
         let config = settings.currentConfig()
         let root = booksDir.appendingPathComponent(folder)
-        Task { await Self.pushBookmark(config: config, syncId: bookSyncId, root: root) }
+        Task {
+            let ok = await Self.pushBookmark(config: config, syncId: bookSyncId, root: root, localRev: localRev)
+            self.notePushOutcome(success: ok)
+        }
+    }
+
+    /// Call after the user moves `book` onto `shelfName` (nil = unshelved). Records the placement
+    /// in the shelf-state sidecar, bumps the metadata key's rev, and pushes the metadata blob.
+    func onShelfPlacementChanged(book: BookMetadata, shelfName: String?) {
+        guard let bookSyncId = syncId(for: book) else { return }
+        // Record placement locally even when offline/disabled — the next manual sync uses it.
+        let now = rfc3339Now()
+        var shelfState = HttpSyncShelfStateStore.load()
+        shelfState[bookSyncId] = HttpSyncShelfPlacementRecord(shelfName: shelfName, updatedAt: now)
+        HttpSyncShelfStateStore.save(shelfState)
+        let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.metadata(bookSyncId))
+        guard autoPushReady else { return }
+        let config = settings.currentConfig()
+        let upload = MetadataUpload(
+            syncId: bookSyncId, title: book.title ?? bookSyncId, contentType: book.resolvedContentType,
+            shelfName: shelfName, shelfUpdatedAt: now, importedAt: book.importedAt,
+            deletedAt: nil, localRev: localRev
+        )
+        Task {
+            let ok = await Self.pushMetadata(config: config, upload: upload)
+            self.notePushOutcome(success: ok)
+        }
+    }
+
+    /// Call right after a successful import. Publishes the book's metadata immediately so other
+    /// devices see it; the (large) payload still uploads on the next manual sync only.
+    func onBookImported(book: BookMetadata) {
+        guard let bookSyncId = syncId(for: book) else { return }
+        let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.metadata(bookSyncId))
+        guard autoPushReady else { return }
+        let config = settings.currentConfig()
+        let upload = MetadataUpload(
+            syncId: bookSyncId, title: book.title ?? bookSyncId, contentType: book.resolvedContentType,
+            shelfName: nil, shelfUpdatedAt: nil, importedAt: book.importedAt,
+            deletedAt: nil, localRev: localRev
+        )
+        Task {
+            let ok = await Self.pushMetadata(config: config, upload: upload)
+            self.notePushOutcome(success: ok)
+        }
+    }
+
+    /// Call after a local delete has been staged in HttpSyncDeletedBookStore. Pushes the
+    /// tombstone immediately (the staged record stays as the retry path for manual sync).
+    func onBookDeleted(syncId bookSyncId: String, title: String, contentType: ContentType, deletedAt: String) {
+        let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.metadata(bookSyncId))
+        guard autoPushReady else { return }
+        let config = settings.currentConfig()
+        let upload = MetadataUpload(
+            syncId: bookSyncId, title: title, contentType: contentType,
+            shelfName: nil, shelfUpdatedAt: nil, importedAt: nil,
+            deletedAt: deletedAt, localRev: localRev
+        )
+        Task {
+            let ok = await Self.pushMetadata(config: config, upload: upload)
+            self.notePushOutcome(success: ok)
+        }
+    }
+
+    /// Call after the ChatGPT model/prompt settings change. Debounced (the prompt fields edit
+    /// per-keystroke); runs the existing bidirectional app-settings LWW once typing settles.
+    /// (AI settings stay timestamp-LWW — a single small blob with no per-field merge to protect.)
+    private var aiSettingsPushTask: Task<Void, Never>?
+    func onAiSettingsChanged() {
+        guard autoPushReady, let aiSettings else { return }
+        let config = settings.currentConfig()
+        aiSettingsPushTask?.cancel()
+        aiSettingsPushTask = Task {
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+            let outcome = await HttpSyncReconciler.syncAppSettings(transport: transport, settings: aiSettings)
+            self.notePushOutcome(success: outcome.error == nil)
+        }
     }
 
     /// Call after a chat entry has been appended to `ai_chat_log.json` for `book`. PUTs the single
     /// content-addressed chat key. Idempotent (re-pushes write identical bytes). No-ops when sync
     /// is disabled / unconfigured; never throws.
     func onChatEntryPersisted(book: BookMetadata, entry: AiChatEntry) {
-        guard let bookSyncId = syncId(for: book),
-              settings.enabled, settings.isConfigured else { return }
+        guard let bookSyncId = syncId(for: book), autoPushReady else { return }
         let config = settings.currentConfig()
-        Task { await Self.pushChatEntry(config: config, syncId: bookSyncId, entry: entry) }
+        Task {
+            let ok = await Self.pushChatEntry(config: config, syncId: bookSyncId, entry: entry)
+            self.notePushOutcome(success: ok)
+        }
     }
 
     // MARK: - Push implementations
 
-    private static func pushBookmark(config: HttpSyncConfig, syncId: String, root: URL) async {
+    /// One fire-and-forget metadata upload. The hook that constructs it has already bumped the
+    /// key's local rev; the changed field's freshness (e.g. shelfUpdatedAt = now) makes the
+    /// shelf-LWW merge below keep the local change while preserving fresher remote fields.
+    nonisolated struct MetadataUpload: Sendable {
+        let syncId: String
+        let title: String
+        let contentType: ContentType
+        let shelfName: String?
+        let shelfUpdatedAt: String?
+        let importedAt: String?
+        let deletedAt: String?
+        let localRev: Int
+    }
+
+    /// Returns true on success (incl. "remote out-revisions us, push correctly skipped").
+    private static func pushBookmark(config: HttpSyncConfig, syncId: String, root: URL, localRev: Int) async -> Bool {
         let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         let key = SyncKeys.bookmark(syncId)
         let decoder = JSONDecoder()
         let encoder = JSONEncoder()
         do {
-            guard let local = BookStorage.loadBookmark(root: root) else { return }
-            // Overwrite protection: fetch the remote bookmark; if it's newer, pull it locally and
-            // skip the push, exactly like Android HttpSyncPusher.pushBookmark.
+            guard let local = BookStorage.loadBookmark(root: root) else { return true }
+            // Overwrite protection: fetch the remote bookmark; if it out-revisions the local
+            // edit (deeper edit chain; timestamps only break rev ties), pull it locally and
+            // skip the push. Mirrors Android HttpSyncPusher.pushBookmark.
             if let remote = try await transport.get(key: key),
                let remoteBlob = try? decoder.decode(HttpSyncBookmarkBlob.self, from: remote.body) {
                 let localStamp = local.lastModified.map { rfc3339(from: $0) }
-                if compareRfc3339(remoteBlob.lastModified, localStamp) > 0 {
+                if compareRevisioned(localRev: localRev, remoteRev: remoteBlob.rev,
+                                     localStamp: localStamp, remoteStamp: remoteBlob.lastModified) == .remoteWins {
                     let bookmark = Bookmark(
                         chapterIndex: remoteBlob.chapterIndex,
                         progress: remoteBlob.progress,
@@ -186,20 +328,102 @@ final class HttpSyncManager {
                         lastModified: Date(timeIntervalSinceReferenceDate: rfc3339ToAppleSeconds(remoteBlob.lastModified))
                     )
                     try? BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
-                    return
+                    HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: true)
+                    return true
                 }
             }
+            // A newer local edit may have superseded this push while the GET was in flight —
+            // let its own push deliver the deeper rev instead of racing it with stale content.
+            guard HttpSyncRevisionStore.current(key).localRev == localRev else { return true }
+            var blob = local.toBlob()
+            blob.rev = localRev
             _ = try await transport.put(
                 key: key,
                 contentType: "application/json; charset=utf-8",
-                body: try encoder.encode(local.toBlob())
+                body: try encoder.encode(blob)
             )
+            HttpSyncRevisionStore.noteRemote(key, rev: localRev, appliedLocally: true)
+            return true
         } catch {
             // Fire-and-forget: swallow. The next reconcile or page turn retries.
+            return false
         }
     }
 
-    private static func pushChatEntry(config: HttpSyncConfig, syncId: String, entry: AiChatEntry) async {
+    /// Fire-and-forget metadata PUT with the same merge rules as the reconciler's outbound pass:
+    /// honour a winning remote tombstone, keep a fresher remote shelf placement, advance
+    /// importedAt — then push only if the local edit out-revisions the remote blob.
+    private static func pushMetadata(config: HttpSyncConfig, upload: MetadataUpload) async -> Bool {
+        let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+        let key = SyncKeys.metadata(upload.syncId)
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+        do {
+            var remoteBlob: HttpSyncMetadataBlob?
+            if let remote = try await transport.get(key: key) {
+                remoteBlob = try? decoder.decode(HttpSyncMetadataBlob.self, from: remote.body)
+            }
+            if let remoteBlob {
+                switch compareRevisioned(localRev: upload.localRev, remoteRev: remoteBlob.rev,
+                                         localStamp: upload.shelfUpdatedAt ?? upload.deletedAt,
+                                         remoteStamp: remoteBlob.shelfUpdatedAt ?? remoteBlob.deletedAt) {
+                case .remoteWins:
+                    // Deeper remote edit chain: do not clobber. The next manual sync applies it.
+                    HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: false)
+                    return true
+                case .localWins, .tie:
+                    break
+                }
+            }
+            // Merge: keep the fresher shelf placement, advance importedAt, honour tombstones.
+            var shelfName = upload.shelfName
+            var shelfUpdatedAt = upload.shelfUpdatedAt
+            if let remoteBlob, upload.deletedAt == nil,
+               shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: remoteBlob.shelfUpdatedAt,
+                                               localShelvesUpdatedAt: shelfUpdatedAt) {
+                shelfName = remoteBlob.shelfName
+                shelfUpdatedAt = remoteBlob.shelfUpdatedAt
+            }
+            // A remote tombstone the local re-import has overridden must NOT be carried —
+            // re-publishing it at a deeper rev would delete the book on peers.
+            var carriedDeletedAt = upload.deletedAt ?? remoteBlob?.deletedAt
+            if upload.deletedAt == nil,
+               localImportedAtOverridesRemoteDeletion(localImportedAt: upload.importedAt,
+                                                      remoteDeletedAt: remoteBlob?.deletedAt) {
+                carriedDeletedAt = nil
+            }
+            let blob = HttpSyncMetadataBlob(
+                title: upload.title,
+                contentType: upload.contentType,
+                shelfName: shelfName,
+                shelfUpdatedAt: shelfUpdatedAt,
+                importedAt: maxRfc(remoteBlob?.importedAt, upload.importedAt),
+                deletedAt: carriedDeletedAt,
+                rev: upload.localRev
+            )
+            if let remoteBlob {
+                var unrevisionedRemote = remoteBlob
+                unrevisionedRemote.rev = blob.rev
+                if unrevisionedRemote == blob {
+                    // Content identical — skip the PUT (and the rev-inflation it would cause).
+                    HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: true)
+                    return true
+                }
+            }
+            guard HttpSyncRevisionStore.current(key).localRev == upload.localRev else { return true }
+            _ = try await transport.put(
+                key: key,
+                contentType: "application/json; charset=utf-8",
+                body: try encoder.encode(blob)
+            )
+            HttpSyncRevisionStore.noteRemote(key, rev: upload.localRev, appliedLocally: true)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func pushChatEntry(config: HttpSyncConfig, syncId: String, entry: AiChatEntry) async -> Bool {
         let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         let suffix = chatEntryKeySuffix(timestampAppleSeconds: entry.timestampSeconds, bubbleText: entry.bubbleText, response: entry.response)
         let encoder = JSONEncoder()
@@ -209,8 +433,10 @@ final class HttpSyncManager {
                 contentType: "application/json; charset=utf-8",
                 body: try encoder.encode(entry.toBlob())
             )
+            return true
         } catch {
             // Fire-and-forget: swallow.
+            return false
         }
     }
 }

@@ -92,19 +92,12 @@ struct MangaReaderView: View {
             backgroundColor.ignoresSafeArea()
 
             if model.isReady {
-                // Reserve bands for the top/bottom chrome so the WebView never sits underneath
-                // them — a full-screen WKWebView swallows taps over its frame, which would make
-                // the chrome buttons unresponsive (mirrors the EPUB reader's layout). The manga
-                // page is letterboxed, so the reserved bands only trim empty space.
-                VStack(spacing: 0) {
-                    Color.clear
-                        .frame(height: topChromeHeight)
-                        .allowsHitTesting(false)
-                    pageContent
-                    Color.clear
-                        .frame(height: bottomChromeHeight)
-                        .allowsHitTesting(false)
-                }
+                // The page is always full-bleed and the top/bottom chrome floats above it
+                // (matching Android). Overlays receive taps before the WebView (the dictionary
+                // popups in pageContent prove this), so the chrome stays responsive; toggling
+                // focus mode only changes bar visibility and never relayouts/refits the page.
+                pageContent
+                    .ignoresSafeArea()
             } else if let error = model.errorMessage {
                 Text(error)
                     .foregroundStyle(.secondary)
@@ -168,17 +161,6 @@ struct MangaReaderView: View {
         }
     }
 
-    /// Height reserved (within the safe area) for the top bar content; reclaimed by the page in
-    /// focus mode and while cropping (the crop overlay needs the full screen).
-    private var topChromeHeight: CGFloat {
-        (focusMode || screenshotCropMode) ? 0 : 76
-    }
-
-    /// Height reserved (within the safe area) for the page indicator / focus-toggle strip.
-    private var bottomChromeHeight: CGFloat {
-        screenshotCropMode ? 0 : 42
-    }
-
     @State private var lastSize: CGSize = .zero
 
     @ViewBuilder
@@ -199,6 +181,10 @@ struct MangaReaderView: View {
                                 screenSize: geometry.size,
                                 isVertical: popup.isVertical,
                                 isFullWidth: popup.isFullWidth,
+                                // The reader surface is full-bleed, so keep popups out of the
+                                // status-bar / home-indicator regions.
+                                topInset: UIApplication.topSafeArea,
+                                bottomInset: UIApplication.bottomSafeArea,
                                 coverURL: metadata.coverURL,
                                 documentTitle: model.title,
                                 clearSelection: popup.clearSelection,
@@ -274,11 +260,20 @@ struct MangaReaderView: View {
                         selection,
                         maxResults: userConfig.maxResults,
                         scanLength: userConfig.scanLength,
-                        isVertical: selection.rect.height > selection.rect.width,
+                        // The block's true orientation when the source reports it (manga);
+                        // the rect-aspect heuristic misreads squat multi-column vertical bubbles.
+                        isVertical: selection.verticalBlock ?? (selection.rect.height > selection.rect.width),
                         isFullWidth: userConfig.popupFullWidth
                     )
                 },
-                onTapOutside: { model.closePopups() },
+                onTapOutside: {
+                    model.closePopups()
+                    // Tapping empty artwork is also the way OUT of focus mode (the
+                    // page-indicator capsule that toggles it is hidden while focused).
+                    if focusMode {
+                        withAnimation(.default.speed(2)) { focusMode = false }
+                    }
+                },
                 onAskAi: { text in
                     if let onAskAi { onAskAi(text) }
                     else { aiController.ask(bubbleText: text, book: metadata) }
@@ -434,6 +429,9 @@ struct MangaReaderView: View {
     private var topBar: some View {
         HStack {
             CircleButton(systemName: "chevron.left")
+                // A soft dark scrim keeps the floating glass button legible over the
+                // full-bleed page art (white-on-white otherwise).
+                .background(Circle().fill(.black.opacity(0.28)).padding(6))
                 .contentShape(Circle())
                 .onTapGesture {
                     model.flushPendingBookmark()
@@ -442,14 +440,8 @@ struct MangaReaderView: View {
                 }
 
             Spacer()
-
-            if let title = model.title, userConfig.readerShowTitle {
-                Text(title)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer()
-            }
+            // No book title in the manga top bar: with the full-bleed page it sat directly on
+            // the artwork and read as clutter (user-reported).
 
             // A real Menu anchors the dropdown to this button. The old `.confirmationDialog`
             // presented detached (mid-screen / bottom), which is what looked wrong.
@@ -473,14 +465,17 @@ struct MangaReaderView: View {
                 } label: { Label("Statistics", systemImage: "chart.bar") }
             } label: {
                 CircleButton(systemName: "slider.horizontal.3")
+                    .background(Circle().fill(.black.opacity(0.28)).padding(6))
             }
         }
-        .padding(.horizontal, 20)
-        // The inset region already starts at the safe-area edge; a small gap hugs the status bar.
-        .padding(.top, 4)
+        // Hug the corners: the page is full-bleed, so every point of bar inset covers manga art.
+        .padding(.horizontal, 6)
+        .padding(.top, 0)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity)
-        .background(backgroundColor.opacity(0.001))
+        // No full-width hit-testable background: with the full-bleed page, an (invisible)
+        // bar background would swallow taps meant for bubbles under the strip. Only the
+        // buttons themselves are tappable.
     }
 
     private var bottomBar: some View {
@@ -494,17 +489,20 @@ struct MangaReaderView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(.ultraThinMaterial, in: Capsule())
+                    // Focus mode is entered from the capsule only; the rest of the strip
+                    // stays tap-transparent so bottom-of-page bubbles remain revealable.
+                    // Exiting focus mode happens by tapping empty artwork (onTapOutside).
+                    .contentShape(Capsule())
+                    .onTapGesture {
+                        withAnimation(.default.speed(2)) { focusMode.toggle() }
+                    }
             }
             Spacer()
         }
         .frame(maxWidth: .infinity, minHeight: 36)
         // A small gap hugs the home indicator.
         .padding(.bottom, 6)
-        .background(backgroundColor.opacity(0.001))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            withAnimation(.default.speed(2)) { focusMode.toggle() }
-        }
+        .allowsHitTesting(!focusMode)
     }
 
     private var goToPageDialog: some View {

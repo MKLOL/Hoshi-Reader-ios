@@ -357,7 +357,12 @@ struct CircleButton: View {
             Image(systemName: systemName)
                 .font(.system(size: fontSize))
                 .foregroundStyle(.primary)
+                // Same 44pt footprint as the iOS 26 glass branch, so callers that layer a
+                // scrim behind the button (manga reader top bar) get identical geometry.
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
                 .padding(8)
+                .contentShape(Circle())
         }
     }
 }

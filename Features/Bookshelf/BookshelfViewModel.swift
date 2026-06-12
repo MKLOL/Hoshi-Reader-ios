@@ -80,8 +80,15 @@ class BookshelfViewModel {
     }
     
     func deleteShelf(name: String) {
+        // Books on the deleted shelf become unshelved — a placement change for each of them.
+        let orphanedIds = shelves.first(where: { $0.name == name })?.bookIds ?? []
         shelves.removeAll(where: { $0.name == name })
         saveShelves()
+        for id in orphanedIds {
+            if let book = books.first(where: { $0.id == id }) {
+                HttpSyncManager.shared.onShelfPlacementChanged(book: book, shelfName: nil)
+            }
+        }
     }
     
     func moveShelves(from source: IndexSet, to destination: Int) {
@@ -98,6 +105,10 @@ class BookshelfViewModel {
             shelves[index].bookIds.append(id)
         }
         saveShelves()
+        // Metadata edits sync immediately (fire-and-forget; no-op when sync is off).
+        if let book = books.first(where: { $0.id == id }) {
+            HttpSyncManager.shared.onShelfPlacementChanged(book: book, shelfName: name)
+        }
     }
     
     func moveBooks(_ books: Set<BookMetadata>, to name: String?) {
@@ -204,11 +215,18 @@ class BookshelfViewModel {
             // BookshelfRepository.recordHttpSyncTombstone. Only books with a derivable syncId
             // participate in sync, so skip the record when the title yields no syncId.
             if let title = book.title, let bookSyncId = syncId(for: book) {
+                let deletedAt = rfc3339Now()
                 HttpSyncDeletedBookStore.record(
                     syncId: bookSyncId,
                     title: title,
                     contentType: book.resolvedContentType,
-                    deletedAt: rfc3339Now()
+                    deletedAt: deletedAt
+                )
+                // Push the tombstone immediately; the staged record above stays as the
+                // retry path for the next manual sync.
+                HttpSyncManager.shared.onBookDeleted(
+                    syncId: bookSyncId, title: title,
+                    contentType: book.resolvedContentType, deletedAt: deletedAt
                 )
             }
             if let folder = book.folder {
@@ -325,7 +343,9 @@ class BookshelfViewModel {
 
     private func importMangaBundle(from url: URL) throws {
         // MokuroImporter owns the security-scoped access (single owner; no double start/stop).
-        _ = try MokuroImporter.importBundle(from: url)
+        let metadata = try MokuroImporter.importBundle(from: url)
+        // Publish the new book's metadata immediately (payload uploads on manual sync).
+        HttpSyncManager.shared.onBookImported(book: metadata)
     }
 
     func importRemoteBook(from url: URL) {
@@ -518,6 +538,8 @@ class BookshelfViewModel {
             try BookStorage.save(metadata, inside: bookFolder, as: FileNames.metadata)
             try BookStorage.save(bookinfo, inside: bookFolder, as: FileNames.bookinfo)
             try BookStorage.delete(at: localURL)
+            // Publish the new book's metadata immediately (payload uploads on manual sync).
+            HttpSyncManager.shared.onBookImported(book: metadata)
         } catch {
             try? BookStorage.delete(at: localURL)
             try? BookStorage.delete(at: bookFolder)

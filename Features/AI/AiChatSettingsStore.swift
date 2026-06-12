@@ -90,6 +90,8 @@ final class AiChatSettingsStore {
             let stamp = Self.stampStrictlyNewerThan(lastEditedAt)
             lastEditedAt = stamp
             defaults.set(stamp, forKey: Keys.lastEditedAt)
+            // Settings edits sync immediately (debounced inside the manager; no-op when off).
+            HttpSyncManager.shared.onAiSettingsChanged()
         }
     }
 

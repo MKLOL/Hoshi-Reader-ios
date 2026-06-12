@@ -319,10 +319,16 @@ window.hoshiSelection = {
         
         const sentence = this.getSentence(hit.node, hit.offset);
         const normalizedOffset = window.hoshiReader ? this.getNormalizedOffset(hit.node, hit.offset) : null;
+        const rect = this.getSelectionRect(x, y);
         webkit.messageHandlers.textSelected.postMessage({
             text,
             sentence,
-            rect: this.getSelectionRect(x, y),
+            rect,
+            // Manga only (set by getSelectionRect): the tapped block's true writing
+            // orientation from the mokuro data. The box aspect ratio is a bad proxy for
+            // squat multi-column vertical bubbles (wider than tall), which the popup
+            // layout would otherwise treat as horizontal text and cover the bubble.
+            verticalBlock: this.lastBlockVertical ?? null,
             normalizedOffset
         });
         
@@ -341,11 +347,31 @@ window.hoshiSelection = {
         const selNode = this.selection.startNode;
         const selEl = selNode && (selNode.nodeType === 1 ? selNode : selNode.parentElement);
         const ocrBox = selEl && selEl.closest && selEl.closest('.ocr-box');
+        this.lastBlockVertical = null;
         if (ocrBox) {
             let r = ocrBox.getBoundingClientRect();
+            // The revealed (boosted) text can overflow the box; union with the rendered
+            // text's own rect so the popup clears the glyphs actually on screen.
+            const textEl = ocrBox.querySelector('p');
+            if (textEl) {
+                const tr = textEl.getBoundingClientRect();
+                const left = Math.min(r.left, tr.left);
+                const top = Math.min(r.top, tr.top);
+                r = {
+                    x: left,
+                    y: top,
+                    width: Math.max(r.right, tr.right) - left,
+                    height: Math.max(r.bottom, tr.bottom) - top
+                };
+            }
+            // Inflate a touch: the mokuro box hugs the text but the drawn balloon extends
+            // past it, so a margin keeps the popup off the balloon outline.
+            const m = 8;
+            r = { x: r.x - m, y: r.y - m, width: r.width + 2 * m, height: r.height + 2 * m };
             if (window.hoshiManga && window.hoshiManga.hostRectFromViewportRect) {
                 r = window.hoshiManga.hostRectFromViewportRect(r);
             }
+            this.lastBlockVertical = ocrBox.classList.contains('vertical');
             return { x: r.x, y: r.y, width: r.width, height: r.height };
         }
 

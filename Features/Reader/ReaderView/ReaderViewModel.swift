@@ -297,6 +297,7 @@ class ReaderViewModel {
     func flushAutoSync() async {
         debounceTask?.cancel()
         debounceTask = nil
+        flushSyncPush()
         await runAutoExport(direction: .exportToTtu)
     }
     
@@ -553,8 +554,32 @@ class ReaderViewModel {
         )
         try? BookStorage.save(bookmark, inside: rootURL, as: FileNames.bookmark)
         scheduleAutoExport()
+        scheduleSyncPush()
     }
-    
+
+    /// EPUB reading position syncs just like manga page turns, but `persistBookmark` fires on
+    /// every paginated turn / scroll stop — debounce so the hook (one rev bump + GET/PUT) runs
+    /// once per reading pause, mirroring the manga reader's bookmark debounce.
+    private var syncPushTask: Task<Void, Never>?
+    private var pendingSyncPush = false
+    private func scheduleSyncPush() {
+        pendingSyncPush = true
+        syncPushTask?.cancel()
+        syncPushTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self?.flushSyncPush()
+        }
+    }
+
+    private func flushSyncPush() {
+        syncPushTask?.cancel()
+        syncPushTask = nil
+        guard pendingSyncPush else { return }
+        pendingSyncPush = false
+        HttpSyncManager.shared.onPageTurnPersisted(book: book)
+    }
+
     private func loadChapter(index: Int, progress: Double, fragment: String? = nil) {
         isLoading = true
         sasayakiPlayer.prepareTransition()

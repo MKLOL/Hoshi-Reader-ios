@@ -142,16 +142,54 @@ class LastTenRegressionTests(unittest.TestCase):
         ]
         self.assertIn("guard controller.state != .browsingHistory else", history_button)
 
-    def test_top_chrome_reserves_actual_button_height(self):
+    def test_ai_popup_has_bounded_scroll_window_and_wraps_long_tokens(self):
+        popup = read("Features/AI/MangaAiPopupView.swift")
+        self.assertIn("let maxCardWidth: CGFloat = isPad ? 680 : 520", popup)
+        self.assertIn(".frame(width: width, height: height)", popup)
+        self.assertIn(".scrollIndicators(.visible)", popup)
+        self.assertIn("let maxCharactersPerToken = 8", popup)
+        self.assertIn("appendWrappedNonJapanese", popup)
+
+    def test_ai_screenshot_viewer_uses_native_zoom_scroll_view(self):
+        popup = read("Features/AI/MangaAiPopupView.swift")
+        self.assertIn("ZoomableScreenshotViewer", popup)
+        self.assertIn("private final class ZoomingImageScrollView: UIScrollView, UIScrollViewDelegate", popup)
+        self.assertIn("maximumZoomScale = 6", popup)
+        self.assertIn("zoom(to: rect, animated: true)", popup)
+
+    def test_ipad_dictionary_popup_gets_taller_floor(self):
+        popup = read("Features/Popup/PopupView.swift")
+        self.assertIn("preferTallPopup", popup)
+        self.assertIn("UIDevice.current.userInterfaceIdiom == .pad", popup)
+        self.assertIn("screenSize.height * 0.32", popup)
+        self.assertIn("screenSize.height * 0.42", popup)
+        self.assertIn("return max(1, min(max(spaceAbove, spaceBelow) - screenBorderPadding, cappedMaxHeight))", popup)
+
+    def test_manga_ocr_reveal_font_size_overrides_drawn_size(self):
+        html = read("Features/MangaReader/MangaPageHtml.swift")
+        self.assertIn("font-size: var(--hoshi-drawn-fs);", html)
+        self.assertIn("font-size: var(--hoshi-reveal-fs);", html)
+        self.assertIn("--hoshi-drawn-fs:", html)
+        self.assertNotIn("height: \\(heightPct)%; font-size:", html)
+        self.assertIn("delete revealed[i].dataset.wrapTried;", html)
+
+    def test_manga_reader_is_full_bleed_with_overlay_chrome(self):
+        # The reserved chrome bands were deliberately removed (June 2026, user request): the
+        # page is always full-bleed and the top/bottom chrome floats above it, Android-style.
+        # Toggling focus mode must change bar visibility only — never relayout the page.
         view = read("Features/MangaReader/MangaReaderView.swift")
-        match = re.search(
-            r"private var topChromeHeight: CGFloat \{\s*"
-            r"\(focusMode \|\| screenshotCropMode\) \? 0 : (?P<height>\d+)",
-            view,
-            re.S,
-        )
-        self.assertIsNotNone(match)
-        self.assertGreaterEqual(int(match.group("height")), 72)
+        self.assertNotIn("topChromeHeight", view)
+        self.assertNotIn("bottomChromeHeight", view)
+        self.assertIn(".ignoresSafeArea()", view)
+        # The full-width strips must not swallow page taps: focus toggle on the capsule only,
+        # exit via empty-art tap.
+        self.assertIn(".allowsHitTesting(!focusMode)", view)
+
+    def test_manga_reader_menu_button_hugs_top_right(self):
+        view = read("Features/MangaReader/MangaReaderView.swift")
+        top_bar = method_body(view, "private var topBar")
+        self.assertIn(".padding(.horizontal, 6)", top_bar)
+        self.assertNotIn("Text(title)", top_bar)
 
     def test_manga_scan_non_japanese_toggle_is_used_by_selection_script(self):
         selection = read("Features/Reader/ReaderWebView/selection.js")

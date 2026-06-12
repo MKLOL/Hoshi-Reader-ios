@@ -495,7 +495,14 @@ struct HttpSyncReconciler {
         let local = BookStorage.loadBookmark(root: root)
         var localModified: String? = nil
         if let lm = local?.lastModified { localModified = rfc3339(from: lm) }
-        if compareRfc3339(blob.lastModified, localModified) <= 0 { return false } // don't downgrade
+        let localRev = HttpSyncRevisionStore.current(meta.key).localRev
+        // Don't downgrade: apply only when the remote edit chain is deeper (timestamps break
+        // ties; legacy blobs without rev keep the old pure-timestamp behavior).
+        guard compareRevisioned(localRev: localRev, remoteRev: blob.rev,
+                                localStamp: localModified, remoteStamp: blob.lastModified) == .remoteWins else {
+            HttpSyncRevisionStore.noteRemote(meta.key, rev: blob.rev, appliedLocally: false)
+            return false
+        }
         let bookmark = Bookmark(
             chapterIndex: blob.chapterIndex,
             progress: blob.progress,
@@ -503,6 +510,7 @@ struct HttpSyncReconciler {
             lastModified: Date(timeIntervalSinceReferenceDate: rfc3339ToAppleSeconds(blob.lastModified))
         )
         try? BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
+        HttpSyncRevisionStore.noteRemote(meta.key, rev: blob.rev, appliedLocally: true)
         return true
     }
 
@@ -569,12 +577,6 @@ struct HttpSyncReconciler {
             return snapshot.shelvesUpdatedAt ?? rfc3339Now()
         }
         return nil
-    }
-
-    private func shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: String?, localShelvesUpdatedAt: String?) -> Bool {
-        guard let localShelvesUpdatedAt else { return true }
-        guard let remoteShelfUpdatedAt else { return false }
-        return compareRfc3339(remoteShelfUpdatedAt, localShelvesUpdatedAt) >= 0
     }
 
     private func normalizeShelfName(_ name: String?) -> String? {
@@ -747,18 +749,35 @@ struct HttpSyncReconciler {
                     message: "Uploading deleted book markers",
                     detail: record.title
                 ))
-                let blob = HttpSyncMetadataBlob(
-                    title: record.title,
-                    contentType: record.contentType,
-                    importedAt: nil,
-                    deletedAt: record.deletedAt
-                )
                 do {
+                    let metadataKey = SyncKeys.metadata(syncId)
+                    // The fire-and-forget delete hook usually already pushed this tombstone at a
+                    // bumped rev: skip the redundant PUT (which would also regress the server's
+                    // rev to 0) when the remote already carries the same deletedAt.
+                    var remoteBlob: HttpSyncMetadataBlob?
+                    if let remote = try await transport.get(key: metadataKey) {
+                        remoteBlob = try? jsonDecoder.decode(HttpSyncMetadataBlob.self, from: remote.body)
+                    }
+                    if let remoteBlob, remoteBlob.deletedAt == record.deletedAt {
+                        HttpSyncRevisionStore.noteRemote(metadataKey, rev: remoteBlob.rev, appliedLocally: true)
+                        HttpSyncDeletedBookStore.remove(syncId: syncId)
+                        shelfState.removeValue(forKey: syncId)
+                        continue
+                    }
+                    let uploadRev = max(HttpSyncRevisionStore.current(metadataKey).localRev, remoteBlob?.rev ?? 0)
+                    let blob = HttpSyncMetadataBlob(
+                        title: record.title,
+                        contentType: record.contentType,
+                        importedAt: nil,
+                        deletedAt: record.deletedAt,
+                        rev: uploadRev
+                    )
                     _ = try await transport.put(
-                        key: SyncKeys.metadata(syncId),
+                        key: metadataKey,
                         contentType: Self.jsonContentType,
                         body: try jsonEncoder.encode(blob)
                     )
+                    HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
                     result.uploadedMetadata += 1
                     // Only clear after the PUT succeeds — atomic remove re-reads disk so a delete
                     // staged for a different syncId mid-sync survives.
@@ -814,20 +833,34 @@ struct HttpSyncReconciler {
                     ? book.importedAt
                     : maxRfc(remoteMetadata?.blob.importedAt, book.importedAt)
                 let uploadDeletedAt = tombstoneOverridden ? nil : remoteMetadata?.blob.deletedAt
+                let metadataKey = SyncKeys.metadata(book.syncId)
+                let localRev = HttpSyncRevisionStore.current(metadataKey).localRev
+                // Reconcile pushes merged state, not a new edit: carry the max of both revs
+                // forward without bumping (only deliberate edits bump, via the hooks).
+                let uploadRev = max(localRev, remoteMetadata?.blob.rev ?? 0)
                 let metaBlob = HttpSyncMetadataBlob(
                     title: book.title,
                     contentType: book.contentType,
                     shelfName: uploadShelfName,
                     shelfUpdatedAt: uploadShelfUpdatedAt,
                     importedAt: uploadImportedAt,
-                    deletedAt: uploadDeletedAt
+                    deletedAt: uploadDeletedAt,
+                    rev: uploadRev
                 )
-                _ = try await transport.put(
-                    key: SyncKeys.metadata(book.syncId),
-                    contentType: Self.jsonContentType,
-                    body: try jsonEncoder.encode(metaBlob)
-                )
-                result.uploadedMetadata += 1
+                var remoteForCompare = remoteMetadata?.blob
+                remoteForCompare?.rev = metaBlob.rev
+                if remoteForCompare == metaBlob {
+                    // Content identical to the server's — skip the PUT entirely.
+                    HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
+                } else {
+                    _ = try await transport.put(
+                        key: metadataKey,
+                        contentType: Self.jsonContentType,
+                        body: try jsonEncoder.encode(metaBlob)
+                    )
+                    HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
+                    result.uploadedMetadata += 1
+                }
                 if let uploadShelfUpdatedAt {
                     shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: uploadShelfUpdatedAt)
                 } else {
@@ -909,11 +942,15 @@ struct HttpSyncReconciler {
     /// push). Otherwise PUTs the local bookmark and returns `true`.
     private func pushBookmarkIfLocalNewer(syncId: String, local: Bookmark, root: URL) async throws -> Bool {
         let key = SyncKeys.bookmark(syncId)
+        let localRev = HttpSyncRevisionStore.current(key).localRev
         if let remote = try await transport.get(key: key),
            let remoteBlob = try? jsonDecoder.decode(HttpSyncBookmarkBlob.self, from: remote.body) {
             var localStamp: String? = nil
             if let lm = local.lastModified { localStamp = rfc3339(from: lm) }
-            if compareRfc3339(remoteBlob.lastModified, localStamp) > 0 {
+            // Edit depth first; timestamps only break rev ties (legacy blobs are rev 0).
+            switch compareRevisioned(localRev: localRev, remoteRev: remoteBlob.rev,
+                                     localStamp: localStamp, remoteStamp: remoteBlob.lastModified) {
+            case .remoteWins:
                 let bookmark = Bookmark(
                     chapterIndex: remoteBlob.chapterIndex,
                     progress: remoteBlob.progress,
@@ -921,14 +958,24 @@ struct HttpSyncReconciler {
                     lastModified: Date(timeIntervalSinceReferenceDate: rfc3339ToAppleSeconds(remoteBlob.lastModified))
                 )
                 try? BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
+                HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: true)
                 return false
+            case .tie:
+                // Same depth, same stamp: nothing to push (avoids ping-pong PUTs).
+                HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: true)
+                return false
+            case .localWins:
+                break
             }
         }
+        var blob = local.toBlob()
+        blob.rev = localRev
         _ = try await transport.put(
             key: key,
             contentType: Self.jsonContentType,
-            body: try jsonEncoder.encode(local.toBlob())
+            body: try jsonEncoder.encode(blob)
         )
+        HttpSyncRevisionStore.noteRemote(key, rev: localRev, appliedLocally: true)
         return true
     }
 
@@ -1109,7 +1156,26 @@ enum HttpSyncShelfStateStore {
 
     static func save(_ state: [String: HttpSyncShelfPlacementRecord]) {
         guard let url = fileURL() else { return }
-        guard let data = try? JSONEncoder().encode(state) else { return }
+        // Merge-on-save: a fire-and-forget shelf hook can write a fresher record while a long
+        // reconcile holds an in-memory copy of the whole map — a blind overwrite here would
+        // silently lose that move (and the stale snapshot could then revert it via LWW). Per
+        // key, the newer `updatedAt` wins; disk-only keys are kept (a hook may have created
+        // them mid-sync). The cost is that records removed for tombstoned books can linger as
+        // harmless orphans until the book's syncId is reused.
+        var merged = state
+        if let data = try? Data(contentsOf: url),
+           let disk = try? JSONDecoder().decode([String: HttpSyncShelfPlacementRecord].self, from: data) {
+            for (key, diskRecord) in disk {
+                if let memory = merged[key] {
+                    if compareRfc3339(diskRecord.updatedAt, memory.updatedAt) > 0 {
+                        merged[key] = diskRecord
+                    }
+                } else {
+                    merged[key] = diskRecord
+                }
+            }
+        }
+        guard let data = try? JSONEncoder().encode(merged) else { return }
         try? data.write(to: url, options: .atomic)
     }
 }

@@ -253,7 +253,9 @@ struct MangaReaderWebView: UIViewRepresentable {
                 }
                 let rect = CGRect(x: x, y: y, width: w, height: h)
                 let normalizedOffset = body["normalizedOffset"] as? Int
-                let selection = SelectionData(text: text, sentence: sentence, rect: rect, normalizedOffset: normalizedOffset)
+                let verticalBlock = body["verticalBlock"] as? Bool
+                let selection = SelectionData(text: text, sentence: sentence, rect: rect,
+                                              normalizedOffset: normalizedOffset, verticalBlock: verticalBlock)
                 if let count = parent.onTextSelected(selection) {
                     highlightSelection(count: count, in: message.webView)
                 }
