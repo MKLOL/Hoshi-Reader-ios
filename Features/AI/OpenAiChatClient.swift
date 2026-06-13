@@ -24,11 +24,18 @@ struct OpenAiError: LocalizedError {
 /// sends a vision message with one inline image crop. The whole type is `nonisolated` so its
 /// networking and pure helpers never hop the main actor under the project's default-MainActor mode.
 nonisolated struct OpenAiChatClient {
-    private let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
+    private let endpoint: URL
     private let connectTimeout: TimeInterval = 30
     private let readTimeout: TimeInterval = 90
 
-    init() {}
+    /// `baseURL` lets the same Chat Completions client target any OpenAI-compatible provider
+    /// (OpenAI, DeepSeek, Qwen, Moonshot, …); `/chat/completions` is appended to it.
+    init(baseURL: String = "https://api.openai.com/v1") {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        self.endpoint = URL(string: trimmed + "/chat/completions")
+            ?? URL(string: "https://api.openai.com/v1/chat/completions")!
+    }
 
     /// Sends `prompt` followed by `bubbleText` to `model` and returns the assistant's reply.
     ///
@@ -37,7 +44,7 @@ nonisolated struct OpenAiChatClient {
     nonisolated func complete(apiKey: String, model: String, prompt: String, bubbleText: String) async throws -> String {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if key.isEmpty {
-            throw OpenAiError(message: "Set your OpenAI API key in Settings → ChatGPT.")
+            throw OpenAiError(message: "Set your API key in Settings → Translation model.")
         }
         let body = Self.buildRequestBody(model: model, prompt: prompt, bubbleText: bubbleText)
         return try await perform(apiKey: key, body: body)
@@ -50,7 +57,7 @@ nonisolated struct OpenAiChatClient {
     nonisolated func completeImage(apiKey: String, model: String, prompt: String, image: AiChatImage) async throws -> String {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if key.isEmpty {
-            throw OpenAiError(message: "Set your OpenAI API key in Settings → ChatGPT.")
+            throw OpenAiError(message: "Set your API key in Settings → Translation model.")
         }
         let body = Self.buildImageRequestBody(model: model, prompt: prompt, image: image)
         return try await perform(apiKey: key, body: body)

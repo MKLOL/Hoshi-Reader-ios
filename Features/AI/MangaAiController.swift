@@ -60,10 +60,10 @@ final class MangaAiController {
     var onEntryPersisted: ((BookMetadata, AiChatEntry) -> Void)?
 
     private let settings: AiChatSettingsStore
-    private let client: OpenAiChatClient
     private let history: AiChatHistoryStore
     /// On-device translation settings + manager. When `useOnDeviceTranslation` is on and a model is
-    /// available, `ask` translates locally instead of calling OpenAI.
+    /// available, `ask` translates locally instead of calling a cloud provider. Cloud requests are
+    /// routed per-provider through `CloudChat` (the model id picks OpenAI / Anthropic / DeepSeek / …).
     private let offlineSettings: OfflineTranslationSettingsStore
     private let offlineManager: OfflineLlmManager
     private let offlineDownloads: ModelDownloadManager
@@ -73,13 +73,11 @@ final class MangaAiController {
     private var lastRequest: (() -> Void)?
 
     init(settings: AiChatSettingsStore = .shared,
-         client: OpenAiChatClient = OpenAiChatClient(),
          history: AiChatHistoryStore = .shared,
          offlineSettings: OfflineTranslationSettingsStore = .shared,
          offlineManager: OfflineLlmManager = .shared,
          offlineDownloads: ModelDownloadManager = .shared) {
         self.settings = settings
-        self.client = client
         self.history = history
         self.offlineSettings = offlineSettings
         self.offlineManager = offlineManager
@@ -106,12 +104,13 @@ final class MangaAiController {
             return
         }
 
-        let apiKey = settings.apiKey
+        let model = settings.model
+        let provider = ChatModelCatalog.provider(forModelId: model)
+        let apiKey = settings.apiKey(for: provider)
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            state = .error("Set your OpenAI API key in Settings → ChatGPT.")
+            state = .error("Set your \(provider.displayName) API key in Settings → Translation model.")
             return
         }
-        let model = settings.model
         let prompt = settings.promptText
         // The lookup engine is synchronous and main-actor-friendly; capture the context up front so
         // the background request closure stays free of UI state.
@@ -119,10 +118,10 @@ final class MangaAiController {
 
         cancel()
         state = .loading(bubbleText: trimmed, onDevice: false)
-        task = Task { [client] in
+        task = Task {
             do {
-                let response = try await client.complete(
-                    apiKey: apiKey, model: model, prompt: prompt, bubbleText: trimmed
+                let response = try await CloudChat.complete(
+                    provider: provider, apiKey: apiKey, model: model, prompt: prompt, bubbleText: trimmed
                 )
                 if Task.isCancelled { return }
                 let entry = AiChatEntry(
@@ -182,29 +181,31 @@ final class MangaAiController {
     /// exchange with the screenshot attached, and updates `state`.
     func translateCrop(image: AiChatImage, book: BookMetadata) {
         lastRequest = { [weak self] in self?.translateCrop(image: image, book: book) }
-        let apiKey = settings.apiKey
+        let model = settings.model
+        let provider = ChatModelCatalog.provider(forModelId: model)
+        let apiKey = settings.apiKey(for: provider)
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             // Vision crops always use the cloud (the on-device text models aren't multimodal). If
             // the user is on the on-device path with no API key, say so clearly.
             if offlineSettings.useOnDeviceTranslation {
-                state = .error("Screenshot translation needs ChatGPT (the on-device model can't "
-                    + "read images). Add your OpenAI API key in Settings → ChatGPT.")
+                state = .error("Screenshot translation needs a cloud model (the on-device model "
+                    + "can't read images). Add your \(provider.displayName) API key in Settings → "
+                    + "Translation model.")
             } else {
-                state = .error("Set your OpenAI API key in Settings → ChatGPT.")
+                state = .error("Set your \(provider.displayName) API key in Settings → Translation model.")
             }
             return
         }
-        let model = settings.model
         let prompt = settings.imagePromptText
         let label = "Screenshot translation"
 
         cancel()
         // Vision crops always use the cloud (the on-device models aren't multimodal).
         state = .loading(bubbleText: label, onDevice: false)
-        task = Task { [client] in
+        task = Task {
             do {
-                let response = try await client.completeImage(
-                    apiKey: apiKey, model: model, prompt: prompt, image: image
+                let response = try await CloudChat.completeImage(
+                    provider: provider, apiKey: apiKey, model: model, prompt: prompt, image: image
                 )
                 if Task.isCancelled { return }
                 let entry = AiChatEntry(

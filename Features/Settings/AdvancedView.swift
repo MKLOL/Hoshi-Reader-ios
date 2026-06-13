@@ -45,7 +45,7 @@ struct AdvancedView: View {
                 NavigationLink {
                     AiSettingsView()
                 } label: {
-                    Label("ChatGPT", systemImage: "sparkles")
+                    Label("Translation model", systemImage: "sparkles")
                 }
                 .foregroundStyle(.primary)
 

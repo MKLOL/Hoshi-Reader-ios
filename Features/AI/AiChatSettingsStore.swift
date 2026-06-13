@@ -23,15 +23,21 @@ final class AiChatSettingsStore {
 
     private let defaults: UserDefaults
 
-    /// The OpenAI API key. Backed by the Keychain (never written to UserDefaults, never synced).
-    /// Reads/writes pass straight through so the value is never cached in the synced graph.
-    var apiKey: String {
-        get { Keychain.get(SecretKeys.openAIApiKey) ?? "" }
-        set {
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            Keychain.set(trimmed.isEmpty ? nil : newValue, for: SecretKeys.openAIApiKey)
-        }
+    /// API keys are stored per provider, each in its own Keychain slot — never in UserDefaults,
+    /// never synced. The settings screen edits the key for the selected model's provider. OpenAI
+    /// reuses its long-standing slot, so existing users keep their key.
+    func apiKey(for provider: ChatProvider) -> String {
+        Keychain.get(provider.keychainKey) ?? ""
     }
+
+    func setApiKey(_ value: String, for provider: ChatProvider) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        Keychain.set(trimmed.isEmpty ? nil : value, for: provider.keychainKey)
+    }
+
+    /// The provider that serves the currently-selected `model` (derived from the model id, so the
+    /// synced settings stay a plain model-id string).
+    var currentProvider: ChatProvider { ChatModelCatalog.provider(forModelId: model) }
 
     /// The model name. Free-text (not a fixed list) so the user can enter any OpenAI model id.
     private(set) var model: String
@@ -42,8 +48,10 @@ final class AiChatSettingsStore {
     /// RFC 3339 UTC timestamp of the most recent user-driven edit, or `nil` if never edited.
     private(set) var lastEditedAt: String?
 
-    /// True once an API key has been entered.
-    var isConfigured: Bool { !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// True once an API key has been entered for the currently-selected model's provider.
+    var isConfigured: Bool {
+        !apiKey(for: currentProvider).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
