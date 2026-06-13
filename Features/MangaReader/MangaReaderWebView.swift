@@ -203,6 +203,9 @@ struct MangaReaderWebView: UIViewRepresentable {
         scrollView.maximumZoomScale = 5
         scrollView.bouncesZoom = true
         scrollView.pinchGestureRecognizer?.isEnabled = false
+        // Allow free diagonal panning when zoomed in. With directional lock on, a drag snaps to one
+        // axis ("only left/right/up/down"); we want the page to follow the finger in any direction.
+        scrollView.isDirectionalLockEnabled = false
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -424,6 +427,18 @@ struct MangaReaderWebView: UIViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             true
+        }
+
+        /// Keep the page-turn swipe recognizers from starting while the page is zoomed/panned. They
+        /// already no-op in that state, but as long as they *begin* they contest the horizontal axis
+        /// of a diagonal pan, which made zoomed panning snap to one axis. With them disabled while
+        /// zoomed, the scroll view's pan is unobstructed and follows the finger in any direction. At
+        /// fit scale (not zoomed) they begin normally so left/right swipes still turn the page.
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            if gestureRecognizer is UISwipeGestureRecognizer {
+                return !parent.controller.isZoomedOrScrollable
+            }
+            return true
         }
 
         private func numeric(_ value: Any?) -> CGFloat? {

@@ -48,6 +48,7 @@ nonisolated enum MangaPageHtml {
     ///   - useNotoSansJpFont: when `true`, emits an explicit `font-family` on `.ocr-box`.
     static func build(
         page: MokuroPage,
+        leftPage: MokuroPage? = nil,
         backgroundCssColor: String,
         selectionScript: String,
         scanNonJapaneseText: Bool,
@@ -56,33 +57,34 @@ nonisolated enum MangaPageHtml {
         singleTapLookup: Bool = false,
         useNotoSansJpFont: Bool = false
     ) -> String {
-        let imageWidth = max(page.imageWidth, 1)
-        let imageHeight = max(page.imageHeight, 1)
-        // The largest box with the image's aspect ratio that fits the viewport — the
-        // `object-fit: contain` fit, baked into the CSS as a definite px size (no vw/vh, no
-        // JS, no layout-viewport dependency).
+        // Each page is fitted with `object-fit: contain` into its share of the viewport, baked into
+        // the CSS as definite px sizes (no vw/vh, no JS). In a two-page spread (`leftPage != nil`)
+        // the earlier page (`page`) sits on the RIGHT and the later page (`leftPage`) on the LEFT —
+        // right-to-left manga reading — each fitted into half the viewport width. DOM order is
+        // left→right, so the left (later) frame is emitted first. Per-frame data attributes +
+        // geometry make taps/selection/crop work per page with no other changes.
         let viewportWidth = max(viewportCssWidth, 1)
         let viewportHeight = max(viewportCssHeight, 1)
-        let fitScale = min(
-            Double(viewportWidth) / Double(imageWidth),
-            Double(viewportHeight) / Double(imageHeight)
-        )
-        let frameWidthCss = formatNumber(Double(imageWidth) * fitScale)
-        let frameHeightCss = formatNumber(Double(imageHeight) * fitScale)
-        let boxes = page.textBoxes
-            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight, fitScale: fitScale) }
-            .joined(separator: "\n")
+        let shortSide = Double(min(viewportWidth, viewportHeight))
+        let longSide = Double(max(viewportWidth, viewportHeight))
+        let gap = 2
+        let perPageWidth = leftPage == nil ? viewportWidth : max(1, (viewportWidth - gap) / 2)
+
+        var frames = ""
+        if let leftPage {
+            frames += frameHtml(page: leftPage, availableWidth: perPageWidth,
+                                viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide)
+            frames += "\n"
+        }
+        frames += frameHtml(page: page, availableWidth: perPageWidth,
+                            viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide)
 
         let css = pageCss(
             backgroundCssColor: backgroundCssColor,
             viewportCssWidth: viewportWidth,
             viewportCssHeight: viewportHeight,
-            frameWidthCss: frameWidthCss,
-            frameHeightCss: frameHeightCss,
             useNotoSansJpFont: useNotoSansJpFont
         )
-
-        let imageSrc = escapeAttribute(encodeImagePath(page.imagePath))
 
         return """
         <!DOCTYPE html>
@@ -96,12 +98,7 @@ nonisolated enum MangaPageHtml {
         </head>
         <body>
         <div class="page">
-          <div class="frame" data-page-index="\(page.index)" data-image-width="\(imageWidth)" data-image-height="\(imageHeight)">
-            <img class="page-image" src="\(imageSrc)" alt="">
-            <div class="ocr-layer">
-        \(boxes)
-            </div>
-          </div>
+        \(frames)
         </div>
         <script>
         window.scanNonJapaneseText = \(scanNonJapaneseText);
@@ -119,12 +116,48 @@ nonisolated enum MangaPageHtml {
         """
     }
 
+    /// One page's `<div class="frame">` (image + OCR overlay), fitted into `availableWidth` ×
+    /// `viewportHeight` with `object-fit: contain`. The frame size is inline so a single page (full
+    /// width) and a spread page (half width) share one CSS rule. `shortSide`/`longSide` are the FULL
+    /// viewport's dimensions: the readability zoom stays anchored to the portrait-orientation fit, so
+    /// text zooms the same relative to the art whether the page is shown full-width or half-width.
+    private static func frameHtml(
+        page: MokuroPage,
+        availableWidth: Int,
+        viewportHeight: Int,
+        shortSide: Double,
+        longSide: Double
+    ) -> String {
+        let imageWidth = max(page.imageWidth, 1)
+        let imageHeight = max(page.imageHeight, 1)
+        let fitScale = min(
+            Double(availableWidth) / Double(imageWidth),
+            Double(viewportHeight) / Double(imageHeight)
+        )
+        let frameWidthCss = formatNumber(Double(imageWidth) * fitScale)
+        let frameHeightCss = formatNumber(Double(imageHeight) * fitScale)
+        let readabilityFitScale = min(
+            shortSide / Double(imageWidth),
+            longSide / Double(imageHeight)
+        )
+        let boxes = page.textBoxes
+            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight, readabilityFitScale: readabilityFitScale) }
+            .joined(separator: "\n")
+        let imageSrc = escapeAttribute(encodeImagePath(page.imagePath))
+        return """
+          <div class="frame" style="width: \(frameWidthCss)px; height: \(frameHeightCss)px;" data-page-index="\(page.index)" data-image-width="\(imageWidth)" data-image-height="\(imageHeight)">
+            <img class="page-image" src="\(imageSrc)" alt="">
+            <div class="ocr-layer">
+        \(boxes)
+            </div>
+          </div>
+        """
+    }
+
     private static func pageCss(
         backgroundCssColor: String,
         viewportCssWidth: Int,
         viewportCssHeight: Int,
-        frameWidthCss: String,
-        frameHeightCss: String,
         useNotoSansJpFont: Bool
     ) -> String {
         let matchedWordHighlight = "::highlight(hoshi-selection) { background: #ffd400; color: #000; }"
@@ -150,11 +183,14 @@ nonisolated enum MangaPageHtml {
           display: flex;
           align-items: center;
           justify-content: center;
+          /* Hairline gap between the two pages of a spread; no effect on a single page. */
+          gap: 2px;
         }
         .frame {
           position: relative;
-          width: \(frameWidthCss)px;
-          height: \(frameHeightCss)px;
+          /* width/height are set inline per frame: full width for a single page, half each for a
+             two-page spread. */
+          flex: 0 0 auto;
           container-type: inline-size;
         }
         .page-image {
@@ -212,13 +248,16 @@ nonisolated enum MangaPageHtml {
         }
         .ocr-actions {
           display: none;
-          position: fixed;
+          /* Absolutely positioned within its own bubble (an `position: absolute` box), so the
+             toolbar lives inside the zoomable page content and stays attached to the bubble when
+             the host zooms/pans. `position: fixed` pinned it to the visual viewport, so WebKit
+             detached it from the bubble under pinch-zoom. `writing-mode: horizontal-tb` keeps the
+             two controls side by side even inside a vertical-rl bubble; JS sets physical left/top
+             relative to the box's padding box, which is orientation-independent. */
+          position: absolute;
           left: 0;
           top: 0;
           margin: 0;
-          /* Keep the toolbar in viewport coordinates. This avoids WebKit resolving the action
-             buttons through a vertical-rl containing block, which can stack the two controls and
-             clip the copy button on narrow bubbles. */
           writing-mode: horizontal-tb;
           width: 52px;
           height: 24px;
@@ -277,26 +316,29 @@ nonisolated enum MangaPageHtml {
         _ box: MokuroTextBox,
         imageWidth: Int,
         imageHeight: Int,
-        fitScale: Double
+        readabilityFitScale: Double
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
         let topPct = percent(box.top, imageHeight)
         let widthPct = percent(box.width, imageWidth)
         let heightPct = percent(box.height, imageHeight)
-        // Readability zoom, computed in RENDERED points (fitScale = rendered pt per image px;
-        // the viewport is initial-scale=1, so CSS px == pt). `box.fontSize` is the art's
-        // measured glyph size (see MokuroRaw.clampMokuroFontSize); small-on-screen text is
-        // lifted toward the readable target, big text reveals at art size:
+        // Readability zoom, computed in RENDERED points (readabilityFitScale = rendered pt per
+        // image px at the PORTRAIT-orientation fit, so the zoom is image-relative and identical in
+        // portrait and landscape; the viewport is initial-scale=1, so CSS px == pt). `box.fontSize`
+        // is the art's measured glyph size (see MokuroRaw.clampMokuroFontSize); small-on-screen text
+        // is lifted toward the readable target, big text reveals at art size:
         //
         //   revealPt = drawnPt + max(0, target - drawnPt) × boost
         //
         // The lift is additive-only, so the reveal is NEVER smaller than the drawn art, and
         // the zoom multiplier strictly decreases as drawn size grows (smaller art zooms more).
         // Defined in pt so it self-adjusts across scan resolutions and devices.
-        let drawnPt = Double(max(1, box.fontSize)) * fitScale
+        let drawnPt = Double(max(1, box.fontSize)) * readabilityFitScale
         let revealPt = drawnPt + max(0, MangaFontTuning.targetRevealPt - drawnPt) * MangaFontTuning.revealBoost
-        // fitScale > 0 always (build() clamps image and viewport dims to >= 1).
-        let revealImagePx = revealPt / fitScale
+        // readabilityFitScale > 0 always (build() clamps image and viewport dims to >= 1). Dividing
+        // back out yields an image-space reveal size; the cqw unit below then renders it against the
+        // real frame width, so on screen it tracks the displayed image in either orientation.
+        let revealImagePx = revealPt / readabilityFitScale
         // Express relative to image width so it scales with the rendered frame
         // (cqw = 1% of the container's width). The UNREVEALED box renders at the art's drawn
         // size — its transparent text must hug the box for elementFromPoint hit-testing, or
@@ -396,20 +438,10 @@ nonisolated enum MangaPageHtml {
           };
         },
         imageCropFromHostRect: function(left, top, right, bottom, hostWidth, hostHeight) {
-          var frame = document.querySelector('.frame');
-          if (!frame) return null;
           var scale = this.hostScale();
-          var frameRect = frame.getBoundingClientRect();
-          var pageIndex = parseInt(frame.dataset.pageIndex || '-1', 10);
-          var imageWidth = parseInt(frame.dataset.imageWidth || '0', 10);
-          var imageHeight = parseInt(frame.dataset.imageHeight || '0', 10);
           if (!isFinite(scale) || scale <= 0 ||
               !isFinite(hostWidth) || hostWidth <= 0 ||
-              !isFinite(hostHeight) || hostHeight <= 0 ||
-              !isFinite(pageIndex) || pageIndex < 0 ||
-              !isFinite(imageWidth) || imageWidth <= 0 ||
-              !isFinite(imageHeight) || imageHeight <= 0 ||
-              frameRect.width <= 0 || frameRect.height <= 0) {
+              !isFinite(hostHeight) || hostHeight <= 0) {
             return null;
           }
           function hostX(x) { return x / scale; }
@@ -418,6 +450,41 @@ nonisolated enum MangaPageHtml {
           var cropRight = Math.max(hostX(left), hostX(right));
           var cropTop = Math.min(hostY(top), hostY(bottom));
           var cropBottom = Math.max(hostY(top), hostY(bottom));
+          // Pick the page frame containing the crop's centre so a two-page spread crops the page the
+          // user dragged over (single page: there is only one frame, so this is unchanged).
+          var centreX = (cropLeft + cropRight) / 2;
+          var centreY = (cropTop + cropBottom) / 2;
+          var frames = document.querySelectorAll('.frame');
+          var frame = null;
+          for (var i = 0; i < frames.length; i++) {
+            var r = frames[i].getBoundingClientRect();
+            if (centreX >= r.left && centreX <= r.right && centreY >= r.top && centreY <= r.bottom) {
+              frame = frames[i];
+              break;
+            }
+          }
+          if (!frame) {
+            // Centre landed in the inter-page gap or letterbox margin: pick the horizontally
+            // nearest frame so the crop maps to the page the drag mostly covered, not always the
+            // left one. (Single page: the one frame is the nearest.)
+            var best = Infinity;
+            for (var k = 0; k < frames.length; k++) {
+              var fr = frames[k].getBoundingClientRect();
+              var dx = centreX < fr.left ? fr.left - centreX : (centreX > fr.right ? centreX - fr.right : 0);
+              if (dx < best) { best = dx; frame = frames[k]; }
+            }
+          }
+          if (!frame) return null;
+          var frameRect = frame.getBoundingClientRect();
+          var pageIndex = parseInt(frame.dataset.pageIndex || '-1', 10);
+          var imageWidth = parseInt(frame.dataset.imageWidth || '0', 10);
+          var imageHeight = parseInt(frame.dataset.imageHeight || '0', 10);
+          if (!isFinite(pageIndex) || pageIndex < 0 ||
+              !isFinite(imageWidth) || imageWidth <= 0 ||
+              !isFinite(imageHeight) || imageHeight <= 0 ||
+              frameRect.width <= 0 || frameRect.height <= 0) {
+            return null;
+          }
           cropLeft = Math.max(cropLeft, frameRect.left);
           cropRight = Math.min(cropRight, frameRect.right);
           cropTop = Math.max(cropTop, frameRect.top);
@@ -510,32 +577,25 @@ nonisolated enum MangaPageHtml {
         placeActions: function(box) {
           var actions = box.querySelector('.ocr-actions');
           if (!actions) return;
-          var boxRect = box.getBoundingClientRect();
-          var viewport = window.visualViewport;
-          var viewportWidth = viewport && typeof viewport.width === 'number'
-            ? viewport.width
-            : window.innerWidth;
-          var viewportHeight = viewport && typeof viewport.height === 'number'
-            ? viewport.height
-            : window.innerHeight;
+          // Position the toolbar relative to its OWN bubble (the `.ocr-actions` is an absolutely
+          // positioned child of the box), so it sits inside the zoomable page content and stays
+          // attached to the bubble when the host zooms/pans — instead of being pinned to the visual
+          // viewport. Physical left/top resolve against the box's padding box for both horizontal
+          // and vertical (writing-mode: vertical-rl) bubbles, so no viewport / host-scale math.
           var gap = 4;
           var actionsWidth = actions.offsetWidth || 52;
           var actionsHeight = actions.offsetHeight || 24;
-          var left = boxRect.right - actionsWidth;
-          var top = boxRect.top - actionsHeight - gap;
-
-          if (top < gap) {
-            top = boxRect.bottom + gap;
+          var boxWidth = box.clientWidth;
+          var boxHeight = box.clientHeight;
+          // Default: just above the bubble, right-aligned to it.
+          var left = Math.max(0, boxWidth - actionsWidth);
+          var top = -actionsHeight - gap;
+          // If the bubble sits too close to the top of the frame to fit the toolbar above it,
+          // drop the toolbar below the bubble instead. `offsetTop` is the box's top within the
+          // ocr-layer (its positioned offset parent).
+          if (box.offsetTop + top < 0) {
+            top = boxHeight + gap;
           }
-          if (top + actionsHeight > viewportHeight - gap) {
-            top = Math.max(gap, boxRect.top - actionsHeight - gap);
-          }
-
-          left = Math.max(
-            gap,
-            Math.min(left, viewportWidth - actionsWidth - gap)
-          );
-
           actions.style.left = Math.round(left) + 'px';
           actions.style.top = Math.round(top) + 'px';
         },

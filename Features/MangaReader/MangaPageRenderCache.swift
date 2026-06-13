@@ -40,9 +40,12 @@ actor MangaPageRenderCache {
     private let maxEntries: Int
     private let maxWarmedImages: Int
 
-    /// Cache key = which page, rendered under which config.
+    /// Cache key = which page (and, for a two-page spread, which page is paired on its left),
+    /// rendered under which config. `leftPageIndex` keeps a spread render from colliding with the
+    /// single-page render of the same page.
     private struct Key: Hashable {
         let pageIndex: Int
+        let leftPageIndex: Int?
         let config: MangaPageRenderConfig
     }
 
@@ -61,14 +64,15 @@ actor MangaPageRenderCache {
 
     /// Returns cached HTML for `page` under `config`, building (and caching) it on first miss.
     /// Runs the build on the actor's executor, i.e. off the main actor.
-    func htmlFor(page: MokuroPage, config: MangaPageRenderConfig) -> String {
-        let key = Key(pageIndex: page.index, config: config)
+    func htmlFor(page: MokuroPage, leftPage: MokuroPage? = nil, config: MangaPageRenderConfig) -> String {
+        let key = Key(pageIndex: page.index, leftPageIndex: leftPage?.index, config: config)
         if let cached = entries[key] {
             touch(key)
             return cached
         }
         let html = MangaPageHtml.build(
             page: page,
+            leftPage: leftPage,
             backgroundCssColor: config.backgroundCssColor,
             selectionScript: config.selectionScript,
             scanNonJapaneseText: config.scanNonJapaneseText,
@@ -88,6 +92,7 @@ actor MangaPageRenderCache {
     func preloadAdjacentPages(
         book: MokuroBook,
         pageIndexes: [Int],
+        twoPage: Bool = false,
         config: MangaPageRenderConfig,
         imageFiles: [Int: URL]
     ) {
@@ -96,10 +101,17 @@ actor MangaPageRenderCache {
             if Task.isCancelled { return }
             guard pageIndex >= 0, pageIndex < book.pages.count else { continue }
             let page = book.pages[pageIndex]
-            _ = htmlFor(page: page, config: config)
+            // In a spread the neighbour render pairs this page with the next one on its left, so warm
+            // and build with that partner too — otherwise the preloaded HTML wouldn't match the live
+            // spread request and the turn would rebuild on the main path.
+            let leftPage = (twoPage && pageIndex + 1 < book.pages.count) ? book.pages[pageIndex + 1] : nil
+            _ = htmlFor(page: page, leftPage: leftPage, config: config)
             if Task.isCancelled { return }
             if let file = imageFiles[pageIndex] {
                 warmImageFileIfNeeded(file)
+            }
+            if let leftPage, let leftFile = imageFiles[leftPage.index] {
+                warmImageFileIfNeeded(leftFile)
             }
         }
     }

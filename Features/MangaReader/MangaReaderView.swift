@@ -87,6 +87,15 @@ struct MangaReaderView: View {
 
     private var pageIndicator: String {
         guard model.pageCount > 0 else { return "" }
+        if model.twoPageActive {
+            // Show the spread's page range, e.g. "5–6 / 201" (or a lone page at the end).
+            let start = MangaReaderViewModel.spreadStart(model.pageIndex)
+            let right = start + 1
+            if right < model.pageCount {
+                return "\(start + 1)–\(right + 1) / \(model.pageCount)"
+            }
+            return "\(start + 1) / \(model.pageCount)"
+        }
         return "\(model.pageIndex + 1) / \(model.pageCount)"
     }
 
@@ -327,12 +336,19 @@ struct MangaReaderView: View {
         .onAppear {
             lastSize = geometry.size
             model.viewportSize = geometry.size
+            model.isLandscape = geometry.size.width > geometry.size.height
             model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
         }
         .onChange(of: geometry.size) { _, newSize in
             lastSize = newSize
             model.viewportSize = newSize
+            model.isLandscape = newSize.width > newSize.height
             model.renderCurrentPage(controller: controller, screenSize: newSize, userConfig: userConfig)
+        }
+        .onChange(of: model.twoPageEnabled) { _, _ in
+            // Flipping the spread toggle re-renders the current page (as a spread or single page).
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
         }
     }
 
@@ -475,7 +491,7 @@ struct MangaReaderView: View {
     // MARK: Chrome
 
     private var topBar: some View {
-        HStack {
+        HStack(alignment: .top) {
             CircleButton(systemName: "chevron.left")
                 // A soft dark scrim keeps the floating glass button legible over the
                 // full-bleed page art (white-on-white otherwise).
@@ -491,32 +507,57 @@ struct MangaReaderView: View {
             // No book title in the manga top bar: with the full-bleed page it sat directly on
             // the artwork and read as clutter (user-reported).
 
-            // A real Menu anchors the dropdown to this button. The old `.confirmationDialog`
-            // presented detached (mid-screen / bottom), which is what looked wrong.
-            Menu {
-                Button {
-                    model.closePopups()
-                    goToPageText = "\(model.pageIndex + 1)"
-                    showGoToPageDialog = true
-                } label: { Label("Go to page", systemImage: "arrow.right.to.line") }
-                Button {
-                    model.closePopups()
-                    screenshotCropMode = true
-                } label: { Label("Screenshot translate", systemImage: "camera.viewfinder") }
-                Button {
-                    model.closePopups()
-                    aiController.browseHistory()
-                } label: { Label("Chat history", systemImage: "clock.arrow.circlepath") }
-                Button {
-                    model.closePopups()
-                    showStatisticsSheet = true
-                } label: { Label("Statistics", systemImage: "chart.bar") }
-            } label: {
-                CircleButton(systemName: "slider.horizontal.3")
-                    .background(Circle().fill(.black.opacity(0.28)).padding(6))
+            // Menu + (when a ChatGPT key is configured) a dedicated screenshot-translate button
+            // stacked directly beneath it — matching the Android layout.
+            VStack(spacing: 8) {
+                // A real Menu anchors the dropdown to this button. The old `.confirmationDialog`
+                // presented detached (mid-screen / bottom), which is what looked wrong.
+                Menu {
+                    Button {
+                        model.closePopups()
+                        goToPageText = "\(model.pageIndex + 1)"
+                        showGoToPageDialog = true
+                    } label: { Label("Go to page", systemImage: "arrow.right.to.line") }
+                    Button {
+                        model.closePopups()
+                        screenshotCropMode = true
+                    } label: { Label("Screenshot translate", systemImage: "camera.viewfinder") }
+                    Button {
+                        model.closePopups()
+                        aiController.browseHistory()
+                    } label: { Label("Chat history", systemImage: "clock.arrow.circlepath") }
+                    Button {
+                        model.closePopups()
+                        showStatisticsSheet = true
+                    } label: { Label("Statistics", systemImage: "chart.bar") }
+                    Divider()
+                    Toggle(isOn: Binding(
+                        get: { model.twoPageEnabled },
+                        set: { model.twoPageEnabled = $0 }
+                    )) {
+                        Label("Two-page spread (landscape)", systemImage: "book.pages")
+                    }
+                } label: {
+                    CircleButton(systemName: "slider.horizontal.3")
+                        .background(Circle().fill(.black.opacity(0.28)).padding(6))
+                }
+                .accessibilityIdentifier("manga-options-menu")
+                .accessibilityLabel("Manga options")
+
+                // Quick screenshot-translate, only when a ChatGPT key is set (the crop feeds the
+                // cloud translate path). Mirrors the menu's "Screenshot translate" item.
+                if AiChatSettingsStore.shared.isConfigured {
+                    CircleButton(systemName: "camera.viewfinder")
+                        .background(Circle().fill(.black.opacity(0.28)).padding(6))
+                        .contentShape(Circle())
+                        .onTapGesture {
+                            model.closePopups()
+                            screenshotCropMode = true
+                        }
+                        .accessibilityIdentifier("manga-screenshot-button")
+                        .accessibilityLabel("Screenshot translate")
+                }
             }
-            .accessibilityIdentifier("manga-options-menu")
-            .accessibilityLabel("Manga options")
         }
         // Hug the corners: the page is full-bleed, so every point of bar inset covers manga art.
         .padding(.horizontal, 6)

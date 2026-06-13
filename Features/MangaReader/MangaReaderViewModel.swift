@@ -16,7 +16,7 @@ import CHoshiDicts
 @Observable
 @MainActor
 final class MangaReaderViewModel {
-    private let metadata: BookMetadata
+    private var metadata: BookMetadata
 
     private(set) var book: MokuroBook?
     private(set) var bookRoot: URL?
@@ -25,6 +25,23 @@ final class MangaReaderViewModel {
 
     var pageIndex = 0
     var viewportSize: CGSize = .zero
+
+    /// Per-book preference (persisted in UserDefaults) to show two pages side by side. Toggled from
+    /// the reader's options menu. The spread only actually renders in landscape (`isLandscape`).
+    var twoPageEnabled: Bool {
+        didSet { UserDefaults.standard.set(twoPageEnabled, forKey: Self.twoPageKey(metadata.id)) }
+    }
+    /// Set by the view from the live geometry; a spread needs the extra horizontal room.
+    var isLandscape: Bool = false
+    /// Whether a two-page spread should render right now: enabled for this book, in landscape, and
+    /// the volume has more than one page.
+    var twoPageActive: Bool { twoPageEnabled && isLandscape && (book?.pages.count ?? 0) > 1 }
+
+    private static func twoPageKey(_ id: UUID) -> String { "mangaTwoPage.\(id.uuidString)" }
+
+    /// The right/earlier page index of the spread containing `index`: pages pair (0,1),(2,3),…, the
+    /// earlier page on the right (right-to-left reading), so the spread starts on an even index.
+    static func spreadStart(_ index: Int) -> Int { index - (index % 2) }
 
     /// Shared dictionary popups, mirroring `ReaderViewModel.popups`.
     var popups: [PopupItem] = []
@@ -50,6 +67,7 @@ final class MangaReaderViewModel {
 
     init(metadata: BookMetadata) {
         self.metadata = metadata
+        self.twoPageEnabled = UserDefaults.standard.bool(forKey: Self.twoPageKey(metadata.id))
     }
 
     // MARK: Loading
@@ -73,6 +91,11 @@ final class MangaReaderViewModel {
             book = parsedBook
             bookRoot = root
             controller.bookRootForScheme = root
+            // Mark this book as the most recently opened so "Recent" sort floats it to the front of
+            // its shelf. Mirrors the EPUB reader (ReaderLoaderViewModel.loadBook); the bookshelf
+            // re-reads metadata from disk on its next loadBooks().
+            metadata.lastAccess = Date()
+            try? BookStorage.save(metadata, inside: root, as: FileNames.metadata)
             let restored = BookStorage.loadBookmark(root: root)?.chapterIndex ?? 0
             pageIndex = max(0, min(restored, max(0, parsedBook.pages.count - 1)))
             isReady = true
@@ -172,11 +195,16 @@ final class MangaReaderViewModel {
                            onLoadToken: ((Int) -> Void)? = nil) {
         guard let book, !book.pages.isEmpty, screenSize.width > 0, screenSize.height > 0 else { return }
         let index = max(0, min(pageIndex, book.pages.count - 1))
-        let page = book.pages[index]
+        // In a spread the right/earlier page is the spread start; the later page (if any) goes left.
+        let twoPage = twoPageActive
+        let rightIndex = twoPage ? Self.spreadStart(index) : index
+        let page = book.pages[rightIndex]
+        let leftPage = (twoPage && rightIndex + 1 < book.pages.count) ? book.pages[rightIndex + 1] : nil
         // Everything the off-main render needs is captured up front as Sendable values, so the
         // build Task never reaches back into the non-Sendable `userConfig`.
         let config = renderConfig(screenSize: screenSize, userConfig: userConfig)
-        let allowedPaths = Set([page.imagePath.trimmingPrefixSlash()])
+        var allowedPaths = Set([page.imagePath.trimmingPrefixSlash()])
+        if let leftPage { allowedPaths.insert(leftPage.imagePath.trimmingPrefixSlash()) }
 
         renderGeneration += 1
         let generation = renderGeneration
@@ -185,7 +213,7 @@ final class MangaReaderViewModel {
         // preload hit this resolves immediately; on a miss the (possibly large) build happens on
         // the actor's executor so the main thread never blocks. A newer render supersedes this one.
         Task { [renderCache] in
-            let html = await renderCache.htmlFor(page: page, config: config)
+            let html = await renderCache.htmlFor(page: page, leftPage: leftPage, config: config)
             guard self.renderGeneration == generation else { return }
             let loadToken = controller.load(html: html, allowedImagePaths: allowedPaths)
             onLoadToken?(loadToken)
@@ -199,18 +227,31 @@ final class MangaReaderViewModel {
     /// the next page turn is instant. Runs off the main actor; superseded by the next page turn.
     private func preloadAdjacentPages(config: MangaPageRenderConfig) {
         guard let book, !book.pages.isEmpty else { return }
-        let indexes = mangaAdjacentPreloadIndexes(currentIndex: pageIndex, pageCount: book.pages.count)
+        let twoPage = twoPageActive
+        let indexes: [Int]
+        if twoPage {
+            // Neighbours are the prev/next spreads (±2 from this spread's start).
+            let start = Self.spreadStart(pageIndex)
+            indexes = [start + 2, start - 2].filter { $0 >= 0 && $0 < book.pages.count }
+        } else {
+            indexes = mangaAdjacentPreloadIndexes(currentIndex: pageIndex, pageCount: book.pages.count)
+        }
         guard !indexes.isEmpty else { return }
         // Resolve image files on the main actor (needs bookRoot), then hand the URLs to the actor.
+        // For a spread also resolve each neighbour's left-page partner so it can be warmed too.
         var imageFiles: [Int: URL] = [:]
         for index in indexes {
             if let file = imageFile(forPageIndex: index) { imageFiles[index] = file }
+            if twoPage, index + 1 < book.pages.count, let file = imageFile(forPageIndex: index + 1) {
+                imageFiles[index + 1] = file
+            }
         }
         preloadTask?.cancel()
         preloadTask = Task(priority: .utility) { [renderCache, book] in
             await renderCache.preloadAdjacentPages(
                 book: book,
                 pageIndexes: indexes,
+                twoPage: twoPage,
                 config: config,
                 imageFiles: imageFiles
             )
@@ -232,6 +273,14 @@ final class MangaReaderViewModel {
     // MARK: Navigation
 
     func navigate(_ direction: NavigationDirection) {
+        // In a spread, a page turn moves a whole spread (±2 from the current spread's even start).
+        if twoPageActive, let book, !book.pages.isEmpty {
+            let start = Self.spreadStart(pageIndex)
+            let target = direction == .forward ? start + 2 : start - 2
+            guard target >= 0, target < book.pages.count else { return }
+            goToPage(target)
+            return
+        }
         guard let target = MangaPageNavigation.targetIndex(
             currentIndex: pageIndex,
             pageCount: pageCount,
