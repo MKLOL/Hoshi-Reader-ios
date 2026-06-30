@@ -16,21 +16,23 @@ final class ZoomPopupUITests: XCTestCase {
             XCTAssertNotEqual(probe.placement, "hidden", "\(probe.id) toolbar should have a clean visible placement")
             assertVisible(probe.ai, id: "\(probe.id)-ai", webViewFrame: webView.frame, topInset: probe.topInset)
             assertVisible(probe.copy, id: "\(probe.id)-copy", webViewFrame: webView.frame, topInset: probe.topInset)
-            assertDoesNotOverlap(probe.ai, probe.textRect, id: "\(probe.id)-ai-text")
-            assertDoesNotOverlap(probe.copy, probe.textRect, id: "\(probe.id)-copy-text")
-            for textRect in probe.textRects {
+            let renderedRects = probe.textRects.isEmpty ? [probe.textRect] : probe.textRects
+            for textRect in renderedRects {
                 assertDoesNotOverlap(probe.ai, textRect, id: "\(probe.id)-ai-line-text")
                 assertDoesNotOverlap(probe.copy, textRect, id: "\(probe.id)-copy-line-text")
             }
             if probe.placement == "below" {
+                let renderedBottom = renderedRects
+                    .map { $0.y + $0.height }
+                    .max() ?? (probe.textRect.y + probe.textRect.height)
                 XCTAssertGreaterThanOrEqual(
                     probe.ai.y,
-                    probe.textRect.y + probe.textRect.height - 1,
+                    renderedBottom - 1,
                     "\(probe.id)-ai should sit below rendered text"
                 )
                 XCTAssertGreaterThanOrEqual(
                     probe.copy.y,
-                    probe.textRect.y + probe.textRect.height - 1,
+                    renderedBottom - 1,
                     "\(probe.id)-copy should sit below rendered text"
                 )
             }

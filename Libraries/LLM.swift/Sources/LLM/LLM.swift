@@ -1450,9 +1450,6 @@ open class LLM: ObservableObject {
         self.repeatPenalty = repeatPenalty
         self.repetitionLookback = repetitionLookback
 
-        #if DEBUG
-        print("GNERATING WITH SEEED: \(seed)")
-        #endif
         var modelParams = llama_model_default_params()
         #if targetEnvironment(simulator)
         modelParams.n_gpu_layers = 0

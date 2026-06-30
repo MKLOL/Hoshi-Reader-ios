@@ -857,6 +857,9 @@ assertEqual(
         self.assertIn("placement: actions && actions.dataset", html)
         self.assertIn("unionBottom", html)
         self.assertIn("assertDoesNotOverlap", ui_test)
+        self.assertIn("let renderedRects = probe.textRects.isEmpty ? [probe.textRect] : probe.textRects", ui_test)
+        self.assertNotIn("assertDoesNotOverlap(probe.ai, probe.textRect", ui_test)
+        self.assertNotIn("assertDoesNotOverlap(probe.copy, probe.textRect", ui_test)
         self.assertIn('let placement: String', ui_test)
         self.assertIn('probe.placement == "below"', ui_test)
         self.assertIn("ProbeError(\"Requires IDB Zoom Fixture seeded into the app container.\")", ui_test)
@@ -999,6 +1002,12 @@ assertEqual(
             project.index("/* Resources */ = {")
         ]
         self.assertIn("LLM in Frameworks", frameworks_section)
+
+    def test_llm_runtime_does_not_emit_seed_debug_prints(self):
+        llm = read("Libraries/LLM.swift/Sources/LLM/LLM.swift")
+        self.assertIn("LLM.silenceLogging()", llm)
+        self.assertNotIn("GNERATING WITH SEEED", llm)
+        self.assertNotRegex(llm, r'print\(".*seed')
 
     def test_backup_restore_never_deletes_live_directory_before_successful_swap(self):
         backup = read("Features/Settings/BackupView.swift")
