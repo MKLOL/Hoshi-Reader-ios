@@ -10,13 +10,30 @@ final class ZoomPopupUITests: XCTestCase {
         XCTAssertTrue(probeElement.waitForExistence(timeout: 5))
         XCTAssertTrue(waitForActionProbe(probeElement, timeout: 5), probeElement.label)
         let probes = try parseActionProbe(probeElement.label)
-        XCTAssertGreaterThanOrEqual(probes.count, 5, probeElement.label)
+        XCTAssertGreaterThanOrEqual(probes.count, 6, probeElement.label)
 
         for probe in probes {
+            XCTAssertNotEqual(probe.placement, "hidden", "\(probe.id) toolbar should have a clean visible placement")
             assertVisible(probe.ai, id: "\(probe.id)-ai", webViewFrame: webView.frame, topInset: probe.topInset)
             assertVisible(probe.copy, id: "\(probe.id)-copy", webViewFrame: webView.frame, topInset: probe.topInset)
             assertDoesNotOverlap(probe.ai, probe.textRect, id: "\(probe.id)-ai-text")
             assertDoesNotOverlap(probe.copy, probe.textRect, id: "\(probe.id)-copy-text")
+            for textRect in probe.textRects {
+                assertDoesNotOverlap(probe.ai, textRect, id: "\(probe.id)-ai-line-text")
+                assertDoesNotOverlap(probe.copy, textRect, id: "\(probe.id)-copy-line-text")
+            }
+            if probe.placement == "below" {
+                XCTAssertGreaterThanOrEqual(
+                    probe.ai.y,
+                    probe.textRect.y + probe.textRect.height - 1,
+                    "\(probe.id)-ai should sit below rendered text"
+                )
+                XCTAssertGreaterThanOrEqual(
+                    probe.copy.y,
+                    probe.textRect.y + probe.textRect.height - 1,
+                    "\(probe.id)-copy should sit below rendered text"
+                )
+            }
         }
 
         try tapActionButton(app: app, textContains: "UI_THIN_RIGHT", accessibilityLabel: "Ask about this bubble")
@@ -518,8 +535,10 @@ final class ZoomPopupUITests: XCTestCase {
         let id: String
         let text: String
         let textRect: ActionRect
+        let textRects: [ActionRect]
         let ai: ActionRect
         let copy: ActionRect
+        let placement: String
         let topInset: Double
     }
 

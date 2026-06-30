@@ -219,6 +219,10 @@ class UserConfig {
         didSet { UserDefaults.standard.set(mangaScanNonJapaneseText, forKey: "mangaScanNonJapaneseText") }
     }
 
+    var mangaShowActionButtons: Bool {
+        didSet { UserDefaults.standard.set(mangaShowActionButtons, forKey: "mangaShowActionButtons") }
+    }
+
     var popupWidth: Int {
         didSet { UserDefaults.standard.set(popupWidth, forKey: "popupWidth") }
     }
@@ -394,6 +398,7 @@ class UserConfig {
         self.mangaSingleTapLookup = defaults.object(forKey: "mangaSingleTapLookup") as? Bool ?? false
         self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false
         self.mangaScanNonJapaneseText = defaults.object(forKey: "mangaScanNonJapaneseText") as? Bool ?? false
+        self.mangaShowActionButtons = defaults.object(forKey: "mangaShowActionButtons") as? Bool ?? true
 
         self.popupWidth = defaults.object(forKey: "popupWidth") as? Int ?? 240
         self.popupHeight = defaults.object(forKey: "popupHeight") as? Int ?? 170

@@ -46,6 +46,7 @@ nonisolated enum MangaPageHtml {
     ///   - singleTapLookup: when `true`, the first tap reveals + looks up; default `false`
     ///     keeps the two-tap-to-lookup behaviour.
     ///   - useNotoSansJpFont: when `true`, emits an explicit `font-family` on `.ocr-box`.
+    ///   - showActionButtons: when `true`, revealed bubbles show Copy / AI quick actions.
     static func build(
         page: MokuroPage,
         leftPage: MokuroPage? = nil,
@@ -55,7 +56,8 @@ nonisolated enum MangaPageHtml {
         viewportCssWidth: Int,
         viewportCssHeight: Int,
         singleTapLookup: Bool = false,
-        useNotoSansJpFont: Bool = false
+        useNotoSansJpFont: Bool = false,
+        showActionButtons: Bool = true
     ) -> String {
         // Each page is fitted with `object-fit: contain` into its share of the viewport, baked into
         // the CSS as definite px sizes (no vw/vh, no JS). In a two-page spread (`leftPage != nil`)
@@ -73,11 +75,13 @@ nonisolated enum MangaPageHtml {
         var frames = ""
         if let leftPage {
             frames += frameHtml(page: leftPage, availableWidth: perPageWidth,
-                                viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide)
+                                viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
+                                showActionButtons: showActionButtons)
             frames += "\n"
         }
         frames += frameHtml(page: page, availableWidth: perPageWidth,
-                            viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide)
+                            viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
+                            showActionButtons: showActionButtons)
 
         let css = pageCss(
             backgroundCssColor: backgroundCssColor,
@@ -126,7 +130,8 @@ nonisolated enum MangaPageHtml {
         availableWidth: Int,
         viewportHeight: Int,
         shortSide: Double,
-        longSide: Double
+        longSide: Double,
+        showActionButtons: Bool
     ) -> String {
         let imageWidth = max(page.imageWidth, 1)
         let imageHeight = max(page.imageHeight, 1)
@@ -148,6 +153,7 @@ nonisolated enum MangaPageHtml {
             imageHeight: imageHeight,
             readabilityFitScale: readabilityFitScale
         )
+        let actionButtons = showActionButtons ? actionButtonsHtml : ""
         let imageSrc = escapeAttribute(encodeImagePath(page.imagePath))
         return """
           <div class="frame" style="width: \(frameWidthCss)px; height: \(frameHeightCss)px;" data-page-index="\(page.index)" data-image-width="\(imageWidth)" data-image-height="\(imageHeight)">
@@ -156,7 +162,7 @@ nonisolated enum MangaPageHtml {
         \(boxes)
         \(uiTestBoxes)
             </div>
-            \(actionButtonsHtml)
+            \(actionButtons)
           </div>
         """
     }
@@ -394,6 +400,10 @@ nonisolated enum MangaPageHtml {
                 left: max(0, w - 2), top: max(0, h / 8), width: 1, height: max(40, h / 32),
                 fontSize: 18, vertical: false, lines: ["UI_THIN_TOP_RIGHT"]
             )),
+            ("wide-top-overflow", MokuroTextBox(
+                left: 40, top: max(0, h / 9), width: max(80, w - 80), height: max(12, h / 140),
+                fontSize: 8, vertical: false, lines: ["上段広い", "下段広い選択"]
+            )),
             ("thin-bottom-right", MokuroTextBox(
                 left: max(0, w - 2), top: max(0, h - max(50, h / 28)), width: 1, height: max(40, h / 28),
                 fontSize: 18, vertical: false, lines: ["UI_THIN_BOTTOM_RIGHT"]
@@ -472,6 +482,15 @@ nonisolated enum MangaPageHtml {
         },
         setSingleTapLookup: function(enabled) {
           this.singleTapLookupValue = !!enabled;
+        },
+        hideActions: function(actions) {
+          if (!actions) return;
+          actions.classList.remove('is-visible');
+          actions.setAttribute('aria-hidden', 'true');
+          actions.dataset.placement = 'hidden';
+          delete actions.dataset.bubbleText;
+          actions.style.left = '-9999px';
+          actions.style.top = '-9999px';
         },
         hostScale: function() {
           var scale = this.hostScaleValue;
@@ -581,9 +600,7 @@ nonisolated enum MangaPageHtml {
           }
           var hosts = document.querySelectorAll('.ocr-actions');
           for (var h = 0; h < hosts.length; h++) {
-            hosts[h].classList.remove('is-visible');
-            hosts[h].setAttribute('aria-hidden', 'true');
-            delete hosts[h].dataset.bubbleText;
+            this.hideActions(hosts[h]);
           }
           if (window.hoshiSelection) {
             window.hoshiSelection.clearSelection();
@@ -650,20 +667,46 @@ nonisolated enum MangaPageHtml {
             box.style.fontSize = originalInlineFontSize;
           }
         },
+        renderedTextRects: function(box) {
+          var text = box.querySelector('p');
+          if (!text) {
+            return [];
+          }
+          var rects = [];
+          function addRect(rect) {
+            if (!rect || rect.width <= 0 || rect.height <= 0) return;
+            rects.push(rect);
+          }
+          if (document.createRange) {
+            var range = document.createRange();
+            range.selectNodeContents(text);
+            var clientRects = range.getClientRects();
+            for (var i = 0; i < clientRects.length; i++) {
+              addRect(clientRects[i]);
+            }
+            range.detach && range.detach();
+          }
+          if (!rects.length) {
+            addRect(text.getBoundingClientRect());
+          }
+          return rects;
+        },
         renderedBoxRect: function(box) {
           var rect = box.getBoundingClientRect();
           if (!box.classList.contains('revealed')) {
             return rect;
           }
-          var text = box.querySelector('p');
-          if (!text) {
-            return rect;
+          var rects = this.renderedTextRects(box);
+          var unionLeft = rect.left;
+          var unionTop = rect.top;
+          var unionRight = rect.right;
+          var unionBottom = rect.bottom;
+          for (var i = 0; i < rects.length; i++) {
+            unionLeft = Math.min(unionLeft, rects[i].left);
+            unionTop = Math.min(unionTop, rects[i].top);
+            unionRight = Math.max(unionRight, rects[i].right);
+            unionBottom = Math.max(unionBottom, rects[i].bottom);
           }
-          var textRect = text.getBoundingClientRect();
-          var unionLeft = Math.min(rect.left, textRect.left);
-          var unionTop = Math.min(rect.top, textRect.top);
-          var unionRight = Math.max(rect.right, textRect.right);
-          var unionBottom = Math.max(rect.bottom, textRect.bottom);
           return {
             x: unionLeft,
             y: unionTop,
@@ -680,8 +723,6 @@ nonisolated enum MangaPageHtml {
           var actions = frame && frame.querySelector('.ocr-actions');
           if (!actions) return;
           var gap = 4;
-          actions.classList.add('is-visible');
-          actions.setAttribute('aria-hidden', 'false');
           var bubbleText = box.querySelector('p');
           actions.dataset.bubbleText = bubbleText ? (bubbleText.textContent || '') : '';
           var aiButton = actions.querySelector('.ocr-ai-btn');
@@ -719,7 +760,7 @@ nonisolated enum MangaPageHtml {
                 minTop = minGlobalTop - frameTop;
               }
             }
-            var belowClearance = Math.max(gap + 6, Math.ceil(actionsHeight * 0.45));
+            var belowClearance = Math.max(gap + 10, Math.ceil(actionsHeight * 0.65));
             var renderedTop = box.offsetTop;
             var renderedBottom = box.offsetTop + boxHeight;
             if (window.getComputedStyle) {
@@ -738,34 +779,124 @@ nonisolated enum MangaPageHtml {
                 renderedBottom = renderedRect.bottom - frameRect.top;
               }
             }
-            var aboveTop = renderedTop - actionsHeight - gap;
-            var belowTop = renderedBottom + belowClearance;
+            var renderedLeft = box.offsetLeft;
+            var renderedRight = box.offsetLeft + boxWidth;
+            var avoidRects = [];
+            if (frame.getBoundingClientRect && window.hoshiManga && window.hoshiManga.renderedBoxRect) {
+              var localFrameRect = frame.getBoundingClientRect();
+              var localRenderedRect = window.hoshiManga.renderedBoxRect(box);
+              if (localFrameRect && localRenderedRect &&
+                  isFinite(localRenderedRect.left) && isFinite(localRenderedRect.right)) {
+                renderedLeft = localRenderedRect.left - localFrameRect.left;
+                renderedRight = localRenderedRect.right - localFrameRect.left;
+              }
+              if (window.hoshiManga.renderedTextRects) {
+                var lineRects = window.hoshiManga.renderedTextRects(box);
+                for (var lr = 0; lr < lineRects.length; lr++) {
+                  if (lineRects[lr] && isFinite(lineRects[lr].left) && isFinite(lineRects[lr].right) &&
+                      isFinite(lineRects[lr].top) && isFinite(lineRects[lr].bottom)) {
+                    avoidRects.push({
+                      left: lineRects[lr].left - localFrameRect.left,
+                      right: lineRects[lr].right - localFrameRect.left,
+                      top: lineRects[lr].top - localFrameRect.top,
+                      bottom: lineRects[lr].bottom - localFrameRect.top
+                    });
+                  }
+                }
+              }
+            }
+            if (!avoidRects.length) {
+              avoidRects.push({
+                left: renderedLeft,
+                right: renderedRight,
+                top: renderedTop,
+                bottom: renderedBottom
+              });
+            }
+            var avoidGap = Math.max(gap + 10, Math.ceil(actionsHeight * 0.55));
+            var aboveTop = renderedTop - actionsHeight - avoidGap;
+            var belowTop = renderedBottom + Math.max(belowClearance, avoidGap);
+            var sideTop = renderedTop + ((renderedBottom - renderedTop) / 2) - (actionsHeight / 2);
+            var rightLeft = renderedRight + avoidGap;
+            var leftLeft = renderedLeft - actionsWidth - avoidGap;
             function clampTop(value) {
               if (isFinite(minTop) && isFinite(maxTop) && minTop <= maxTop) {
                 return Math.max(minTop, Math.min(value, maxTop));
               }
               return value;
             }
-            function overlapsRenderedText(value) {
-              return value < renderedBottom + gap && value + actionsHeight > renderedTop - gap;
+            function clampLeft(value) {
+              if (isFinite(minLeft) && isFinite(maxLeft) && minLeft <= maxLeft) {
+                return Math.max(minLeft, Math.min(value, maxLeft));
+              }
+              return value;
             }
-            var clampedAboveTop = clampTop(aboveTop);
-            var clampedBelowTop = clampTop(belowTop);
-            var aboveFits = frameTop + aboveTop >= minGlobalTop && aboveTop >= minTop &&
-              !overlapsRenderedText(clampedAboveTop);
-            var belowFits = belowTop >= minTop && belowTop <= maxTop &&
-              !overlapsRenderedText(clampedBelowTop);
-            top = aboveFits ? clampedAboveTop : clampedBelowTop;
-            if (!aboveFits && !belowFits && !overlapsRenderedText(clampedAboveTop)) {
-              top = clampedAboveTop;
+            function overlapArea(leftValue, topValue) {
+              var total = 0;
+              for (var ar = 0; ar < avoidRects.length; ar++) {
+                var overlapLeft = Math.max(leftValue, avoidRects[ar].left - avoidGap);
+                var overlapRight = Math.min(leftValue + actionsWidth, avoidRects[ar].right + avoidGap);
+                var overlapTop = Math.max(topValue, avoidRects[ar].top - avoidGap);
+                var overlapBottom = Math.min(topValue + actionsHeight, avoidRects[ar].bottom + avoidGap);
+                var overlapWidth = Math.max(0, overlapRight - overlapLeft);
+                var overlapHeight = Math.max(0, overlapBottom - overlapTop);
+                total += overlapWidth * overlapHeight;
+              }
+              return total;
             }
+            function makeCandidate(name, leftValue, topValue) {
+              var candidateLeft = clampLeft(leftValue);
+              var candidateTop = clampTop(topValue);
+              return {
+                name: name,
+                left: candidateLeft,
+                top: candidateTop,
+                overlap: overlapArea(candidateLeft, candidateTop),
+                distance: Math.abs(candidateLeft - leftValue) + Math.abs(candidateTop - topValue),
+                topClamped: Math.abs(candidateTop - topValue) > 0.5
+              };
+            }
+            var preferRight = frame.clientWidth - renderedRight >= renderedLeft;
+            var sideA = preferRight
+              ? makeCandidate('right', rightLeft, sideTop)
+              : makeCandidate('left', leftLeft, sideTop);
+            var sideB = preferRight
+              ? makeCandidate('left', leftLeft, sideTop)
+              : makeCandidate('right', rightLeft, sideTop);
+            var candidates = [
+              makeCandidate('above', left, aboveTop),
+              sideA,
+              sideB,
+              makeCandidate('below', left, belowTop)
+            ];
+            var selected = null;
+            for (var c = 0; c < candidates.length; c++) {
+              var requiresFreeTop = candidates[c].name === 'above' || candidates[c].name === 'below';
+              if (candidates[c].overlap <= 0 && (!requiresFreeTop || !candidates[c].topClamped)) {
+                selected = candidates[c];
+                break;
+              }
+            }
+            if (!selected) {
+              window.hoshiManga.hideActions(actions);
+              return;
+            }
+            left = selected.left;
+            top = selected.top;
+            actions.dataset.placement = selected.name;
             if (frameTop + top < minGlobalTop) {
               top = minGlobalTop - frameTop;
             }
             top = clampTop(top);
+            if (overlapArea(left, top) > 0) {
+              window.hoshiManga.hideActions(actions);
+              return;
+            }
           }
           actions.style.left = Math.round(left) + 'px';
           actions.style.top = Math.round(top) + 'px';
+          actions.classList.add('is-visible');
+          actions.setAttribute('aria-hidden', 'false');
         },
         actionLayoutProbe: function() {
           var boxes = document.querySelectorAll('.ocr-box[data-hoshi-ui-test]');
@@ -786,16 +917,28 @@ nonisolated enum MangaPageHtml {
               var rect = element.getBoundingClientRect();
               return window.hoshiManga.hostRectFromViewportRect(rect);
             }
+            function hostRect(rect) {
+              if (!rect) return null;
+              return window.hoshiManga.hostRectFromViewportRect(rect);
+            }
             var aiRect = rectFor(ai);
             var copyRect = rectFor(copy);
             var text = box.querySelector('p');
-            var textRect = rectFor(text);
+            var textRects = [];
+            var rawTextRects = window.hoshiManga.renderedTextRects(box);
+            for (var tr = 0; tr < rawTextRects.length; tr++) {
+              var mappedTextRect = hostRect(rawTextRects[tr]);
+              if (mappedTextRect) textRects.push(mappedTextRect);
+            }
+            var textRect = hostRect(window.hoshiManga.renderedBoxRect(box));
             results.push({
               id: box.dataset.hoshiUiTest || '',
               text: text ? (text.textContent || '') : '',
               textRect: textRect,
+              textRects: textRects,
               ai: aiRect,
               copy: copyRect,
+              placement: actions && actions.dataset ? (actions.dataset.placement || '') : '',
               topInset: this.hostTappableTopInset()
             });
           }

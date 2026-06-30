@@ -32,6 +32,7 @@ nonisolated struct MangaPageRenderConfig: Hashable, Sendable {
     let viewportCssHeight: Int
     let singleTapLookup: Bool
     let useNotoSansJpFont: Bool
+    let showActionButtons: Bool
     let selectionScript: String
 }
 
@@ -79,7 +80,8 @@ actor MangaPageRenderCache {
             viewportCssWidth: config.viewportCssWidth,
             viewportCssHeight: config.viewportCssHeight,
             singleTapLookup: config.singleTapLookup,
-            useNotoSansJpFont: config.useNotoSansJpFont
+            useNotoSansJpFont: config.useNotoSansJpFont,
+            showActionButtons: config.showActionButtons
         )
         insert(html, for: key)
         return html

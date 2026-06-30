@@ -266,6 +266,7 @@ final class MangaReaderViewModel {
             viewportCssHeight: Int(screenSize.height.rounded()),
             singleTapLookup: userConfig.mangaSingleTapLookup,
             useNotoSansJpFont: userConfig.mangaUseNotoSansJpFont,
+            showActionButtons: userConfig.mangaShowActionButtons,
             selectionScript: Self.selectionScript
         )
     }

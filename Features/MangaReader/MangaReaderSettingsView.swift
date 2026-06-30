@@ -36,6 +36,12 @@ struct MangaReaderSettingsView: View {
             } footer: {
                 Text("Allow the dictionary scanner to select non-Japanese text in bubbles.")
             }
+
+            Section {
+                Toggle("Show Copy / AI buttons", isOn: $userConfig.mangaShowActionButtons)
+            } footer: {
+                Text("Show quick actions after revealing a speech bubble. Turn this off if the buttons get in the way while reading.")
+            }
         }
         .navigationTitle("Manga Reader")
     }

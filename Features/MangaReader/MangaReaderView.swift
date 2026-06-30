@@ -192,8 +192,9 @@ struct MangaReaderView: View {
                 HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry)
             }
         }
-        .statusBarHidden(focusMode)
-        .persistentSystemOverlays(focusMode ? .hidden : .automatic)
+        .toolbar(.hidden, for: .navigationBar)
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
         .task { await model.load(controller: controller, userConfig: userConfig) }
         .onChange(of: model.pageIndex) { oldIndex, newIndex in
             beginPageTurn(from: oldIndex, to: newIndex)
@@ -386,6 +387,22 @@ struct MangaReaderView: View {
             // Flipping the spread toggle re-renders the current page (as a spread or single page).
             model.closePopups()
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+        }
+        .onChange(of: userConfig.mangaSingleTapLookup) { _, _ in
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
+        }
+        .onChange(of: userConfig.mangaUseNotoSansJpFont) { _, _ in
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
+        }
+        .onChange(of: userConfig.mangaScanNonJapaneseText) { _, _ in
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
+        }
+        .onChange(of: userConfig.mangaShowActionButtons) { _, _ in
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
         }
     }
 

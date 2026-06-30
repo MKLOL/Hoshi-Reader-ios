@@ -575,14 +575,24 @@ assertEqual(
         self.assertIn("var renderedTop = box.offsetTop;", place_actions)
         self.assertIn("var renderedBottom = box.offsetTop + boxHeight;", place_actions)
         self.assertIn("var renderedRect = window.hoshiManga.renderedBoxRect(box);", place_actions)
-        self.assertIn("var aboveTop = renderedTop - actionsHeight - gap;", place_actions)
+        self.assertIn("renderedTextRects: function(box)", html)
+        self.assertIn("hideActions: function(actions)", html)
+        self.assertIn("var avoidGap = Math.max(gap + 10, Math.ceil(actionsHeight * 0.55));", place_actions)
+        self.assertIn("var aboveTop = renderedTop - actionsHeight - avoidGap;", place_actions)
         self.assertIn("var actionsWidth = actions.offsetWidth || 56;", place_actions)
         self.assertIn("var actionsHeight = actions.offsetHeight || 26;", place_actions)
-        self.assertIn("var belowClearance = Math.max(gap + 6, Math.ceil(actionsHeight * 0.45));", place_actions)
+        self.assertIn("var belowClearance = Math.max(gap + 10, Math.ceil(actionsHeight * 0.65));", place_actions)
         self.assertIn("boxFontSize", place_actions)
-        self.assertIn("var belowTop = renderedBottom + belowClearance;", place_actions)
-        self.assertIn("function overlapsRenderedText(value)", place_actions)
-        self.assertIn("!overlapsRenderedText(clampedBelowTop)", place_actions)
+        self.assertIn("var belowTop = renderedBottom + Math.max(belowClearance, avoidGap);", place_actions)
+        self.assertIn("function overlapArea(leftValue, topValue)", place_actions)
+        self.assertIn("var avoidRects = [];", place_actions)
+        self.assertIn("window.hoshiManga.renderedTextRects(box)", place_actions)
+        self.assertIn("var candidates = [", place_actions)
+        self.assertIn("makeCandidate('above', left, aboveTop)", place_actions)
+        self.assertIn("makeCandidate('below', left, belowTop)", place_actions)
+        self.assertIn("var selected = null;", place_actions)
+        self.assertIn("window.hoshiManga.hideActions(actions);", place_actions)
+        self.assertIn("actions.dataset.placement = selected.name;", place_actions)
         self.assertIn("width: 26px;", html)
         self.assertIn("height: 26px;", html)
         self.assertIn("frameTop + top < minGlobalTop", place_actions)
@@ -606,7 +616,11 @@ assertEqual(
                 offsetHeight: 26,
                 style: {{}},
                 dataset: {{}},
-                classList: {{ add: () => {{}} }},
+                visible: false,
+                classList: {{
+                  add: (name) => {{ if (name === 'is-visible') actions.visible = true; }},
+                  remove: (name) => {{ if (name === 'is-visible') actions.visible = false; }},
+                }},
                 setAttribute: () => {{}},
                 querySelector: () => null,
               }};
@@ -645,6 +659,13 @@ assertEqual(
                       height: bottom - top,
                     }};
                   }},
+                  renderedTextRects: (box) => [box.querySelector('p').getBoundingClientRect()],
+                  hideActions: (actions) => {{
+                    actions.visible = false;
+                    actions.dataset.placement = 'hidden';
+                    actions.style.left = '-9999px';
+                    actions.style.top = '-9999px';
+                  }},
                 }},
                 getComputedStyle: () => ({{ fontSize: '20px' }}),
               }};
@@ -680,6 +701,8 @@ assertEqual(
               return {{
                 left: Number.parseInt(actions.style.left, 10),
                 top: Number.parseInt(actions.style.top, 10),
+                placement: actions.dataset.placement,
+                visible: actions.visible,
               }};
             }}
 
@@ -708,12 +731,16 @@ assertEqual(
               throw new Error(`normal bubble expected 132, got ${{normal.left}}`);
             }}
             const topEdge = run(300, 120, 80, 20, 10);
-            if (topEdge.top !== 42) {{
-              throw new Error(`top-edge fallback expected 42, got ${{topEdge.top}}`);
+            if (topEdge.left !== 49 || topEdge.top !== 7 || topEdge.placement !== 'left') {{
+              throw new Error(`top-edge fallback expected side placement at 49,7,left, got ${{topEdge.left}},${{topEdge.top}},${{topEdge.placement}}`);
             }}
             const overflowedText = run(300, 120, 80, 20, 10, 300, 0, 60);
-            if (overflowedText.top !== 102) {{
-              throw new Error(`overflowed text expected toolbar below rendered text at 102, got ${{overflowedText.top}}`);
+            if (overflowedText.left !== 49 || overflowedText.top !== 37 || overflowedText.placement !== 'left') {{
+              throw new Error(`overflowed text expected side placement at 49,37,left, got ${{overflowedText.left}},${{overflowedText.top}},${{overflowedText.placement}}`);
+            }}
+            const impossible = run(120, 0, 120, 260, 20, 300);
+            if (impossible.visible || impossible.placement !== 'hidden') {{
+              throw new Error(`impossible placement should hide toolbar, got visible=${{impossible.visible}} placement=${{impossible.placement}}`);
             }}
             const veryTop = run(300, 120, 80, 20, 0, 300);
             const globalTop = 0 + veryTop.top;
@@ -814,6 +841,8 @@ assertEqual(
         self.assertIn("waitForCopyProbe", ui_test)
         self.assertIn("data-hoshi-ui-test", html)
         self.assertIn('top: max(0, h / 8)', html)
+        self.assertIn('"wide-top-overflow"', html)
+        self.assertIn("下段広い選択", html)
         self.assertIn("actionLayoutProbe", html)
         self.assertIn("var actions = frame && frame.querySelector('.ocr-actions')", html)
         self.assertIn("actions.dataset.bubbleText", html)
@@ -824,9 +853,12 @@ assertEqual(
         self.assertIn('"lower-select"', html)
         self.assertIn('lines: ["上段", "下段選択"]', html)
         self.assertIn("textRect: textRect", html)
-        self.assertIn("var textRect = text.getBoundingClientRect();", html)
+        self.assertIn("var textRect = hostRect(window.hoshiManga.renderedBoxRect(box));", html)
+        self.assertIn("placement: actions && actions.dataset", html)
         self.assertIn("unionBottom", html)
         self.assertIn("assertDoesNotOverlap", ui_test)
+        self.assertIn('let placement: String', ui_test)
+        self.assertIn('probe.placement == "below"', ui_test)
         self.assertIn("ProbeError(\"Requires IDB Zoom Fixture seeded into the app container.\")", ui_test)
         self.assertNotIn(".ocr-box.revealed .ocr-actions", html)
         self.assertNotIn("word-break: break-all", html)
@@ -917,6 +949,10 @@ assertEqual(
         self.assertNotIn("topChromeHeight", view)
         self.assertNotIn("bottomChromeHeight", view)
         self.assertIn(".ignoresSafeArea()", view)
+        self.assertIn(".toolbar(.hidden, for: .navigationBar)", view)
+        self.assertIn(".statusBarHidden(true)", view)
+        self.assertIn(".persistentSystemOverlays(.hidden)", view)
+        self.assertNotIn(".statusBarHidden(focusMode)", view)
         # The full-width strips must not swallow page taps: focus toggle on the capsule only,
         # exit via empty-art tap.
         self.assertIn(".allowsHitTesting(!focusMode)", view)
@@ -932,6 +968,25 @@ assertEqual(
         self.assertIn("scanNonJapaneseText", selection)
         self.assertIn("isJapaneseText", selection)
         self.assertIn("window.scanNonJapaneseText === false", selection)
+
+    def test_manga_action_buttons_can_be_disabled_in_settings(self):
+        config = read("Core/UserConfig.swift")
+        settings = read("Features/MangaReader/MangaReaderSettingsView.swift")
+        cache = read("Features/MangaReader/MangaPageRenderCache.swift")
+        view_model = read("Features/MangaReader/MangaReaderViewModel.swift")
+        html = read("Features/MangaReader/MangaPageHtml.swift")
+
+        self.assertIn("var mangaShowActionButtons: Bool", config)
+        self.assertIn('"mangaShowActionButtons"', config)
+        self.assertIn("?? true", config[config.index("self.mangaShowActionButtons"):])
+        self.assertIn('Toggle("Show Copy / AI buttons"', settings)
+        self.assertIn("$userConfig.mangaShowActionButtons", settings)
+        self.assertIn("let showActionButtons: Bool", cache)
+        self.assertIn("showActionButtons: config.showActionButtons", cache)
+        self.assertIn("showActionButtons: userConfig.mangaShowActionButtons", view_model)
+        self.assertIn("showActionButtons: Bool = true", html)
+        self.assertIn("let actionButtons = showActionButtons ? actionButtonsHtml : \"\"", html)
+        self.assertIn("\\(actionButtons)", html)
 
     def test_docs_do_not_reference_removed_eink_mode(self):
         docs = read("docs/IOS_MOKURO_TESTING.md")
