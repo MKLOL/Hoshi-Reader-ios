@@ -73,7 +73,10 @@ struct BackupView: View {
     private func backupFolder(folder: String) {
         isLoading = true
         loadingString = "Archiving..."
-        let directory = try! BookStorage.getAppDirectory().appendingPathComponent(folder)
+        guard let directory = try? BookStorage.getAppDirectory().appendingPathComponent(folder) else {
+            isLoading = false
+            return
+        }
         Task.detached {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"

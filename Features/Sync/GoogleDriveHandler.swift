@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import os
 
 enum GoogleDriveError: LocalizedError {
     case folderNotFound
@@ -73,6 +74,7 @@ class GoogleDriveHandler {
     static let shared = GoogleDriveHandler()
     private static let rootFolderIdKey = "GoogleDriveHandler.rootFolderId"
     private static let titleToFolderIdKey = "GoogleDriveHandler.titleToFolderId"
+    private let log = Logger(subsystem: "com.dragosristache.hoshi", category: "GoogleDrive")
     
     private var rootFolderId: String?
     private var titleToFolderId: [String: String]
@@ -429,7 +431,9 @@ class GoogleDriveHandler {
             do {
                 try await uploadCoverImage(folderId: folderId, coverData: coverData)
             } catch {
-                print("Warning: Failed to upload cover image for '\(bookTitle)': \(error.localizedDescription)")
+                // Non-fatal: the book folder and its progress/stats still sync; only the
+                // remote cover thumbnail is missing. Log rather than interrupt the sync.
+                log.error("Failed to upload cover image for '\(bookTitle, privacy: .public)': \(error.localizedDescription, privacy: .public)")
             }
         }
         

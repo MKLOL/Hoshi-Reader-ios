@@ -68,6 +68,7 @@ final class MangaAiController {
     private let offlineManager: OfflineLlmManager
     private let offlineDownloads: ModelDownloadManager
     private var task: Task<Void, Never>?
+    private var requestGeneration = 0
     /// Replays the last request for the popup's Retry button (the original bubble text or image
     /// crop is captured here; `State.error` carries no payload to reconstruct it from).
     private var lastRequest: (() -> Void)?
@@ -116,14 +117,15 @@ final class MangaAiController {
         // the background request closure stays free of UI state.
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
-        cancel()
+        let requestGeneration = beginRequest()
         state = .loading(bubbleText: trimmed, onDevice: false)
         task = Task {
+            defer { self.finishRequest(generation: requestGeneration) }
             do {
                 let response = try await CloudChat.complete(
                     provider: provider, apiKey: apiKey, model: model, prompt: prompt, bubbleText: trimmed
                 )
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 let entry = AiChatEntry(
                     bubbleText: trimmed,
                     prompt: prompt,
@@ -133,10 +135,10 @@ final class MangaAiController {
                     dictionaryLookup: lookup
                 )
                 self.persist(entry, book: book)
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 self.state = .result(entry)
             } catch {
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 self.state = .error(Self.message(for: error))
             }
         }
@@ -149,14 +151,15 @@ final class MangaAiController {
         let prompt = settings.promptText
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
-        cancel()
+        let requestGeneration = beginRequest()
         state = .loading(bubbleText: trimmed, onDevice: true)
         task = Task { [offlineManager] in
+            defer { self.finishRequest(generation: requestGeneration) }
             do {
                 let result = try await offlineManager.translate(
                     instruction: prompt, japaneseText: trimmed
                 )
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 let entry = AiChatEntry(
                     bubbleText: trimmed,
                     prompt: prompt,
@@ -168,14 +171,47 @@ final class MangaAiController {
                     debugInfo: result.debugLine
                 )
                 self.persist(entry, book: book)
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 self.state = .result(entry)
             } catch {
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 self.state = .error(Self.message(for: error))
             }
         }
     }
+
+#if DEBUG
+    /// Deterministic UI-test hook for exercising the reader → in-page AI button → popup path without
+    /// depending on network or a long-running local model. Production callers should use `ask`.
+    func resolveForUITest(bubbleText: String, book: BookMetadata) {
+        guard ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_AI_STUB"] == "1" else { return }
+        let trimmed = bubbleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        lastRequest = { [weak self] in self?.resolveForUITest(bubbleText: trimmed, book: book) }
+
+        let requestGeneration = beginRequest()
+        let marker = trimmed.contains("二回目") ? "UI2OK" : "UI1OK"
+        let entry = AiChatEntry(
+            bubbleText: trimmed,
+            prompt: "UI test",
+            model: "ui-test",
+            response: """
+            \(marker) UITESTOK **bold** for \(trimmed)
+
+            | Term | Meaning |
+            | --- | --- |
+            | test | Japanese |
+            | wait | pause |
+            """,
+            timestampSeconds: Date().timeIntervalSinceReferenceDate,
+            debugInfo: "ui-test"
+        )
+        persist(entry, book: book)
+        if !isCurrentRequest(requestGeneration) { return }
+        state = .result(entry)
+        finishRequest(generation: requestGeneration)
+    }
+#endif
 
     /// Translates an image crop (rendered manga panel) via the vision endpoint, persists the
     /// exchange with the screenshot attached, and updates `state`.
@@ -199,15 +235,16 @@ final class MangaAiController {
         let prompt = settings.imagePromptText
         let label = "Screenshot translation"
 
-        cancel()
+        let requestGeneration = beginRequest()
         // Vision crops always use the cloud (the on-device models aren't multimodal).
         state = .loading(bubbleText: label, onDevice: false)
         task = Task {
+            defer { self.finishRequest(generation: requestGeneration) }
             do {
                 let response = try await CloudChat.completeImage(
                     provider: provider, apiKey: apiKey, model: model, prompt: prompt, image: image
                 )
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 let entry = AiChatEntry(
                     bubbleText: label,
                     prompt: prompt,
@@ -217,10 +254,10 @@ final class MangaAiController {
                     screenshotImage: image
                 )
                 self.persist(entry, book: book)
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 self.state = .result(entry)
             } catch {
-                if Task.isCancelled { return }
+                if !self.isCurrentRequest(requestGeneration) { return }
                 self.state = .error(Self.message(for: error))
             }
         }
@@ -235,6 +272,23 @@ final class MangaAiController {
     func cancel() {
         task?.cancel()
         task = nil
+    }
+
+    private func beginRequest() -> Int {
+        task?.cancel()
+        task = nil
+        requestGeneration &+= 1
+        return requestGeneration
+    }
+
+    private func isCurrentRequest(_ generation: Int) -> Bool {
+        !Task.isCancelled && generation == requestGeneration
+    }
+
+    private func finishRequest(generation: Int) {
+        if generation == requestGeneration {
+            task = nil
+        }
     }
 
     /// Dismisses the popup and cancels any in-flight request.
@@ -295,21 +349,24 @@ final class MangaAiController {
 
     private static func toResult(_ result: LookupResult) -> AiChatDictionaryLookupResult {
         let trace = result.trace.reversed().map {
-            AiChatDeinflectionStep(name: String($0.name), description: String($0.description))
+            AiChatDeinflectionStep(
+                name: cxxStringToSwift($0.name),
+                description: cxxStringToSwift($0.description)
+            )
         }
         let glossaries = result.term.glossaries.prefix(glossariesPerResult).map {
             AiChatGlossary(
-                dictionary: String($0.dict_name),
-                content: String($0.glossary),
-                definitionTags: String($0.definition_tags),
-                termTags: String($0.term_tags)
+                dictionary: cxxStringToSwift($0.dict_name),
+                content: cxxStringToSwift($0.glossary),
+                definitionTags: cxxStringToSwift($0.definition_tags),
+                termTags: cxxStringToSwift($0.term_tags)
             )
         }
         let frequencies = result.term.frequencies.map { group in
             AiChatFrequencyGroup(
-                dictionary: String(group.dict_name),
+                dictionary: cxxStringToSwift(group.dict_name),
                 frequencies: group.frequencies.map {
-                    AiChatFrequency(value: Int($0.value), displayValue: String($0.display_value))
+                    AiChatFrequency(value: Int($0.value), displayValue: cxxStringToSwift($0.display_value))
                 }
             )
         }
@@ -319,13 +376,13 @@ final class MangaAiController {
                 let position = Int(element)
                 if !positions.contains(position) { positions.append(position) }
             }
-            return AiChatPitchGroup(dictionary: String(group.dict_name), pitchPositions: positions)
+            return AiChatPitchGroup(dictionary: cxxStringToSwift(group.dict_name), pitchPositions: positions)
         }
-        let rules = String(result.term.rules).split(separator: " ").map(String.init)
+        let rules = cxxStringToSwift(result.term.rules).split(separator: " ").map(String.init)
         return AiChatDictionaryLookupResult(
-            expression: String(result.term.expression),
-            reading: String(result.term.reading),
-            matched: String(result.matched),
+            expression: cxxStringToSwift(result.term.expression),
+            reading: cxxStringToSwift(result.term.reading),
+            matched: cxxStringToSwift(result.matched),
             deinflectionTrace: trace,
             glossaries: Array(glossaries),
             frequencies: frequencies,

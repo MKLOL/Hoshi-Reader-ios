@@ -38,6 +38,9 @@ final class MangaWebViewController {
 
     /// True while the page is zoomed or panned, so the host should gate swipe-to-turn.
     private(set) var isZoomedOrScrollable = false
+    /// Top host-pixel area where OCR action buttons should not be placed because native chrome or
+    /// system gestures can make visible WebView content unreliable to tap.
+    fileprivate var tappableTopInset: CGFloat = 0
 
     /// Replaces the rendered page. `allowedImagePaths` is the allow-list of book-root-relative
     /// image paths the scheme handler may serve for this page (normally just the page's image).
@@ -94,8 +97,9 @@ final class MangaWebViewController {
         let contentOffset = webView.scrollView.contentOffset
         let offsetX = contentOffset.x.isFinite ? contentOffset.x : 0
         let offsetY = contentOffset.y.isFinite ? contentOffset.y : 0
+        let topInset = tappableTopInset.isFinite ? max(0, tappableTopInset) : 0
         let script = """
-        window.hoshiManga && window.hoshiManga.setHostViewport(\(Double(scale)), \(Double(offsetX)), \(Double(offsetY)))
+        window.hoshiManga && window.hoshiManga.setHostViewport(\(Double(scale)), \(Double(offsetX)), \(Double(offsetY)), \(Double(topInset)))
         """
         webView.evaluateJavaScript(script) { _, _ in }
         // Zoomed-in, or panned away from a fitted origin: gate page turns.
@@ -113,6 +117,18 @@ final class MangaWebViewController {
             Double(scrollView.contentOffset.x),
             Double(scrollView.contentOffset.y)
         )
+    }
+
+    func uiTestActionLayoutProbeLabel() async -> String {
+        guard let webView else { return "actions=nil" }
+        let script = """
+        (function() {
+          if (!window.hoshiManga || !window.hoshiManga.actionLayoutProbe) { return "actions=nil"; }
+          return JSON.stringify(window.hoshiManga.actionLayoutProbe());
+        })();
+        """
+        let result = try? await webView.evaluateJavaScript(script)
+        return result as? String ?? "actions=nil"
     }
 
     fileprivate func attach(_ webView: WKWebView) {
@@ -135,6 +151,8 @@ struct MangaReaderWebView: UIViewRepresentable {
     var onCopy: (String) -> Void
     /// Called once the page HTML finished loading, with the controller load token for that navigation.
     var onPageReady: (Int) -> Void
+    /// Host-pixel top inset that is visible but not reliably tappable inside the full-bleed WebView.
+    var tappableTopInset: CGFloat = 0
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -187,6 +205,11 @@ struct MangaReaderWebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.bookRoot = controller.bookRootForScheme
+        let topInset = tappableTopInset.isFinite ? max(0, tappableTopInset) : 0
+        if controller.tappableTopInset != topInset {
+            controller.tappableTopInset = topInset
+            controller.syncHostViewport()
+        }
         if context.coordinator.lastLoadToken != controller.loadToken, let html = controller.pendingHtml {
             let loadToken = controller.loadToken
             context.coordinator.lastLoadToken = loadToken

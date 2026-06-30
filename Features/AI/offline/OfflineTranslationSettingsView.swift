@@ -22,15 +22,33 @@ struct OfflineTranslationSettingsView: View {
 
     var body: some View {
         @Bindable var settings = settings
+        let responseTokenLimit = Binding<Int>(
+            get: { settings.responseTokenLimit },
+            set: {
+                settings.responseTokenLimit = OfflineTranslationSettingsStore
+                    .clampedResponseTokenLimit($0)
+            }
+        )
         List {
             Section {
                 Toggle("Use on-device translation", isOn: $settings.useOnDeviceTranslation)
                     .disabled(!anyDownloaded)
+                Toggle("Use private thinking", isOn: $settings.usePrivateThinking)
+                    .disabled(!settings.useOnDeviceTranslation)
+                Picker("Answer token limit", selection: responseTokenLimit) {
+                    ForEach(OfflineTranslationSettingsStore.responseTokenLimitOptions, id: \.self) { limit in
+                        Text("\(limit) tokens").tag(limit)
+                    }
+                }
+                .disabled(!settings.useOnDeviceTranslation)
             } footer: {
                 if anyDownloaded {
                     Text("Translate speech bubbles fully on-device using a downloaded model. No API "
                         + "key or connection needed. Quality is lower than ChatGPT. Screenshot "
-                        + "(vision) translation still uses ChatGPT.")
+                        + "(vision) translation still uses ChatGPT. Private thinking can improve "
+                        + "some answers but is slower; turn it off for the most predictable offline "
+                        + "behavior. The answer token limit controls how long the visible response "
+                        + "may be before generation is stopped.")
                 } else {
                     Text("Download a model below first, then enable this to translate speech bubbles "
                         + "fully on-device — no API key or connection needed.")

@@ -142,6 +142,7 @@ struct MangaAiPopupView: View {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
             }
+            .accessibilityLabel("Close ChatGPT")
         }
         .padding(16)
     }
@@ -188,10 +189,11 @@ struct MangaAiPopupView: View {
                     Text(onDevice ? "Translating on-device…" : "Asking ChatGPT…")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    // Live tok/s while the on-device model generates, so a slow reply shows progress.
-                    if let progress, progress.tokens > 0 {
-                        Text(String(format: "⚡ %.1f tok/s · %d tokens",
-                                    progress.tokensPerSecond, progress.tokens))
+                    // Live tok/s while the on-device model generates, including hidden thinking
+                    // tokens so private reasoning progress is visible without showing its text.
+                    if let progress, progress.totalTokens > 0 {
+                        Text(String(format: "⚡ %.1f tok/s · %d answer tokens · %d thinking tokens",
+                                    progress.tokensPerSecond, progress.tokens, progress.thinkingTokens))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -284,13 +286,16 @@ struct MangaAiPopupView: View {
     /// text renders as basic markdown.
     @ViewBuilder
     private func responseText(_ response: String) -> some View {
+        let visible = AiThinkingTextSanitizer.strip(response)
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(response.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, lineSub in
-                let line = String(lineSub)
-                if line.isEmpty {
+            ForEach(Self.responseBlocks(visible)) { block in
+                switch block.kind {
+                case .blank:
                     Spacer().frame(height: 4)
-                } else {
+                case .line(let line):
                     lineView(line)
+                case .table(let rows):
+                    tableView(rows)
                 }
             }
         }
@@ -299,11 +304,8 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private func lineView(_ line: String) -> some View {
-        // Fine-grained tokens so the flow layout can wrap ANY line: Japanese characters are
-        // individual tokens (CJK wraps anywhere; each is a tap target that scans forward from
-        // itself, Yomitan-style), non-Japanese text breaks per word with markdown attributes
-        // preserved across the split. Whole-run tokens used to clip — a long run was one
-        // unbreakable element wider than the card.
+        // Fine-grained tokens so the flow layout can wrap naturally: Japanese characters are
+        // individual tap targets, while non-Japanese text breaks on word / whitespace boundaries.
         let tokens = Self.tokenize(line)
         WrapHStack(runs: tokens) { token in
             if let scanText = token.scanText {
@@ -321,10 +323,138 @@ struct MangaAiPopupView: View {
                     .foregroundStyle(.primary)
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Self.accessibilityText(for: line))
     }
 
-    private func markdown(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text)) ?? AttributedString(text)
+    private static func markdown(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        let parsed = (try? AttributedString(markdown: text, options: options))
+            ?? AttributedString(strippingCommonMarkdownMarkers(from: text))
+        let visible = String(parsed.characters)
+        if visible.contains("**") || visible.contains("__") || visible.contains("`") {
+            return AttributedString(strippingCommonMarkdownMarkers(from: visible))
+        }
+        return materializeInlineMarkdown(parsed)
+    }
+
+    private static func materializeInlineMarkdown(_ input: AttributedString) -> AttributedString {
+        var output = input
+        for run in output.runs {
+            guard let intent = run.inlinePresentationIntent else { continue }
+            if intent.contains(.code) {
+                output[run.range].font = .system(.body, design: .monospaced)
+            } else if intent.contains(.stronglyEmphasized) {
+                output[run.range].font = .body.bold()
+            } else if intent.contains(.emphasized) {
+                output[run.range].font = .body.italic()
+            }
+        }
+        return output
+    }
+
+    private static func strippingCommonMarkdownMarkers(from text: String) -> String {
+        text.replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "")
+    }
+
+    private static func accessibilityText(for line: String) -> String {
+        String(markdown(line).characters)
+    }
+
+    @ViewBuilder
+    private func tableView(_ rows: [[String]]) -> some View {
+        ScrollView(.horizontal) {
+            let columnCount = max(1, rows.map(\.count).max() ?? 1)
+            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                            lineView(cell)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .frame(minWidth: 96, alignment: .leading)
+                        }
+                    }
+                    .background(rowIndex == 0 ? Color.primary.opacity(0.06) : Color.clear)
+                    if rowIndex == 0 {
+                        Divider()
+                            .gridCellColumns(columnCount)
+                    }
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+            )
+        }
+        .scrollIndicators(.visible)
+        .padding(.vertical, 2)
+    }
+
+    private struct ResponseBlock: Identifiable {
+        enum Kind {
+            case blank
+            case line(String)
+            case table([[String]])
+        }
+
+        let id = UUID()
+        let kind: Kind
+    }
+
+    private static func responseBlocks(_ text: String) -> [ResponseBlock] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var blocks: [ResponseBlock] = []
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            if line.isEmpty {
+                blocks.append(ResponseBlock(kind: .blank))
+                index += 1
+                continue
+            }
+            if index + 1 < lines.count, isTableSeparator(lines[index + 1]) {
+                var rows = [parseTableRow(line)]
+                index += 2
+                while index < lines.count, lines[index].contains("|"), !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
+                    rows.append(parseTableRow(lines[index]))
+                    index += 1
+                }
+                blocks.append(ResponseBlock(kind: .table(normalizedTableRows(rows))))
+                continue
+            }
+            blocks.append(ResponseBlock(kind: .line(line)))
+            index += 1
+        }
+        return blocks
+    }
+
+    private static func parseTableRow(_ line: String) -> [String] {
+        var parts = line.split(separator: "|", omittingEmptySubsequences: false).map {
+            String($0).trimmingCharacters(in: .whitespaces)
+        }
+        if parts.first?.isEmpty == true { parts.removeFirst() }
+        if parts.last?.isEmpty == true { parts.removeLast() }
+        return parts
+    }
+
+    private static func isTableSeparator(_ line: String) -> Bool {
+        let cells = parseTableRow(line)
+        guard !cells.isEmpty else { return false }
+        return cells.allSatisfy { cell in
+            let trimmed = cell.trimmingCharacters(in: .whitespaces)
+            let hyphenCount = trimmed.filter { $0 == "-" }.count
+            return hyphenCount >= 3 && trimmed.allSatisfy { $0 == "-" || $0 == ":" || $0.isWhitespace }
+        }
+    }
+
+    private static func normalizedTableRows(_ rows: [[String]]) -> [[String]] {
+        let width = rows.map(\.count).max() ?? 0
+        return rows.map { row in
+            row + Array(repeating: "", count: max(0, width - row.count))
+        }
     }
 
     // MARK: - Dictionary lookup
@@ -334,7 +464,7 @@ struct MangaAiPopupView: View {
         guard !results.isEmpty else { return }
         var styles: [String: String] = [:]
         for style in LookupEngine.shared.getStyles() {
-            styles[String(style.dict_name)] = String(style.styles)
+            styles[cxxStringToSwift(style.dict_name)] = cxxStringToSwift(style.styles)
         }
         wordLookup = WordLookupState(word: word, sentence: sentence, rect: frame, results: results, styles: styles)
     }
@@ -380,57 +510,62 @@ struct MangaAiPopupView: View {
         let scanText: String?
     }
 
-    /// Tokenizes a line for the wrapping layout. Japanese runs become per-character tokens
-    /// (tap target each, scanning forward); other runs are markdown-parsed once and split into
-    /// word tokens, so attributes like **bold** survive wrapping.
+    /// Tokenizes a line for the wrapping layout. Markdown is parsed before Japanese splitting, so
+    /// emphasis spanning Japanese text is consumed instead of leaking literal `**` markers.
     static func tokenize(_ line: String) -> [Token] {
         var tokens: [Token] = []
-        for run in splitRuns(line) {
-            if run.isJapanese {
-                let chars = Array(run.text)
-                for (index, ch) in chars.enumerated() {
-                    let scan = String(chars[index..<min(chars.count, index + 16)])
-                    tokens.append(Token(attributed: AttributedString(String(ch)), scanText: scan))
-                }
-            } else {
-                let attributed = (try? AttributedString(markdown: run.text)) ?? AttributedString(run.text)
-                // Split into word tokens at spaces, preserving attributes. Very long words
-                // (URLs, hashes, code) are chunked so no single token can out-measure the card.
-                var index = attributed.characters.startIndex
-                var wordStart = index
-                while index < attributed.characters.endIndex {
-                    let ch = attributed.characters[index]
-                    let next = attributed.characters.index(after: index)
-                    if ch == " " {
-                        let word = AttributedString(attributed[wordStart..<next])
-                        appendWrappedNonJapanese(word, to: &tokens)
-                        wordStart = next
-                    }
-                    index = next
-                }
-                if wordStart < attributed.characters.endIndex {
-                    appendWrappedNonJapanese(AttributedString(attributed[wordStart...]), to: &tokens)
-                }
+        let attributed = markdown(line)
+        let visibleChars = Array(String(attributed.characters))
+
+        var index = attributed.characters.startIndex
+        var visibleOffset = 0
+        var nonJapaneseStart: AttributedString.Index?
+
+        func flushNonJapanese(upTo end: AttributedString.Index) {
+            guard let start = nonJapaneseStart, start < end else {
+                nonJapaneseStart = nil
+                return
             }
+            appendWrappedNonJapanese(AttributedString(attributed[start..<end]), to: &tokens)
+            nonJapaneseStart = nil
         }
+
+        while index < attributed.characters.endIndex {
+            let ch = attributed.characters[index]
+            let next = attributed.characters.index(after: index)
+            if ch.isMangaAiJapanese {
+                flushNonJapanese(upTo: index)
+                var scanEnd = visibleOffset
+                while scanEnd < visibleChars.count,
+                      scanEnd < visibleOffset + 16,
+                      visibleChars[scanEnd].isMangaAiJapanese {
+                    scanEnd += 1
+                }
+                let scan = String(visibleChars[visibleOffset..<scanEnd])
+                tokens.append(Token(attributed: AttributedString(attributed[index..<next]), scanText: scan))
+            } else if nonJapaneseStart == nil {
+                nonJapaneseStart = index
+            }
+            index = next
+            visibleOffset += 1
+        }
+        flushNonJapanese(upTo: attributed.characters.endIndex)
         return tokens
     }
 
     private static func appendWrappedNonJapanese(_ text: AttributedString, to tokens: inout [Token]) {
-        let maxCharactersPerToken = 8
-        var start = text.characters.startIndex
-        while start < text.characters.endIndex {
-            var end = start
-            var count = 0
-            while end < text.characters.endIndex, count < maxCharactersPerToken {
+        var index = text.characters.startIndex
+        for segment in MangaAiTextTokenizer.segments(in: String(text.characters)) {
+            var end = index
+            for _ in segment.text {
+                guard end < text.characters.endIndex else { break }
                 end = text.characters.index(after: end)
-                count += 1
             }
-            let fragment = AttributedString(text[start..<end])
+            let fragment = AttributedString(text[index..<end])
             if !fragment.characters.isEmpty {
                 tokens.append(Token(attributed: fragment, scanText: nil))
             }
-            start = end
+            index = end
         }
     }
 

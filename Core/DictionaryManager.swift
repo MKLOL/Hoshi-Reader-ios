@@ -209,14 +209,16 @@ class DictionaryManager {
                         self.currentImport = "Fetching \(name)"
                     }
                     
-                    let (data, _) = try await URLSession.shared.data(from: URL(string: url)!)
+                    guard let indexURL = URL(string: url) else { throw URLError(.badURL) }
+                    let (data, _) = try await URLSession.shared.data(from: indexURL)
                     let remoteIndex = try JSONDecoder().decode(DictionaryIndex.self, from: data)
-                    
+
                     await MainActor.run {
                         self.currentImport = "Downloading \(remoteIndex.title)"
                     }
-                    
-                    let (temp, _) = try await URLSession.shared.download(from: URL(string: remoteIndex.downloadUrl)!)
+
+                    guard let downloadURL = URL(string: remoteIndex.downloadUrl) else { throw URLError(.badURL) }
+                    let (temp, _) = try await URLSession.shared.download(from: downloadURL)
                     tempFiles.append(temp)
                     
                     await MainActor.run {
@@ -327,18 +329,20 @@ class DictionaryManager {
                         self.currentImport = "Checking \(index.title)"
                     }
                     
-                    let (data, _) = try await URLSession.shared.data(from: URL(string: index.indexUrl)!)
+                    guard let indexURL = URL(string: index.indexUrl) else { continue }
+                    let (data, _) = try await URLSession.shared.data(from: indexURL)
                     let remoteIndex = try JSONDecoder().decode(DictionaryIndex.self, from: data)
-                    
+
                     if index.revision == remoteIndex.revision {
                         continue
                     }
-                    
+
                     await MainActor.run {
                         self.currentImport = "Downloading \(remoteIndex.title)"
                     }
-                    
-                    let (temp, _) = try await URLSession.shared.download(from: URL(string: remoteIndex.downloadUrl)!)
+
+                    guard let downloadURL = URL(string: remoteIndex.downloadUrl) else { continue }
+                    let (temp, _) = try await URLSession.shared.download(from: downloadURL)
                     tempFiles.append(temp)
                     
                     await MainActor.run {

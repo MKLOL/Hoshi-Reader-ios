@@ -45,6 +45,8 @@ struct MangaReaderView: View {
     @State private var pageOpacity: Double = 1
     @State private var uiTestSelectionProbe = "none"
     @State private var uiTestCropProbe = "none"
+    @State private var uiTestActionProbe = "actions=pending"
+    @State private var uiTestCopyProbe = "copy=none"
 
     // MARK: Directional page-turn slide
     //
@@ -103,6 +105,14 @@ struct MangaReaderView: View {
         ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1"
     }
 
+    private var uiTestingAiStubEnabled: Bool {
+#if DEBUG
+        uiTestingEnabled && ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_AI_STUB"] == "1"
+#else
+        false
+#endif
+    }
+
     var body: some View {
         ZStack {
             backgroundColor.ignoresSafeArea()
@@ -148,6 +158,18 @@ struct MangaReaderView: View {
                         .frame(width: 1, height: 1)
                         .accessibilityIdentifier("manga-crop-probe")
                         .accessibilityLabel(uiTestCropProbe)
+                    Text(uiTestActionProbe)
+                        .font(.system(size: 1))
+                        .foregroundStyle(.clear)
+                        .frame(width: 1, height: 1)
+                        .accessibilityIdentifier("manga-action-layout-probe")
+                        .accessibilityLabel(uiTestActionProbe)
+                    Text(uiTestCopyProbe)
+                        .font(.system(size: 1))
+                        .foregroundStyle(.clear)
+                        .frame(width: 1, height: 1)
+                        .accessibilityIdentifier("manga-copy-probe")
+                        .accessibilityLabel(uiTestCopyProbe)
                 }
             }
         }
@@ -312,11 +334,26 @@ struct MangaReaderView: View {
                     }
                 },
                 onAskAi: { text in
-                    if let onAskAi { onAskAi(text) }
-                    else { aiController.ask(bubbleText: text, book: metadata) }
+                    if let onAskAi {
+                        onAskAi(text)
+                    } else if uiTestingAiStubEnabled {
+#if DEBUG
+                        aiController.resolveForUITest(bubbleText: text, book: metadata)
+#else
+                        aiController.ask(bubbleText: text, book: metadata)
+#endif
+                    } else {
+                        aiController.ask(bubbleText: text, book: metadata)
+                    }
                 },
-                onCopy: { text in UIPasteboard.general.string = text },
-                onPageReady: { loadToken in onPageReady(loadToken: loadToken) }
+                onCopy: { text in
+                    UIPasteboard.general.string = text
+                    if uiTestingEnabled {
+                        uiTestCopyProbe = "copy=\(text)"
+                    }
+                },
+                onPageReady: { loadToken in onPageReady(loadToken: loadToken) },
+                tappableTopInset: mangaActionTopInset(for: geometry)
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)
@@ -450,6 +487,11 @@ struct MangaReaderView: View {
     /// Invoked when the WebView finishes rendering a page. Drives the slide for a pending turn, or
     /// restores opacity for the no-snapshot fallback path.
     private func onPageReady(loadToken: Int) {
+        if uiTestingEnabled {
+            Task {
+                uiTestActionProbe = await controller.uiTestActionLayoutProbeLabel()
+            }
+        }
         if let pending = pendingSlideIndex, slideSnapshot != nil {
             // The slide only starts once the page it is waiting on has actually drawn.
             guard pending == model.pageIndex else { return }
@@ -567,6 +609,14 @@ struct MangaReaderView: View {
         // No full-width hit-testable background: with the full-bleed page, an (invisible)
         // bar background would swallow taps meant for bubbles under the strip. Only the
         // buttons themselves are tappable.
+    }
+
+    private func mangaActionTopInset(for geometry: GeometryProxy) -> CGFloat {
+        let safeTop = geometry.safeAreaInsets.top.isFinite ? max(0, geometry.safeAreaInsets.top) : 0
+        guard !focusMode, !screenshotCropMode else { return safeTop + 8 }
+        // The WebView is full-bleed under the reader chrome. Keep in-page OCR action buttons below
+        // the native top controls so visible buttons are also reliably hit-testable.
+        return safeTop + (AiChatSettingsStore.shared.isConfigured ? 140 : 72)
     }
 
     private var bottomBar: some View {

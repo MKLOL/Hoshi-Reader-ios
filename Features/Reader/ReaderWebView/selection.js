@@ -69,6 +69,66 @@ window.hoshiSelection = {
         const rect = charRange.getBoundingClientRect();
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     },
+
+    rectDistance(rect, x, y) {
+        const dx = x < rect.left ? rect.left - x : (x > rect.right ? x - rect.right : 0);
+        const dy = y < rect.top ? rect.top - y : (y > rect.bottom ? y - rect.bottom : 0);
+        return Math.hypot(dx, dy);
+    },
+
+    getMangaBoxAtPoint(x, y) {
+        const el = document.elementFromPoint(x, y);
+        const direct = el?.closest?.('.ocr-box.revealed');
+        if (direct) {
+            return direct;
+        }
+        return window.hoshiManga?.hitSlopBoxAt?.(x, y) || null;
+    },
+
+    getCharacterInContainerAtPoint(container, x, y) {
+        if (!container) {
+            return null;
+        }
+
+        const walker = this.createWalker(container);
+        const range = document.createRange();
+        let node;
+        let best = null;
+        let bestDistance = Infinity;
+        const tolerance = 10;
+
+        while (node = walker.nextNode()) {
+            const text = node.textContent || '';
+            for (let offset = 0; offset < text.length; offset++) {
+                const char = text[offset];
+                if (this.isScanBoundary(char)) {
+                    continue;
+                }
+                if (window.scanNonJapaneseText === false && !this.isJapaneseChar(char)) {
+                    continue;
+                }
+
+                range.setStart(node, offset);
+                range.setEnd(node, offset + 1);
+                const rects = range.getClientRects();
+                for (const rect of rects) {
+                    if (rect.width <= 0 || rect.height <= 0) {
+                        continue;
+                    }
+                    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                        return { node, offset };
+                    }
+                    const distance = this.rectDistance(rect, x, y);
+                    if (distance < bestDistance && distance <= tolerance) {
+                        bestDistance = distance;
+                        best = { node, offset };
+                    }
+                }
+            }
+        }
+
+        return best;
+    },
     
     getCaretRange(x, y) {
         if (document.caretPositionFromPoint) {
@@ -107,6 +167,12 @@ window.hoshiSelection = {
     },
     
     getCharacterAtPoint(x, y) {
+        const mangaBox = this.getMangaBoxAtPoint(x, y);
+        const mangaHit = this.getCharacterInContainerAtPoint(mangaBox, x, y);
+        if (mangaHit) {
+            return mangaHit;
+        }
+
         const range = this.getCaretRange(x, y);
         if (!range) {
             return null;

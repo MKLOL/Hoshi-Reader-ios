@@ -1,4 +1,8 @@
 import re
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -69,6 +73,22 @@ class LastTenRegressionTests(unittest.TestCase):
         controller = read("Features/AI/MangaAiController.swift")
         self.assertIn("model: result.modelId", controller)
         self.assertNotIn("model: model.id", method_body(controller, "private func askOnDevice"))
+
+    def test_manga_ai_dictionary_lookup_uses_cxx_string_helper(self):
+        controller = read("Features/AI/MangaAiController.swift")
+        popup = read("Features/AI/MangaAiPopupView.swift")
+        result = method_body(controller, "private static func toResult")
+        lookup = method_body(popup, "private func lookUp")
+        self.assertIn("cxxStringToSwift($0.name)", result)
+        self.assertIn("cxxStringToSwift($0.description)", result)
+        self.assertIn("cxxStringToSwift($0.dict_name)", result)
+        self.assertIn("cxxStringToSwift(result.term.expression)", result)
+        self.assertIn("cxxStringToSwift(result.matched)", result)
+        self.assertNotIn("String($0.name)", result)
+        self.assertNotIn("String($0.dict_name)", result)
+        self.assertIn("cxxStringToSwift(style.dict_name)", lookup)
+        self.assertIn("cxxStringToSwift(style.styles)", lookup)
+        self.assertNotIn("String(style.dict_name)", lookup)
 
     def test_download_delete_and_cancel_suppress_late_callbacks(self):
         manager = read("Features/AI/offline/ModelDownloadManager.swift")
@@ -144,11 +164,34 @@ class LastTenRegressionTests(unittest.TestCase):
 
     def test_ai_popup_has_bounded_scroll_window_and_wraps_long_tokens(self):
         popup = read("Features/AI/MangaAiPopupView.swift")
+        tokenizer = read("Features/AI/MangaAiTextTokenizer.swift")
         self.assertIn("let maxCardWidth: CGFloat = isPad ? 680 : 520", popup)
         self.assertIn(".frame(width: width, height: height)", popup)
         self.assertIn(".scrollIndicators(.visible)", popup)
-        self.assertIn("let maxCharactersPerToken = 8", popup)
+        self.assertNotIn("let maxCharactersPerToken = 8", popup)
         self.assertIn("appendWrappedNonJapanese", popup)
+        self.assertIn("import NaturalLanguage", tokenizer)
+        self.assertIn("NLTokenizer(unit: .word)", tokenizer)
+        self.assertNotIn("maxUnbrokenCharacters", tokenizer)
+        swift = shutil.which("swift")
+        if swift is not None:
+            assertions = r'''
+
+let text = "This doesn't split words, and we're okay."
+let segments = MangaAiTextTokenizer.segments(in: text).map(\.text)
+precondition(segments.contains("doesn't"), "doesn't was split: \(segments)")
+precondition(segments.contains("we're"), "we're was split: \(segments)")
+precondition(!segments.contains("doesn"), "bad partial segment: \(segments)")
+let chained = MangaAiTextTokenizer.segments(in: "state-of-the-art doesn't split").map(\.text)
+precondition(chained.contains("state-of-the-art"), "hyphenated chain was split: \(chained)")
+let mixed = MangaAiTextTokenizer.segments(in: "日本語 doesn't")
+precondition(mixed.filter { $0.kind == .japanese }.map(\.text) == ["日", "本", "語"])
+precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
+'''
+            with tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "main.swift"
+                script.write_text(tokenizer + assertions, encoding="utf-8")
+                subprocess.run([swift, str(script)], check=True, capture_output=True, text=True)
 
     def test_ai_screenshot_viewer_uses_native_zoom_scroll_view(self):
         popup = read("Features/AI/MangaAiPopupView.swift")
@@ -169,7 +212,528 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("FileNames.aiChatLog", history)
         self.assertIn("var screenshotImage: AiChatImage?", types)
 
+    def test_ai_popup_strips_thinking_without_losing_tappable_renderer(self):
+        popup = read("Features/AI/MangaAiPopupView.swift")
+        sanitizer = read("Features/AI/AiThinkingTextSanitizer.swift")
+        project = read("Hoshi Reader.xcodeproj/project.pbxproj")
+
+        self.assertNotIn("import MarkdownUI", popup)
+        self.assertIn("let visible = AiThinkingTextSanitizer.strip(response)", popup)
+        self.assertIn("Self.responseBlocks(visible)", popup)
+        self.assertIn("lineView(line)", popup)
+        self.assertIn("lookUp(word: scanText", popup)
+        self.assertIn("inlineOnlyPreservingWhitespace", popup)
+        self.assertIn("let attributed = markdown(line)", popup)
+        self.assertIn("materializeInlineMarkdown", popup)
+        self.assertIn("intent.contains(.stronglyEmphasized)", popup)
+        self.assertIn("visible.contains(\"**\")", popup)
+        self.assertIn("strippingCommonMarkdownMarkers", popup)
+        self.assertIn(".accessibilityLabel(Self.accessibilityText(for: line))", popup)
+        self.assertIn("progress.totalTokens > 0", popup)
+        self.assertIn("progress.thinkingTokens", popup)
+        self.assertIn("%d answer tokens · %d thinking tokens", popup)
+        self.assertIn("case .table(let rows)", popup)
+        self.assertIn("private func tableView", popup)
+        self.assertIn("Grid(alignment: .topLeading", popup)
+        self.assertIn("GridRow", popup)
+        self.assertIn(".gridCellColumns(columnCount)", popup)
+        self.assertIn("private static func isTableSeparator", popup)
+        self.assertIn("AttributedString(attributed[index..<next])", popup)
+        swift = shutil.which("swift")
+        if swift is not None:
+            probe = (
+                'import Foundation\n'
+                'let parsed = try! AttributedString(markdown: "**stuff** and **日本語**", '
+                'options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))\n'
+                'precondition(String(parsed.characters) == "stuff and 日本語")\n'
+                'let runDescriptions = parsed.runs.map { String(describing: $0.inlinePresentationIntent) }.joined(separator: "|")\n'
+                'precondition(runDescriptions.contains("rawValue: 2"))\n'
+                'let malformed = try! AttributedString(markdown: "**bo", '
+                'options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))\n'
+                'precondition(String(malformed.characters).contains("**"))\n'
+            )
+            subprocess.run([swift, "-e", probe], check=True, capture_output=True, text=True)
+        self.assertIn('private static let startTags = ["<think>", "<thinking>"]', sanitizer)
+        self.assertIn('private static let endTags = ["</think>", "</thinking>"]', sanitizer)
+        self.assertIn('"thinking processes"', sanitizer)
+        self.assertIn('"reasoning:"', sanitizer)
+        self.assertIn('"analysis:"', sanitizer)
+        self.assertIn("stripUntaggedReasoning", sanitizer)
+        self.assertIn("\"wait, let's check\"", sanitizer)
+        self.assertIn('"wait, looking"', sanitizer)
+        self.assertIn('"draft translation"', sanitizer)
+        self.assertIn('"draft breakdown"', sanitizer)
+        self.assertNotIn('"wait,"', sanitizer)
+        self.assertNotIn('"wait",', sanitizer)
+        self.assertNotIn('"looking at",', sanitizer)
+        self.assertNotIn('"first,"', sanitizer)
+        self.assertNotIn('"i need to",', sanitizer)
+        self.assertIn('"answer:"', sanitizer)
+        self.assertIn("options: [.caseInsensitive]", sanitizer)
+        self.assertIn('return ""', sanitizer)
+        self.assertNotIn("MarkdownUI", project)
+
+    def test_thinking_sanitizer_preserves_valid_wait_translations(self):
+        sanitizer = read("Features/AI/AiThinkingTextSanitizer.swift")
+        swift = shutil.which("swift")
+        if swift is None:
+            self.skipTest("swift is required to execute sanitizer behavior regression")
+
+        assertions = r'''
+
+func assertEqual(_ actual: String, _ expected: String, _ label: String) {
+    precondition(actual == expected, "\(label): expected <\(expected)> got <\(actual)>")
+}
+
+assertEqual(
+    AiThinkingTextSanitizer.strip("Wait, what is this?"),
+    "Wait, what is this?",
+    "valid wait translation"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, what is this?"),
+    "Wait, what is this?",
+    "valid wait final after FINAL marker"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, let's check the comma placement.\n\nTranslation: Wait, what is this?"),
+    "Wait, what is this?",
+    "reasoning wait prefix"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("First, open the door."),
+    "First, open the door.",
+    "valid first final"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Looking at the moon, I smiled."),
+    "Looking at the moon, I smiled.",
+    "valid looking-at final"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("This is a sentence looking at the moon."),
+    "This is a sentence looking at the moon.",
+    "valid embedded looking-at final"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("""
+*   "は" (wa) = topic marker.
+*   "何" (nani) = what?
+
+4.  **Draft Translation:**
+    *   Literal: What is this? / What's that thing?
+    *   Natural: What is this?
+
+5.  **Draft Breakdown:**
+    *   hidden scaffold
+"""),
+    "What is this?",
+    "draft scaffold is not visible"
+)
+assertEqual(
+    AiThinkingTextSanitizer.strip("Analysis: I should inspect this first.\n\nTranslation: This is a test."),
+    "Translation: This is a test.",
+    "analysis label"
+)
+assertEqual(
+    AiThinkingTextSanitizer.strip("<thinking>private chain</thinking>Final answer"),
+    "Final answer",
+    "thinking tags"
+)
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "main.swift"
+            script.write_text(sanitizer + assertions, encoding="utf-8")
+            subprocess.run([swift, str(script)], check=True, capture_output=True, text=True)
+
+    def test_offline_llm_suppresses_qwen_thinking_and_awaits_reset(self):
+        manager = read("Features/AI/offline/OfflineLlmManager.swift")
+        llm = read("Libraries/LLM.swift/Sources/LLM/LLM.swift")
+
+        translate = method_body(manager, "func translate")
+        self.assertIn("let privateThinkingEnabled = templateKind == .chatML && settings.usePrivateThinking", translate)
+        self.assertIn("let thinkingMode: ThinkingMode = privateThinkingEnabled ? .enabled", translate)
+        self.assertIn(": (templateKind == .chatML ? .suppressed : .none)", translate)
+        self.assertIn("await llm.prepareTemplateForGeneration()", translate)
+        self.assertIn("await llm.reset()", translate)
+        self.assertNotIn("Task.yield()", translate)
+        self.assertNotIn("getChatTemplateHint()", translate)
+        self.assertIn("nonisolated private static let contextCap: Int32 = 12288", manager)
+        self.assertIn("nonisolated private static let thinkingTokenBudget = 192", manager)
+        self.assertIn("nonisolated private static let suppressedThinkingTokenBudget = 1", manager)
+        self.assertIn("await llm.core.setThinkingBudget(Self.thinkingBudget(for: thinkingMode))", translate)
+        self.assertIn("let requestedResponseTokenBudget = OfflineTranslationSettingsStore.clampedResponseTokenLimit(", translate)
+        self.assertIn("let responseTokenBudget = await Self.applyResponseTokenBudget(", translate)
+        self.assertIn("prompt: prompt", translate)
+        self.assertIn("thinking: thinking", translate)
+        self.assertIn("await boxed.value.core.setThinkingBudget(Self.thinkingBudget(for: thinking))", translate)
+        self.assertIn("await llm.core.setResponseTokenBudget(1)", translate)
+        self.assertIn("await llm.core.setBlocksCJKOnFirstResponseLine(templateKind == .chatML)", translate)
+        self.assertIn("await boxed.value.core.setBlocksCJKOnFirstResponseLine(templateKind == .chatML)", translate)
+        self.assertIn("let generationTask = Task.detached", translate)
+        self.assertIn("try Task.checkCancellation()", translate[translate.index("await llm.core.setResponseTokenBudget(1)"):])
+        self.assertIn("guard !Task.isCancelled else { return }", translate)
+        self.assertIn("boxed.value.stop()", translate)
+        self.assertIn("generationTask.cancel()", translate)
+        self.assertIn("let hiddenThinking = await boxed.value.think(", translate)
+        self.assertIn("let finalPrompt = Self.buildFinalAnswerContent(", translate)
+        self.assertIn("resetForFinalRetry", translate)
+        self.assertIn("firstAnswerLineContainsCJK(firstPassText)", translate)
+        self.assertIn('hiddenThinking: ""', translate)
+        self.assertIn("thinking: .suppressed", translate)
+        self.assertIn("thinking: thinkingMode", translate)
+        self.assertIn("responsePrefix: responsePrefix", translate)
+        self.assertIn("onThinkingTokenCount:", translate)
+        self.assertIn("setThinkingTokens(count)", translate)
+        self.assertIn("thinkingTokens: snapshot.thinkingTokens", translate)
+        self.assertIn("Self.throughput(tokens: snapshot.totalTokens", translate)
+        self.assertIn("let thinkingTokens: Int", manager)
+        self.assertIn("var totalTokens: Int { tokens + thinkingTokens }", manager)
+        self.assertIn("%d answer tokens · %d thinking tokens", manager)
+        self.assertIn("nonisolated static var debugThinkingTokenBudget: Int { thinkingTokenBudget }", manager)
+        self.assertIn("Self.visibleStreamingText(snapshot.text, template: templateKind)", translate)
+        self.assertIn("let stableVisible = collectedBox.value.setVisibleText(visible)", translate)
+        self.assertIn("private func shouldReplaceVisibleText(with candidate: String)", manager)
+        self.assertIn("currentLooksLikeScaffold && !nextLooksLikeScaffold", manager)
+        self.assertIn('"wait, looking"', manager)
+        self.assertIn('"looking at the comma"', manager)
+        self.assertNotIn('/no_think', manager)
+        self.assertNotIn("answerFinalMarkerRange", manager)
+        self.assertNotIn("options: [.caseInsensitive, .backwards]", manager)
+        self.assertIn("topK: 20", manager)
+        self.assertIn("temp: 0.2", manager)
+        self.assertIn('private static let chatMLResponsePrefix = "The English answer is: "', manager)
+        self.assertIn("Target language is English", manager)
+        self.assertIn("must contain zero Chinese/Japanese/Korean characters", manager)
+        self.assertIn('"the english answer is:"', manager)
+        self.assertIn("stripLeadingFinalMarker", manager)
+        self.assertIn("looksTruncated", manager)
+        final_prompt = method_body(manager, "nonisolated private static func buildFinalAnswerContent")
+        self.assertIn("NO MORE THINKING", final_prompt)
+        self.assertIn("Do not quote, summarize, mention, or continue these notes", final_prompt)
+        self.assertIn("English-only examples", final_prompt)
+        self.assertIn("Final answer: What is this?", final_prompt)
+        self.assertIn("Final answer: Wait, what is this?", final_prompt)
+        self.assertIn('Do not write drafts, checks, plans, "wait"', final_prompt)
+        cleanup = method_body(manager, "nonisolated private static func cleanup")
+        self.assertIn("let withoutMarker = stripLeadingFinalMarker(stripped)", cleanup)
+        self.assertIn("return stripLeadingFinalMarker(AiThinkingTextSanitizer.stripUntaggedReasoning(withoutMarker))", cleanup)
+        self.assertNotIn('return ""', cleanup)
+        self.assertIn("The on-device model stopped before producing a final answer", manager)
+        self.assertIn("The on-device model answered in the wrong language", manager)
+        self.assertIn("firstAnswerLineContainsCJK(visible) ? \"\" : visible", manager)
+        self.assertIn("func resetResponse()", manager)
+        self.assertIn("nonisolated private static func applyResponseTokenBudget", manager)
+        self.assertIn("processedPromptTokenCount(for: prompt, thinking: thinking)", manager)
+        self.assertIn("contextTokenLimit", manager)
+        self.assertIn("nonisolated private static func effectiveResponseTokenBudget", manager)
+        self.assertIn("guard let budget = effectiveResponseTokenBudget(", manager)
+        self.assertIn("contextTokenLimit - promptAndSafetyReserve - hiddenTokenReserve", manager)
+        self.assertIn("guard available > 0 else { return nil }", manager)
+        self.assertNotIn("max(256, contextTokenLimit", manager)
+        self.assertIn("The on-device model prompt is too long for the loaded model", manager)
+        self.assertIn("collected.setError(", manager)
+        self.assertIn("if let errorMessage = collected.errorMessage()", manager)
+        self.assertIn("budget: finalOutput.responseBudget", manager)
+        self.assertIn("let responseBudget: Int", manager)
+        self.assertIn("func setError(_ message: String)", manager)
+        self.assertIn("func errorMessage() -> String?", manager)
+        self.assertIn("hit the answer limit before finishing", manager)
+        gate = method_body(manager, "private func gateAcquire")
+        self.assertIn("if Task.isCancelled {", gate)
+        self.assertIn("gateRelease()", gate)
+        self.assertIn("throw CancellationError()", gate)
+        self.assertIn("private func applyTemplateToCore(_ template: Template?) async", llm)
+        self.assertIn("@MainActor public func prepareTemplateForGeneration() async", llm)
+        self.assertIn("@MainActor public func reset() async", llm)
+        self.assertIn("await core.resetContext()", llm)
+        self.assertIn("onThinkingTokenCount: (@Sendable (Int) async -> Void)? = nil", llm)
+        self.assertIn("let streams = await core.generateResponseStreamWithThinking", llm)
+        self.assertIn("onThinkingTokenCount: onThinkingTokenCount", llm)
+        self.assertIn("public func think(", llm)
+        self.assertIn("let responseDrain = Task", llm)
+        self.assertIn("await core.stopGeneration()", llm)
+        self.assertIn("public func contextTokenLimit() async -> Int", llm)
+        self.assertIn("public func processedPromptTokenCount(for input: String, thinking: ThinkingMode = .none) async -> Int", llm)
+        self.assertIn("await onThinkingTokenCount?(thinkingTokensSeen)", llm)
+        self.assertIn("for await _ in streams.thinking", llm)
+        self.assertIn("let output = await makeOutputFrom(streams.response)", llm)
+        reset_context = method_body(llm, "func resetContext")
+        self.assertIn("llama_memory_clear(llama_get_memory(context), false)", reset_context)
+        self.assertNotIn("llama_memory_seq_rm(llama_get_memory(context), -1, -1, -1)", reset_context)
+
+    def test_offline_model_catalog_keeps_legacy_qwen_downloads_visible(self):
+        catalog = read("Features/AI/offline/LlmModelCatalog.swift")
+        all_models = catalog[catalog.index("static let all: [LlmModel]"):catalog.index("static func byId")]
+
+        self.assertIn("qwen35_9B", all_models)
+        self.assertIn("qwen35_4B", all_models)
+        self.assertIn("qwen35_2B", all_models)
+        self.assertIn("qwen7BQ4", all_models)
+        self.assertIn("qwen14BQ4", all_models)
+        self.assertIn("qwen1_5BQ4", all_models)
+        self.assertIn("qwen0_5BQ4", all_models)
+        self.assertIn("Legacy Qwen2.5 entries are kept", catalog)
+
+    def test_llm_thinking_marker_detection_supports_aliases_and_budget(self):
+        llm = read("Libraries/LLM.swift/Sources/LLM/LLM.swift")
+
+        self.assertIn("thinkingStartMarkerVariants", llm)
+        self.assertIn("thinkingEndMarkerVariants", llm)
+        self.assertIn('variants.append("<thinking>")', llm)
+        self.assertIn('variants.append("</thinking>")', llm)
+        self.assertIn("markerSuffix(in: pendingText, markers: startMarkers)", llm)
+        self.assertIn("markerSuffix(in: pendingText, markers: endMarkers)", llm)
+        self.assertIn("lowercased.hasSuffix", llm)
+        self.assertIn("effectiveThinkingTokenBudget", llm)
+        self.assertIn("thinkingTokensSeen >= effectiveThinkingTokenBudget", llm)
+        self.assertIn("thinkingMode == .suppressed && thinkingTokenBudget == 0", llm)
+        self.assertIn("injectTokensIntoContext(endTokens + [newlineToken])", llm)
+        self.assertIn("private var responseTokenBudget: Int = 0", llm)
+        self.assertIn("public func setResponseTokenBudget(_ tokens: Int)", llm)
+        self.assertIn("public func setBlocksCJKOnFirstResponseLine(_ enabled: Bool)", llm)
+        self.assertIn("blocksCJKOnFirstResponseLine", llm)
+        self.assertIn("private static func containsCJK", llm)
+        self.assertIn("rejecting shouldReject", llm)
+        self.assertIn("responseTokensSeen >= responseTokenBudget", llm)
+        self.assertIn("responsePrefix: String = \"\"", llm)
+        self.assertIn("injectTokensIntoContext(prefixTokens)", llm)
+        self.assertIn("injectResponsePrefixIfNeeded", llm)
+        self.assertIn("var currentlyInThinkingPhase = thinkingMode == .enabled", llm)
+        self.assertIn("await Task.yield()", llm)
+        self.assertIn("public var postprocess: @Sendable (_ output: String) -> Void = { _ in }", llm)
+
+    def test_offline_llm_launch_selftest_fails_on_visible_reasoning(self):
+        app = read("App/HoshiReader.swift")
+
+        self.assertIn("HOSHI_LLM_SELFTEST", app)
+        self.assertIn("failed leaked-thinking", app)
+        self.assertIn("secondText", app)
+        self.assertIn("for (index, sample) in [text, secondText].enumerated()", app)
+        self.assertIn("HOSHI_LLM_SELFTEST success runs=\\(summaries.count)", app)
+        self.assertIn("answerTokens=\\(progress.tokens)", app)
+        self.assertIn("thinkingTokens=\\(progress.thinkingTokens)", app)
+        self.assertIn("thinkingTokens=\\(result.thinkingTokens)", app)
+        self.assertIn("HOSHI_LLM_SELFTEST_PRIVATE_THINKING", app)
+        self.assertIn("OfflineTranslationSettingsStore.shared.usePrivateThinking = privateThinkingEnabled", app)
+        self.assertIn("failed missing-hidden-thinking", app)
+        self.assertIn("if privateThinkingEnabled && result.thinkingTokens <= 0", app)
+        self.assertIn("failed thinking-budget-exceeded", app)
+        self.assertIn("failed non-english-translation", app)
+        self.assertIn("firstAnswerLineLooksNonEnglish", app)
+        self.assertIn("if result.thinkingTokens > OfflineLlmManager.debugThinkingTokenBudget", app)
+        self.assertIn("budget=\\(OfflineLlmManager.debugThinkingTokenBudget)", app)
+        self.assertIn('"analysis:"', app)
+        self.assertIn('"reasoning:"', app)
+        self.assertIn('"thinking process"', app)
+        self.assertIn('"chain-of-thought"', app)
+        self.assertIn('"draft translation"', app)
+        self.assertIn('"draft breakdown"', app)
+        self.assertIn('"checking the"', app)
+        self.assertIn('"looking at the comma"', app)
+        self.assertIn("return", app[app.index("if leakedThinking {"):app.index("HOSHI_LLM_SELFTEST success")])
+        self.assertNotIn('"wait,"', app)
+
+    def test_ai_controller_ignores_stale_second_tap_results(self):
+        controller = read("Features/AI/MangaAiController.swift")
+
+        self.assertIn("private var requestGeneration = 0", controller)
+        self.assertIn("let requestGeneration = beginRequest()", controller)
+        self.assertIn("defer { self.finishRequest(generation: requestGeneration) }", controller)
+        self.assertIn("if !self.isCurrentRequest(requestGeneration) { return }", controller)
+        self.assertIn("private func beginRequest() -> Int", controller)
+        self.assertIn("private func finishRequest(generation: Int)", controller)
+
+    def test_manga_ai_toolbar_clamps_inside_frame_without_viewport_nudge(self):
+        html = read("Features/MangaReader/MangaPageHtml.swift")
+        place_actions = method_body(html, "placeActions: function")
+
+        self.assertIn("var frame = box.closest('.frame');", place_actions)
+        self.assertIn("var actions = frame && frame.querySelector('.ocr-actions');", place_actions)
+        self.assertIn("actions.classList.add('is-visible');", place_actions)
+        self.assertIn("actions.dataset.bubbleText", place_actions)
+        self.assertIn("uiTestSuffix", place_actions)
+        self.assertIn("Ask about this bubble' + uiTestSuffix", place_actions)
+        self.assertIn("Copy bubble text' + uiTestSuffix", place_actions)
+        self.assertIn("var left = box.offsetLeft + (boxWidth / 2) - (actionsWidth / 2);", place_actions)
+        self.assertIn("box.closest('.frame')", place_actions)
+        self.assertIn("var minLeft = gap;", place_actions)
+        self.assertIn("var maxLeft = frame.clientWidth - actionsWidth - gap;", place_actions)
+        self.assertIn("var minGlobalTop = gap;", place_actions)
+        self.assertIn("var minTop = minGlobalTop;", place_actions)
+        self.assertIn("var maxTop = frame.clientHeight - actionsHeight - gap;", place_actions)
+        self.assertIn("minGlobalTop = Math.max(minGlobalTop, hostMinTop + gap);", place_actions)
+        self.assertIn("hostTappableTopInset", html)
+        self.assertIn(".ocr-box::before", html)
+        self.assertIn("inset: -8px;", html)
+        self.assertIn("hitSlopBoxAt: function(x, y)", html)
+        self.assertIn("document.querySelectorAll('.ocr-box')", html)
+        self.assertIn("window.hoshiManga.hitSlopBoxAt(x, y)", html)
+        self.assertIn("window.hoshiManga.clearRevealed();", html)
+        self.assertIn("} else {\n              window.hoshiManga.placeActions(box);", html)
+        self.assertIn("renderedBoxRect: function(box)", html)
+        self.assertIn("var renderedTop = box.offsetTop;", place_actions)
+        self.assertIn("var renderedBottom = box.offsetTop + boxHeight;", place_actions)
+        self.assertIn("var renderedRect = window.hoshiManga.renderedBoxRect(box);", place_actions)
+        self.assertIn("var aboveTop = renderedTop - actionsHeight - gap;", place_actions)
+        self.assertIn("var actionsWidth = actions.offsetWidth || 56;", place_actions)
+        self.assertIn("var actionsHeight = actions.offsetHeight || 26;", place_actions)
+        self.assertIn("var belowClearance = Math.max(gap + 6, Math.ceil(actionsHeight * 0.45));", place_actions)
+        self.assertIn("boxFontSize", place_actions)
+        self.assertIn("var belowTop = renderedBottom + belowClearance;", place_actions)
+        self.assertIn("function overlapsRenderedText(value)", place_actions)
+        self.assertIn("!overlapsRenderedText(clampedBelowTop)", place_actions)
+        self.assertIn("width: 26px;", html)
+        self.assertIn("height: 26px;", html)
+        self.assertIn("frameTop + top < minGlobalTop", place_actions)
+        self.assertIn("z-index: 30;", html)
+        self.assertIn("touch-action: manipulation;", html)
+        self.assertIn("left = Math.max(minLeft, Math.min(left, maxLeft));", place_actions)
+        self.assertIn("top = clampTop(top);", place_actions)
+        self.assertNotIn("document.documentElement.clientWidth", place_actions)
+        self.assertNotIn("window.innerWidth", place_actions)
+
+        if shutil.which("node") is None:
+            self.skipTest("node is required to execute the toolbar geometry regression")
+        js = textwrap.dedent(f"""
+            const placeActions = function(box) {{
+            {place_actions}
+            }};
+
+            function run(frameWidth, offsetLeft, boxWidth, boxHeight, offsetTop, frameHeight = 300, topInset = 0, textOverflow = 0) {{
+              const actions = {{
+                offsetWidth: 56,
+                offsetHeight: 26,
+                style: {{}},
+                dataset: {{}},
+                classList: {{ add: () => {{}} }},
+                setAttribute: () => {{}},
+                querySelector: () => null,
+              }};
+              const frame = {{
+                clientWidth: frameWidth,
+                clientHeight: frameHeight,
+                offsetTop: 0,
+                getBoundingClientRect: () => ({{
+                  left: 0,
+                  top: 0,
+                  right: frameWidth,
+                  bottom: frameHeight,
+                  width: frameWidth,
+                  height: frameHeight,
+                }}),
+                querySelector: (selector) => selector === '.ocr-actions' ? actions : null,
+              }};
+              global.window = {{
+                hoshiManga: {{
+                  hostOffsetTop: () => 0,
+                  hostTappableTopInset: () => topInset,
+                  hostScale: () => 1,
+                  renderedBoxRect: (box) => {{
+                    const rect = box.getBoundingClientRect();
+                    const textRect = box.querySelector('p').getBoundingClientRect();
+                    const left = Math.min(rect.left, textRect.left);
+                    const top = Math.min(rect.top, textRect.top);
+                    const right = Math.max(rect.right, textRect.right);
+                    const bottom = Math.max(rect.bottom, textRect.bottom);
+                    return {{
+                      left,
+                      top,
+                      right,
+                      bottom,
+                      width: right - left,
+                      height: bottom - top,
+                    }};
+                  }},
+                }},
+                getComputedStyle: () => ({{ fontSize: '20px' }}),
+              }};
+              const text = {{
+                textContent: 'probe',
+                getBoundingClientRect: () => ({{
+                  left: offsetLeft,
+                  top: offsetTop,
+                  right: offsetLeft + boxWidth,
+                  bottom: offsetTop + boxHeight + textOverflow,
+                  width: boxWidth,
+                  height: boxHeight + textOverflow,
+                }}),
+              }};
+              const box = {{
+                clientWidth: boxWidth,
+                clientHeight: boxHeight,
+                offsetLeft,
+                offsetTop,
+                classList: {{ contains: (name) => name === 'revealed' }},
+                getBoundingClientRect: () => ({{
+                  left: offsetLeft,
+                  top: offsetTop,
+                  right: offsetLeft + boxWidth,
+                  bottom: offsetTop + boxHeight,
+                  width: boxWidth,
+                  height: boxHeight,
+                }}),
+                querySelector: (selector) => selector === 'p' ? text : null,
+                closest: (selector) => selector === '.frame' ? frame : null,
+              }};
+              placeActions(box);
+              return {{
+                left: Number.parseInt(actions.style.left, 10),
+                top: Number.parseInt(actions.style.top, 10),
+              }};
+            }}
+
+            function assertInsideFrame(name, frameWidth, offsetLeft, boxWidth, expectedLeft) {{
+              const result = run(frameWidth, offsetLeft, boxWidth, 20, 80);
+              if (result.left !== expectedLeft) {{
+                throw new Error(`${{name}} expected left ${{expectedLeft}}, got ${{result.left}}`);
+              }}
+              const globalLeft = result.left;
+              const globalRight = globalLeft + 56;
+              if (globalLeft < 4 || globalRight > frameWidth - 4) {{
+                throw new Error(
+                  `${{name}} escaped frame: [${{globalLeft}}, ${{globalRight}}] in ${{frameWidth}}px frame`
+                );
+              }}
+            }}
+
+            assertInsideFrame('rightEdge', 300, 298, 1, 240);
+            assertInsideFrame('beyondRight', 300, 299, 1, 240);
+            const leftEdge = run(300, 0, 10, 20, 80);
+            if (leftEdge.left !== 4) {{
+              throw new Error(`left-edge clamp expected 4, got ${{leftEdge.left}}`);
+            }}
+            const normal = run(300, 120, 80, 20, 80);
+            if (normal.left !== 132) {{
+              throw new Error(`normal bubble expected 132, got ${{normal.left}}`);
+            }}
+            const topEdge = run(300, 120, 80, 20, 10);
+            if (topEdge.top !== 42) {{
+              throw new Error(`top-edge fallback expected 42, got ${{topEdge.top}}`);
+            }}
+            const overflowedText = run(300, 120, 80, 20, 10, 300, 0, 60);
+            if (overflowedText.top !== 102) {{
+              throw new Error(`overflowed text expected toolbar below rendered text at 102, got ${{overflowedText.top}}`);
+            }}
+            const veryTop = run(300, 120, 80, 20, 0, 300);
+            const globalTop = 0 + veryTop.top;
+            const globalBottom = globalTop + 26;
+            if (globalTop < 4 || globalBottom > 296) {{
+              throw new Error(`top-edge toolbar escaped tappable frame: [${{globalTop}}, ${{globalBottom}}]`);
+            }}
+            const underChrome = run(300, 120, 80, 20, 0, 300, 72);
+            if (underChrome.top < 76) {{
+              throw new Error(`top chrome inset expected toolbar below 76px, got ${{underChrome.top}}`);
+            }}
+            const underStackedChrome = run(300, 120, 80, 20, 0, 300, 140);
+            if (underStackedChrome.top < 144) {{
+              throw new Error(`stacked top chrome inset expected toolbar below 144px, got ${{underStackedChrome.top}}`);
+            }}
+        """)
+        subprocess.run(["node", "-e", js], check=True, capture_output=True, text=True)
+
     def test_manga_popup_and_crop_mapping_accounts_for_native_zoom_pan(self):
+        view = read("Features/MangaReader/MangaReaderView.swift")
         webview = read("Features/MangaReader/MangaReaderWebView.swift")
         html = read("Features/MangaReader/MangaPageHtml.swift")
         selection = read("Features/Reader/ReaderWebView/selection.js")
@@ -177,8 +741,11 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("syncHostViewport", webview)
         self.assertIn("contentOffset.x.isFinite", webview)
         self.assertIn("setHostViewport", webview)
-        self.assertIn("setHostViewport(\\(Double(scale)), \\(Double(offsetX)), \\(Double(offsetY)))", webview)
+        self.assertIn("setHostViewport(\\(Double(scale)), \\(Double(offsetX)), \\(Double(offsetY)), \\(Double(topInset)))", webview)
         self.assertNotIn("setHostViewport(\\(Double(scale)), \\(Double(offsetX)), \\(Double(offsetY))))", webview)
+        self.assertIn("tappableTopInset: mangaActionTopInset(for: geometry)", view)
+        self.assertIn("private func mangaActionTopInset(for geometry: GeometryProxy)", view)
+        self.assertIn("AiChatSettingsStore.shared.isConfigured ? 140 : 72", view)
         self.assertIn("private static func configureZoom(for scrollView: UIScrollView)", webview)
         self.assertIn("scrollView.pinchGestureRecognizer?.isEnabled = false", webview)
         self.assertIn("handlePinch", webview)
@@ -196,16 +763,26 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertNotIn("visualViewport.offsetLeft", html)
         self.assertIn("getPointSelectionRect", selection)
         self.assertIn("window.hoshiManga?.isHostZoomedOrPanned?.() && pointRect", selection)
+        self.assertIn("getMangaBoxAtPoint(x, y)", selection)
+        self.assertIn("getCharacterInContainerAtPoint(container, x, y)", selection)
+        self.assertIn("const mangaHit = this.getCharacterInContainerAtPoint(mangaBox, x, y);", selection)
+        self.assertIn("window.hoshiManga?.hitSlopBoxAt?.(x, y)", selection)
+        self.assertIn("rectDistance(rect, x, y)", selection)
 
     def test_zoom_ui_test_asserts_selection_probe_not_only_screenshot(self):
         view = read("Features/MangaReader/MangaReaderView.swift")
         ui_test = read("UITests/ZoomPopupUITests.swift")
+        html = read("Features/MangaReader/MangaPageHtml.swift")
+        webview = read("Features/MangaReader/MangaReaderWebView.swift")
 
         self.assertIn("HOSHI_UI_TESTING", view)
         self.assertIn("manga-selection-probe", view)
         self.assertIn("manga-crop-probe", view)
+        self.assertIn("manga-action-layout-probe", view)
+        self.assertIn("uiTestActionProbe", view)
         self.assertIn("uiTestProbeLabel(for: selection)", view)
         self.assertIn("uiTestCropProbeLabel(crop: crop, image: image)", view)
+        self.assertIn("uiTestActionLayoutProbeLabel", webview)
         self.assertIn("manga-options-menu", view)
         self.assertIn("controller.uiTestViewportProbeLabel()", view)
         self.assertIn("app.launchEnvironment[\"HOSHI_UI_TESTING\"] = \"1\"", ui_test)
@@ -219,6 +796,102 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("XCTAssertEqual(crop.page, 0", ui_test)
         self.assertIn("XCTAssertLessThanOrEqual(crop.left + crop.width, 1179", ui_test)
         self.assertIn("XCTAssertTrue(abs(crop.offsetX) > 1 || abs(crop.offsetY) > 1", ui_test)
+        self.assertIn("testUltraThinActionButtonsStayVisibleAndTappable", ui_test)
+        self.assertIn("parseActionProbe", ui_test)
+        self.assertIn("UI_THIN_RIGHT", ui_test)
+        self.assertIn("UI_THIN_TOP_RIGHT", ui_test)
+        self.assertIn("testLowerRevealedMangaTextCanBeSelected", ui_test)
+        self.assertIn("下段選択", ui_test)
+        self.assertIn("lowerProbe.textRect.y + lowerProbe.textRect.height * 0.75", ui_test)
+        self.assertIn('expected: "copy=UI_THIN_TOP_RIGHT"', ui_test)
+        self.assertIn("hitSlopPoint(for: box.frame, in: webView.frame)", ui_test)
+        self.assertIn("boxFrame.width < 8", ui_test)
+        self.assertIn("horizontalNudge = boxFrame.midX > webViewFrame.midX ? -6 : 6", ui_test)
+        self.assertIn("label CONTAINS %@ AND label CONTAINS %@", ui_test)
+        self.assertIn("Copy bubble text", ui_test)
+        self.assertIn("manga-copy-probe", view)
+        self.assertIn("uiTestCopyProbe = \"copy=\\(text)\"", view)
+        self.assertIn("waitForCopyProbe", ui_test)
+        self.assertIn("data-hoshi-ui-test", html)
+        self.assertIn('top: max(0, h / 8)', html)
+        self.assertIn("actionLayoutProbe", html)
+        self.assertIn("var actions = frame && frame.querySelector('.ocr-actions')", html)
+        self.assertIn("actions.dataset.bubbleText", html)
+        self.assertIn("hitSlopBoxAt", html)
+        self.assertIn("return this.revealedBoxAt(x, y, 12) ||", html)
+        self.assertIn("revealedBoxAt: function(x, y, slop)", html)
+        self.assertIn("boxFromHitSlop: function(boxes, x, y, fixedSlop)", html)
+        self.assertIn('"lower-select"', html)
+        self.assertIn('lines: ["上段", "下段選択"]', html)
+        self.assertIn("textRect: textRect", html)
+        self.assertIn("var textRect = text.getBoundingClientRect();", html)
+        self.assertIn("unionBottom", html)
+        self.assertIn("assertDoesNotOverlap", ui_test)
+        self.assertIn("ProbeError(\"Requires IDB Zoom Fixture seeded into the app container.\")", ui_test)
+        self.assertNotIn(".ocr-box.revealed .ocr-actions", html)
+        self.assertNotIn("word-break: break-all", html)
+        self.assertNotIn("overflow-wrap: anywhere", html)
+
+    def test_manga_ai_ui_test_stub_covers_second_tap_path(self):
+        controller = read("Features/AI/MangaAiController.swift")
+        view = read("Features/MangaReader/MangaReaderView.swift")
+        popup = read("Features/AI/MangaAiPopupView.swift")
+        ui_test = read("UITests/ZoomPopupUITests.swift")
+
+        self.assertIn("func resolveForUITest(bubbleText: String, book: BookMetadata)", controller)
+        hook_start = controller.index("func resolveForUITest(bubbleText: String, book: BookMetadata)")
+        hook_end = controller.index("func translateCrop")
+        self.assertIn("#if DEBUG", controller[max(0, hook_start - 240):hook_start])
+        self.assertIn("#endif", controller[hook_start:hook_end])
+        self.assertIn("HOSHI_UI_TESTING_AI_STUB", controller)
+        self.assertIn('let marker = trimmed.contains("二回目") ? "UI2OK" : "UI1OK"', controller)
+        self.assertIn("\\(marker) UITESTOK **bold** for \\(trimmed)", controller)
+        self.assertIn("| Term | Meaning |", controller)
+        self.assertIn("| test | Japanese |", controller)
+        self.assertIn("uiTestingAiStubEnabled", view)
+        stub_body = method_body(view, "private var uiTestingAiStubEnabled")
+        self.assertIn("#if DEBUG", stub_body)
+        self.assertIn("#else", stub_body)
+        self.assertIn("false", stub_body)
+        stub_call = view[view.index("} else if uiTestingAiStubEnabled"):view.index("} else {", view.index("} else if uiTestingAiStubEnabled"))]
+        self.assertIn("#if DEBUG", stub_call)
+        self.assertIn("#else", stub_call)
+        self.assertIn("aiController.ask(bubbleText: text, book: metadata)", stub_call)
+        self.assertIn("aiController.resolveForUITest(bubbleText: text, book: metadata)", view)
+        self.assertIn('accessibilityLabel("Close ChatGPT")', popup)
+        self.assertIn("testNearTopAiButtonRespondsAndSecondTapDoesNotCrash", ui_test)
+        self.assertIn('app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"', ui_test)
+        self.assertIn('app.buttons["Ask about this bubble"]', ui_test)
+        self.assertIn('"UI1OK"', ui_test)
+        self.assertIn('"UI2OK"', ui_test)
+        self.assertIn('"**bold**"', ui_test)
+        self.assertIn('"Meaning"', ui_test)
+        self.assertIn('"Japanese"', ui_test)
+        self.assertIn("XCTAssertEqual(app.state, .runningForeground)", ui_test)
+
+    def test_offline_settings_expose_private_thinking_toggle(self):
+        store = read("Features/AI/offline/OfflineTranslationSettingsStore.swift")
+        view = read("Features/AI/offline/OfflineTranslationSettingsView.swift")
+        self.assertIn("var usePrivateThinking: Bool", store)
+        self.assertIn("Keys.usePrivateThinking", store)
+        self.assertIn("offlineTranslation.usePrivateThinking", store)
+        self.assertIn("defaults.object(forKey: Keys.usePrivateThinking) as? Bool ?? true", store)
+        self.assertIn("static let responseTokenLimitOptions", store)
+        self.assertIn("10000", store)
+        self.assertIn("static let defaultResponseTokenLimit = 10000", store)
+        self.assertIn("var responseTokenLimit: Int", store)
+        self.assertIn("clampedResponseTokenLimit", store)
+        self.assertIn("responseTokenLimitOptions.min", store)
+        self.assertIn("abs(lhs - bounded) < abs(rhs - bounded)", store)
+        self.assertIn("offlineTranslation.responseTokenLimit", store)
+        self.assertIn('Toggle("Use private thinking"', view)
+        self.assertNotIn("responseTokenLimit = Self.clampedResponseTokenLimit(responseTokenLimit)", store)
+        self.assertIn("let responseTokenLimit = Binding<Int>", view)
+        self.assertIn("OfflineTranslationSettingsStore\n                    .clampedResponseTokenLimit($0)", view)
+        self.assertIn('Picker("Answer token limit"', view)
+        self.assertIn("selection: responseTokenLimit", view)
+        self.assertIn("responseTokenLimitOptions", view)
+        self.assertIn(".disabled(!settings.useOnDeviceTranslation)", view)
 
     def test_ipad_dictionary_popup_gets_taller_floor(self):
         popup = read("Features/Popup/PopupView.swift")

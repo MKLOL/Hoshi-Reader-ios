@@ -321,7 +321,7 @@
 				48568CD12F1EC9A400F9C126 /* XCLocalSwiftPackageReference "Libraries/EPUBKit" */,
 				48A18AB92F465F1F00AC8514 /* XCRemoteSwiftPackageReference "SwiftUI-Introspect" */,
 				48BC0BDD2F5C316B00EDAC3F /* XCRemoteSwiftPackageReference "hoshidicts" */,
-				D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM" */,
+				D11A0000000000000000AAAA /* XCLocalSwiftPackageReference "Libraries/LLM.swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 48107AAE2F114021009E12D1;
@@ -751,6 +751,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Libraries/EPUBKit;
 		};
+		D11A0000000000000000AAAA /* XCLocalSwiftPackageReference "Libraries/LLM.swift" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Libraries/LLM.swift;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -768,14 +772,6 @@
 			requirement = {
 				branch = main;
 				kind = branch;
-			};
-		};
-		D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/eastriverlee/LLM.swift";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.1.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -797,7 +793,6 @@
 		};
 		D11A0000000000000000BBBB /* LLM */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = D11A0000000000000000AAAA /* XCRemoteSwiftPackageReference "LLM" */;
 			productName = LLM;
 		};
 /* End XCSwiftPackageProductDependency section */

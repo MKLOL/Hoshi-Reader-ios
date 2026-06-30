@@ -143,13 +143,20 @@ nonisolated enum MangaPageHtml {
         let boxes = page.textBoxes
             .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight, readabilityFitScale: readabilityFitScale) }
             .joined(separator: "\n")
+        let uiTestBoxes = uiTestActionBoxesHtml(
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
+            readabilityFitScale: readabilityFitScale
+        )
         let imageSrc = escapeAttribute(encodeImagePath(page.imagePath))
         return """
           <div class="frame" style="width: \(frameWidthCss)px; height: \(frameHeightCss)px;" data-page-index="\(page.index)" data-image-width="\(imageWidth)" data-image-height="\(imageHeight)">
             <img class="page-image" src="\(imageSrc)" alt="">
             <div class="ocr-layer">
         \(boxes)
+        \(uiTestBoxes)
             </div>
+            \(actionButtonsHtml)
           </div>
         """
     }
@@ -219,12 +226,18 @@ nonisolated enum MangaPageHtml {
           -webkit-user-select: text;
           user-select: text;
         }
+        .ocr-box::before {
+          content: "";
+          position: absolute;
+          inset: -8px;
+        }
         .ocr-box.wrap {
           white-space: pre-wrap;
-          word-break: break-all;
-          overflow-wrap: anywhere;
+          word-break: normal;
+          overflow-wrap: break-word;
         }
         .ocr-box.revealed {
+          z-index: 30;
           color: #000;
           background: #fff;
           /* The readability zoom (see textBoxHtml) applies only once revealed; unrevealed
@@ -248,34 +261,31 @@ nonisolated enum MangaPageHtml {
         }
         .ocr-actions {
           display: none;
-          /* Absolutely positioned within its own bubble (an `position: absolute` box), so the
-             toolbar lives inside the zoomable page content and stays attached to the bubble when
-             the host zooms/pans. `position: fixed` pinned it to the visual viewport, so WebKit
-             detached it from the bubble under pinch-zoom. `writing-mode: horizontal-tb` keeps the
-             two controls side by side even inside a vertical-rl bubble; JS sets physical left/top
-             relative to the box's padding box, which is orientation-independent. */
+          /* One frame-level toolbar host, not a child of the OCR box. Ultra-thin OCR boxes can be
+             1-2 CSS px wide, so children positioned outside them can still get clipped or expose a
+             tiny hit target through WebKit accessibility. JS anchors this host near the active box. */
           position: absolute;
           left: 0;
           top: 0;
           margin: 0;
           writing-mode: horizontal-tb;
-          width: 52px;
-          height: 24px;
+          gap: 4px;
+          align-items: center;
           z-index: 50;
           overflow: visible;
+          pointer-events: auto;
+          touch-action: manipulation;
         }
-        .ocr-box.revealed .ocr-actions {
-          display: block;
+        .ocr-actions.is-visible {
+          display: flex;
         }
-        .ocr-copy-btn { position: absolute; top: 0; left: 0; }
-        .ocr-ai-btn { position: absolute; top: 0; left: 28px; }
         .ocr-action-btn {
           box-sizing: border-box;
-          /* Fixed, compact size (was 1.7em → ballooned into a big blob on boosted OCR fonts;
-             then 30px → too big on small bubbles). */
-          width: 24px;
-          height: 24px;
-          padding: 4px;
+          width: 26px;
+          height: 26px;
+          min-width: 26px;
+          min-height: 26px;
+          padding: 5px;
           display: flex;
           align-items: center;
           justify-content: center;
@@ -284,6 +294,8 @@ nonisolated enum MangaPageHtml {
           background: #1b1b1b;
           color: #fff;
           cursor: pointer;
+          pointer-events: auto;
+          touch-action: manipulation;
           -webkit-user-select: none;
           user-select: none;
         }
@@ -316,7 +328,8 @@ nonisolated enum MangaPageHtml {
         _ box: MokuroTextBox,
         imageWidth: Int,
         imageHeight: Int,
-        readabilityFitScale: Double
+        readabilityFitScale: Double,
+        extraAttributes: String = ""
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
         let topPct = percent(box.top, imageHeight)
@@ -351,19 +364,68 @@ nonisolated enum MangaPageHtml {
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
         let text = box.lines.map(escapeHtmlText).joined(separator: "\n")
         return """
-            <div class="ocr-box\(verticalClass)" role="button" tabindex="0" \
+            <div class="ocr-box\(verticalClass)" \(extraAttributes) role="button" tabindex="0" \
         aria-pressed="false" style="left: \(leftPct)%; top: \(topPct)%; \
         width: \(widthPct)%; height: \(heightPct)%; --hoshi-drawn-fs: \(drawnCqw)cqw; \
         --hoshi-reveal-fs: \(revealCqw)cqw;">\
-        <p>\(text)</p>\(actionButtonsHtml)</div>
+        <p>\(text)</p></div>
         """
     }
 
-    /// The action buttons baked into every box; CSS keeps them hidden until `.revealed`.
+    private static func uiTestActionBoxesHtml(
+        imageWidth: Int,
+        imageHeight: Int,
+        readabilityFitScale: Double
+    ) -> String {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1" else { return "" }
+        let w = max(imageWidth, 10)
+        let h = max(imageHeight, 10)
+        let boxes: [(String, MokuroTextBox)] = [
+            ("thin-right", MokuroTextBox(
+                left: max(0, w - 2), top: max(0, h / 2), width: 1, height: max(40, h / 28),
+                fontSize: 18, vertical: false, lines: ["UI_THIN_RIGHT doesn't split words"]
+            )),
+            ("thin-left", MokuroTextBox(
+                left: 0, top: max(0, h / 2 + h / 12), width: 1, height: max(40, h / 28),
+                fontSize: 18, vertical: false, lines: ["UI_THIN_LEFT copy target"]
+            )),
+            ("thin-top-right", MokuroTextBox(
+                left: max(0, w - 2), top: max(0, h / 8), width: 1, height: max(40, h / 32),
+                fontSize: 18, vertical: false, lines: ["UI_THIN_TOP_RIGHT"]
+            )),
+            ("thin-bottom-right", MokuroTextBox(
+                left: max(0, w - 2), top: max(0, h - max(50, h / 28)), width: 1, height: max(40, h / 28),
+                fontSize: 18, vertical: false, lines: ["UI_THIN_BOTTOM_RIGHT"]
+            )),
+            ("vertical-right", MokuroTextBox(
+                left: max(0, w - 4), top: max(0, h / 3), width: 2, height: max(80, h / 16),
+                fontSize: 18, vertical: true, lines: ["細"]
+            )),
+            ("lower-select", MokuroTextBox(
+                left: max(0, w / 3), top: max(0, h / 2 + h / 5), width: max(120, w / 8), height: max(12, h / 120),
+                fontSize: 8, vertical: false, lines: ["上段", "下段選択"]
+            ))
+        ]
+        return boxes.map { id, box in
+            textBoxHtml(
+                box,
+                imageWidth: imageWidth,
+                imageHeight: imageHeight,
+                readabilityFitScale: readabilityFitScale,
+                extraAttributes: "data-hoshi-ui-test=\"\(id)\""
+            )
+        }.joined(separator: "\n")
+        #else
+        return ""
+        #endif
+    }
+
+    /// The frame-level action buttons; CSS keeps the host hidden until JS anchors it to a revealed box.
     ///  - sparkles glyph → `window.webkit.messageHandlers.hoshiMangaAi`
     ///  - copy glyph → `window.webkit.messageHandlers.hoshiMangaClipboard`
     private static let actionButtonsHtml: String =
-        #"<div class="ocr-actions">"# +
+        #"<div class="ocr-actions" aria-hidden="true">"# +
         #"<button class="ocr-action-btn ocr-ai-btn" type="button" "# +
         #"aria-label="Ask about this bubble">"# +
         #"<svg viewBox="0 0 24 24" fill="currentColor">"# +
@@ -389,11 +451,12 @@ nonisolated enum MangaPageHtml {
         hostScaleValue: 1,
         hostOffsetLeftValue: 0,
         hostOffsetTopValue: 0,
+        hostTappableTopInsetValue: 0,
         singleTapLookupValue: false,
         setHostScale: function(scale) {
-          this.setHostViewport(scale, this.hostOffsetLeftValue, this.hostOffsetTopValue);
+          this.setHostViewport(scale, this.hostOffsetLeftValue, this.hostOffsetTopValue, this.hostTappableTopInsetValue);
         },
-        setHostViewport: function(scale, offsetLeft, offsetTop) {
+        setHostViewport: function(scale, offsetLeft, offsetTop, tappableTopInset) {
           this.hostScaleValue = (typeof scale === 'number' && isFinite(scale) && scale > 0)
             ? scale
             : 1;
@@ -402,6 +465,9 @@ nonisolated enum MangaPageHtml {
             : 0;
           this.hostOffsetTopValue = (typeof offsetTop === 'number' && isFinite(offsetTop))
             ? offsetTop
+            : 0;
+          this.hostTappableTopInsetValue = (typeof tappableTopInset === 'number' && isFinite(tappableTopInset))
+            ? Math.max(0, tappableTopInset)
             : 0;
         },
         setSingleTapLookup: function(enabled) {
@@ -418,6 +484,10 @@ nonisolated enum MangaPageHtml {
         hostOffsetTop: function() {
           var offset = this.hostOffsetTopValue;
           return isFinite(offset) ? offset : 0;
+        },
+        hostTappableTopInset: function() {
+          var inset = this.hostTappableTopInsetValue;
+          return isFinite(inset) && inset > 0 ? inset : 0;
         },
         isHostZoomedOrPanned: function() {
           return this.hostScale() > 1.01 ||
@@ -509,6 +579,12 @@ nonisolated enum MangaPageHtml {
             revealed[i].classList.remove('wrap');
             delete revealed[i].dataset.wrapTried;
           }
+          var hosts = document.querySelectorAll('.ocr-actions');
+          for (var h = 0; h < hosts.length; h++) {
+            hosts[h].classList.remove('is-visible');
+            hosts[h].setAttribute('aria-hidden', 'true');
+            delete hosts[h].dataset.bubbleText;
+          }
           if (window.hoshiSelection) {
             window.hoshiSelection.clearSelection();
           }
@@ -574,30 +650,157 @@ nonisolated enum MangaPageHtml {
             box.style.fontSize = originalInlineFontSize;
           }
         },
+        renderedBoxRect: function(box) {
+          var rect = box.getBoundingClientRect();
+          if (!box.classList.contains('revealed')) {
+            return rect;
+          }
+          var text = box.querySelector('p');
+          if (!text) {
+            return rect;
+          }
+          var textRect = text.getBoundingClientRect();
+          var unionLeft = Math.min(rect.left, textRect.left);
+          var unionTop = Math.min(rect.top, textRect.top);
+          var unionRight = Math.max(rect.right, textRect.right);
+          var unionBottom = Math.max(rect.bottom, textRect.bottom);
+          return {
+            x: unionLeft,
+            y: unionTop,
+            left: unionLeft,
+            top: unionTop,
+            right: unionRight,
+            bottom: unionBottom,
+            width: unionRight - unionLeft,
+            height: unionBottom - unionTop
+          };
+        },
         placeActions: function(box) {
-          var actions = box.querySelector('.ocr-actions');
+          var frame = box.closest('.frame');
+          var actions = frame && frame.querySelector('.ocr-actions');
           if (!actions) return;
-          // Position the toolbar relative to its OWN bubble (the `.ocr-actions` is an absolutely
-          // positioned child of the box), so it sits inside the zoomable page content and stays
-          // attached to the bubble when the host zooms/pans — instead of being pinned to the visual
-          // viewport. Physical left/top resolve against the box's padding box for both horizontal
-          // and vertical (writing-mode: vertical-rl) bubbles, so no viewport / host-scale math.
           var gap = 4;
-          var actionsWidth = actions.offsetWidth || 52;
-          var actionsHeight = actions.offsetHeight || 24;
+          actions.classList.add('is-visible');
+          actions.setAttribute('aria-hidden', 'false');
+          var bubbleText = box.querySelector('p');
+          actions.dataset.bubbleText = bubbleText ? (bubbleText.textContent || '') : '';
+          var aiButton = actions.querySelector('.ocr-ai-btn');
+          var copyButton = actions.querySelector('.ocr-copy-btn');
+          var uiTestSuffix = box.dataset && box.dataset.hoshiUiTest ? (' ' + actions.dataset.bubbleText) : '';
+          if (aiButton) {
+            aiButton.setAttribute('aria-label', 'Ask about this bubble' + uiTestSuffix);
+          }
+          if (copyButton) {
+            copyButton.setAttribute('aria-label', 'Copy bubble text' + uiTestSuffix);
+          }
+          var actionsWidth = actions.offsetWidth || 56;
+          var actionsHeight = actions.offsetHeight || 26;
           var boxWidth = box.clientWidth;
           var boxHeight = box.clientHeight;
-          // Default: just above the bubble, right-aligned to it.
-          var left = Math.max(0, boxWidth - actionsWidth);
+          // Position in frame-local coordinates so the toolbar is not clipped by an ultra-thin box.
+          var left = box.offsetLeft + (boxWidth / 2) - (actionsWidth / 2);
           var top = -actionsHeight - gap;
-          // If the bubble sits too close to the top of the frame to fit the toolbar above it,
-          // drop the toolbar below the bubble instead. `offsetTop` is the box's top within the
-          // ocr-layer (its positioned offset parent).
-          if (box.offsetTop + top < 0) {
-            top = boxHeight + gap;
+          if (frame) {
+            var minLeft = gap;
+            var maxLeft = frame.clientWidth - actionsWidth - gap;
+            if (isFinite(minLeft) && isFinite(maxLeft) && minLeft <= maxLeft) {
+              left = Math.max(minLeft, Math.min(left, maxLeft));
+            }
+            var minGlobalTop = gap;
+            var minTop = minGlobalTop;
+            var maxTop = frame.clientHeight - actionsHeight - gap;
+            var frameTop = frame.offsetTop || 0;
+            if (window.hoshiManga && window.hoshiManga.hostTappableTopInset) {
+              var hostMinTop = (
+                window.hoshiManga.hostOffsetTop() + window.hoshiManga.hostTappableTopInset()
+              ) / window.hoshiManga.hostScale();
+              if (isFinite(hostMinTop)) {
+                minGlobalTop = Math.max(minGlobalTop, hostMinTop + gap);
+                minTop = minGlobalTop - frameTop;
+              }
+            }
+            var belowClearance = Math.max(gap + 6, Math.ceil(actionsHeight * 0.45));
+            var renderedTop = box.offsetTop;
+            var renderedBottom = box.offsetTop + boxHeight;
+            if (window.getComputedStyle) {
+              var boxStyle = window.getComputedStyle(box);
+              var boxFontSize = boxStyle ? parseFloat(boxStyle.fontSize) : NaN;
+              if (isFinite(boxFontSize)) {
+                belowClearance = Math.max(belowClearance, Math.ceil(boxFontSize * 0.35));
+              }
+            }
+            if (window.hoshiManga && window.hoshiManga.renderedBoxRect &&
+                frame.getBoundingClientRect) {
+              var frameRect = frame.getBoundingClientRect();
+              var renderedRect = window.hoshiManga.renderedBoxRect(box);
+              if (frameRect && renderedRect && isFinite(renderedRect.top) && isFinite(renderedRect.bottom)) {
+                renderedTop = renderedRect.top - frameRect.top;
+                renderedBottom = renderedRect.bottom - frameRect.top;
+              }
+            }
+            var aboveTop = renderedTop - actionsHeight - gap;
+            var belowTop = renderedBottom + belowClearance;
+            function clampTop(value) {
+              if (isFinite(minTop) && isFinite(maxTop) && minTop <= maxTop) {
+                return Math.max(minTop, Math.min(value, maxTop));
+              }
+              return value;
+            }
+            function overlapsRenderedText(value) {
+              return value < renderedBottom + gap && value + actionsHeight > renderedTop - gap;
+            }
+            var clampedAboveTop = clampTop(aboveTop);
+            var clampedBelowTop = clampTop(belowTop);
+            var aboveFits = frameTop + aboveTop >= minGlobalTop && aboveTop >= minTop &&
+              !overlapsRenderedText(clampedAboveTop);
+            var belowFits = belowTop >= minTop && belowTop <= maxTop &&
+              !overlapsRenderedText(clampedBelowTop);
+            top = aboveFits ? clampedAboveTop : clampedBelowTop;
+            if (!aboveFits && !belowFits && !overlapsRenderedText(clampedAboveTop)) {
+              top = clampedAboveTop;
+            }
+            if (frameTop + top < minGlobalTop) {
+              top = minGlobalTop - frameTop;
+            }
+            top = clampTop(top);
           }
           actions.style.left = Math.round(left) + 'px';
           actions.style.top = Math.round(top) + 'px';
+        },
+        actionLayoutProbe: function() {
+          var boxes = document.querySelectorAll('.ocr-box[data-hoshi-ui-test]');
+          var results = [];
+          for (var i = 0; i < boxes.length; i++) {
+            var box = boxes[i];
+            this.clearRevealed();
+            box.classList.add('revealed');
+            this.tryWrapFallback(box);
+            box.setAttribute('aria-pressed', 'true');
+            this.placeActions(box);
+            var frame = box.closest('.frame');
+            var actions = frame && frame.querySelector('.ocr-actions');
+            var ai = actions && actions.querySelector('.ocr-ai-btn');
+            var copy = actions && actions.querySelector('.ocr-copy-btn');
+            function rectFor(element) {
+              if (!element) return null;
+              var rect = element.getBoundingClientRect();
+              return window.hoshiManga.hostRectFromViewportRect(rect);
+            }
+            var aiRect = rectFor(ai);
+            var copyRect = rectFor(copy);
+            var text = box.querySelector('p');
+            var textRect = rectFor(text);
+            results.push({
+              id: box.dataset.hoshiUiTest || '',
+              text: text ? (text.textContent || '') : '',
+              textRect: textRect,
+              ai: aiRect,
+              copy: copyRect,
+              topInset: this.hostTappableTopInset()
+            });
+          }
+          this.clearRevealed();
+          return results;
         },
         installTapListener: function(maxLength) {
           if (this.tapListenerInstalled) return;
@@ -614,37 +817,73 @@ nonisolated enum MangaPageHtml {
             }
           }, true);
         },
+        hitSlopBoxAt: function(x, y) {
+          return this.revealedBoxAt(x, y, 12) ||
+            this.boxFromHitSlop(document.querySelectorAll('.ocr-box'), x, y);
+        },
+        revealedBoxAt: function(x, y, slop) {
+          var revealed = document.querySelectorAll('.ocr-box.revealed');
+          return this.boxFromHitSlop(revealed, x, y, slop || 0);
+        },
+        boxFromHitSlop: function(boxes, x, y, fixedSlop) {
+          var best = null;
+          var bestArea = Infinity;
+          for (var i = 0; i < boxes.length; i++) {
+            var box = boxes[i];
+            var rect = this.renderedBoxRect(box);
+            var slop = typeof fixedSlop === 'number'
+              ? fixedSlop
+              : (box.classList.contains('revealed') ? 12 : 8);
+            var left = rect.left - slop;
+            var right = rect.right + slop;
+            var top = rect.top - slop;
+            var bottom = rect.bottom + slop;
+            if (x < left || x > right || y < top || y > bottom) continue;
+            var area = Math.max(1, rect.width) * Math.max(1, rect.height);
+            if (area < bestArea) {
+              best = box;
+              bestArea = area;
+            }
+          }
+          return best;
+        },
         handleTap: function(x, y, maxLength) {
           var el = document.elementFromPoint(x, y);
           var aiBtn = el && el.closest && el.closest('.ocr-ai-btn');
           if (aiBtn) {
-            var aiBox = aiBtn.closest('.ocr-box');
-            var aiText = aiBox && aiBox.querySelector('p');
+            var aiActions = aiBtn.closest('.ocr-actions');
+            var aiText = aiActions && aiActions.dataset ? aiActions.dataset.bubbleText : '';
             var h = handlers();
             if (aiText && h && h.hoshiMangaAi) {
-              h.hoshiMangaAi.postMessage({ text: aiText.textContent || '' });
+              h.hoshiMangaAi.postMessage({ text: aiText });
             }
             return '__ai__';
           }
           var copyBtn = el && el.closest && el.closest('.ocr-copy-btn');
           if (copyBtn) {
-            var copyBox = copyBtn.closest('.ocr-box');
-            var copyText = copyBox && copyBox.querySelector('p');
+            var copyActions = copyBtn.closest('.ocr-actions');
+            var copyText = copyActions && copyActions.dataset ? copyActions.dataset.bubbleText : '';
             var hc = handlers();
             if (copyText && hc && hc.hoshiMangaClipboard) {
-              hc.hoshiMangaClipboard.postMessage({ text: copyText.textContent || '' });
+              hc.hoshiMangaClipboard.postMessage({ text: copyText });
             }
             return '__copied__';
           }
-          var box = el && el.closest && el.closest('.ocr-box');
+          var directBox = el && el.closest && el.closest('.ocr-box');
+          var box = window.hoshiManga.revealedBoxAt(x, y) ||
+            directBox ||
+            window.hoshiManga.hitSlopBoxAt(x, y);
           if (box) {
             var alreadyRevealed = box.classList.contains('revealed');
             if (!alreadyRevealed) {
+              window.hoshiManga.clearRevealed();
               // Reveal BEFORE the wrap fallback: the fallback fits from the computed
               // font-size, which only becomes the boosted reveal size once .revealed applies.
               box.classList.add('revealed');
               window.hoshiManga.tryWrapFallback(box);
               box.setAttribute('aria-pressed', 'true');
+              window.hoshiManga.placeActions(box);
+            } else {
               window.hoshiManga.placeActions(box);
             }
             if (alreadyRevealed || window.hoshiManga.singleTapLookupValue) {

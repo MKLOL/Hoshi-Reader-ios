@@ -112,7 +112,7 @@ struct AudioView: View {
     }
     
     private let audioDbURL: URL = {
-        let docs = try! BookStorage.getAppDirectory()
+        let docs = (try? BookStorage.getAppDirectory()) ?? FileManager.default.temporaryDirectory
         return docs.appendingPathComponent(LocalFileServer.localAudioPath)
     }()
     

@@ -69,7 +69,8 @@ class BookshelfViewModel {
     }
     
     func saveShelves() {
-        try? BookStorage.save(shelves, inside: try! BookStorage.getBooksDirectory(), as: FileNames.shelves)
+        guard let booksDirectory = try? BookStorage.getBooksDirectory() else { return }
+        try? BookStorage.save(shelves, inside: booksDirectory, as: FileNames.shelves)
     }
     
     func createShelf(name: String) {
@@ -401,7 +402,7 @@ class BookshelfViewModel {
     
     func markRead(book: BookMetadata) {
         guard let bookFolder = book.folder else { return }
-        let directory = try! BookStorage.getBooksDirectory()
+        guard let directory = try? BookStorage.getBooksDirectory() else { return }
         let url = directory.appendingPathComponent(bookFolder)
         guard let bookInfo = BookStorage.loadBookInfo(root: url) else { return }
         
