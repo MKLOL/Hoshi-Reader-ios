@@ -235,7 +235,7 @@ nonisolated enum MangaPageHtml {
         .ocr-box::before {
           content: "";
           position: absolute;
-          inset: -8px;
+          inset: -20px;
         }
         .ocr-box.wrap {
           white-space: pre-wrap;
@@ -923,6 +923,7 @@ nonisolated enum MangaPageHtml {
             }
             var aiRect = rectFor(ai);
             var copyRect = rectFor(copy);
+            var boxRect = hostRect(box.getBoundingClientRect());
             var text = box.querySelector('p');
             var textRects = [];
             var rawTextRects = window.hoshiManga.renderedTextRects(box);
@@ -934,6 +935,7 @@ nonisolated enum MangaPageHtml {
             results.push({
               id: box.dataset.hoshiUiTest || '',
               text: text ? (text.textContent || '') : '',
+              box: boxRect,
               textRect: textRect,
               textRects: textRects,
               ai: aiRect,
@@ -948,16 +950,65 @@ nonisolated enum MangaPageHtml {
         installTapListener: function(maxLength) {
           if (this.tapListenerInstalled) return;
           this.tapListenerInstalled = true;
-          document.addEventListener('click', function(event) {
+          var touchStart = null;
+          var lastHandledTouchAt = 0;
+          function dispatchTap(x, y, event) {
             if (!window.hoshiManga) return;
-            event.preventDefault();
-            var result = window.hoshiManga.handleTap(event.clientX, event.clientY, maxLength);
+            if (event) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+            var result = window.hoshiManga.handleTap(x, y, maxLength);
             if (result === null || typeof result === 'undefined') {
               var h = handlers();
               if (h && h.hoshiManga) {
                 h.hoshiManga.postMessage({ event: 'selectedNothing' });
               }
             }
+          }
+          document.addEventListener('touchstart', function(event) {
+            if (!event.touches || event.touches.length !== 1) {
+              touchStart = null;
+              return;
+            }
+            var touch = event.touches[0];
+            touchStart = {
+              x: touch.clientX,
+              y: touch.clientY,
+              time: Date.now()
+            };
+          }, { capture: true, passive: true });
+          document.addEventListener('touchend', function(event) {
+            if (!touchStart || !event.changedTouches || event.changedTouches.length !== 1) {
+              touchStart = null;
+              return;
+            }
+            if (event.touches && event.touches.length > 0) {
+              touchStart = null;
+              return;
+            }
+            var touch = event.changedTouches[0];
+            var dx = touch.clientX - touchStart.x;
+            var dy = touch.clientY - touchStart.y;
+            var distance = Math.sqrt(dx * dx + dy * dy);
+            var elapsed = Date.now() - touchStart.time;
+            touchStart = null;
+            if (distance > 14 || elapsed > 900) {
+              return;
+            }
+            lastHandledTouchAt = Date.now();
+            dispatchTap(touch.clientX, touch.clientY, event);
+          }, { capture: true, passive: false });
+          document.addEventListener('touchcancel', function() {
+            touchStart = null;
+          }, { capture: true, passive: true });
+          document.addEventListener('click', function(event) {
+            if (Date.now() - lastHandledTouchAt < 700) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            dispatchTap(event.clientX, event.clientY, event);
           }, true);
         },
         hitSlopBoxAt: function(x, y) {
@@ -977,6 +1028,9 @@ nonisolated enum MangaPageHtml {
             var slop = typeof fixedSlop === 'number'
               ? fixedSlop
               : (box.classList.contains('revealed') ? 12 : 8);
+            if (rect.width < 10 || rect.height < 10) {
+              slop = Math.max(slop, 20);
+            }
             var left = rect.left - slop;
             var right = rect.right + slop;
             var top = rect.top - slop;
@@ -1000,6 +1054,7 @@ nonisolated enum MangaPageHtml {
             if (aiText && h && h.hoshiMangaAi) {
               h.hoshiMangaAi.postMessage({ text: aiText });
             }
+            window.hoshiManga.clearRevealed();
             return '__ai__';
           }
           var copyBtn = el && el.closest && el.closest('.ocr-copy-btn');
@@ -1010,12 +1065,13 @@ nonisolated enum MangaPageHtml {
             if (copyText && hc && hc.hoshiMangaClipboard) {
               hc.hoshiMangaClipboard.postMessage({ text: copyText });
             }
+            window.hoshiManga.clearRevealed();
             return '__copied__';
           }
           var directBox = el && el.closest && el.closest('.ocr-box');
           var box = window.hoshiManga.revealedBoxAt(x, y) ||
-            directBox ||
-            window.hoshiManga.hitSlopBoxAt(x, y);
+            window.hoshiManga.hitSlopBoxAt(x, y) ||
+            directBox;
           if (box) {
             var alreadyRevealed = box.classList.contains('revealed');
             if (!alreadyRevealed) {

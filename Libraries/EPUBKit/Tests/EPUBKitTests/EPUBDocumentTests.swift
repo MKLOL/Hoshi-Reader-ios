@@ -163,7 +163,8 @@ struct EPUBDocumentTests {
                 metadata: document.metadata,
                 manifest: document.manifest,
                 spine: document.spine,
-                tableOfContents: document.tableOfContents
+                tableOfContents: document.tableOfContents,
+                guide: document.guide
             )
             
             #expect(directDocument.title == document.title)

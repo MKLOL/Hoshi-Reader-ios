@@ -415,7 +415,7 @@ struct MangaAiPopupView: View {
                 index += 1
                 continue
             }
-            if index + 1 < lines.count, isTableSeparator(lines[index + 1]) {
+            if index + 1 < lines.count, isTableSeparator(lines[index + 1], header: line) {
                 var rows = [parseTableRow(line)]
                 index += 2
                 while index < lines.count, lines[index].contains("|"), !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
@@ -440,10 +440,12 @@ struct MangaAiPopupView: View {
         return parts
     }
 
-    private static func isTableSeparator(_ line: String) -> Bool {
-        let cells = parseTableRow(line)
-        guard !cells.isEmpty else { return false }
-        return cells.allSatisfy { cell in
+    private static func isTableSeparator(_ line: String, header: String) -> Bool {
+        guard line.contains("|"), header.contains("|") else { return false }
+        let headerCells = parseTableRow(header)
+        let separatorCells = parseTableRow(line)
+        guard headerCells.count >= 2, separatorCells.count == headerCells.count else { return false }
+        return separatorCells.allSatisfy { cell in
             let trimmed = cell.trimmingCharacters(in: .whitespaces)
             let hyphenCount = trimmed.filter { $0 == "-" }.count
             return hyphenCount >= 3 && trimmed.allSatisfy { $0 == "-" || $0 == ":" || $0.isWhitespace }

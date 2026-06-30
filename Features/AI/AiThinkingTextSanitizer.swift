@@ -38,6 +38,28 @@ nonisolated enum AiThinkingTextSanitizer {
         "lets check",
         "looking at the"
     ]
+    private static let reasoningOnlyNeedles = [
+        "analyz",
+        "breakdown",
+        "bubble",
+        "comma placement",
+        "context",
+        "determine",
+        "grammar",
+        "hiragana",
+        "inspect",
+        "japanese",
+        "kanji",
+        "literal",
+        "meaning",
+        "natural translation",
+        "particle",
+        "punctuation",
+        "reading",
+        "romaji",
+        "sentence",
+        "translation"
+    ]
 
     static func strip(_ raw: String) -> String {
         var text = raw
@@ -79,7 +101,7 @@ nonisolated enum AiThinkingTextSanitizer {
                 return tail
             }
         }
-        return ""
+        return looksLikeReasoningOnly(text) ? "" : text
     }
 
     private static func answerAfterVisibleScaffold(in text: String) -> String? {
@@ -194,6 +216,11 @@ nonisolated enum AiThinkingTextSanitizer {
             .replacingOccurrences(of: "Draft Translation:", with: "Translation:", options: [.caseInsensitive])
             .replacingOccurrences(of: "**Draft Translation:**", with: "Translation:", options: [.caseInsensitive])
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func looksLikeReasoningOnly(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return reasoningOnlyNeedles.contains { lower.contains($0) }
     }
 
     private static func firstRange(

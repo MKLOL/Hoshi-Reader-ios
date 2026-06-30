@@ -38,22 +38,42 @@ final class ZoomPopupUITests: XCTestCase {
             }
         }
 
-        try tapActionButton(app: app, textContains: "UI_THIN_RIGHT", accessibilityLabel: "Ask about this bubble")
+        try tapActionButton(
+            app: app,
+            textContains: "UI_THIN_RIGHT",
+            accessibilityLabel: "Ask about this bubble",
+            probe: actionProbe(probes, containing: "UI_THIN_RIGHT")
+        )
         let thinAnswer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch
         XCTAssertTrue(thinAnswer.waitForExistence(timeout: 3))
         dismissAiPopup(app)
 
-        try tapActionButton(app: app, textContains: "UI_THIN_TOP_RIGHT", accessibilityLabel: "Ask about this bubble")
+        try tapActionButton(
+            app: app,
+            textContains: "UI_THIN_TOP_RIGHT",
+            accessibilityLabel: "Ask about this bubble",
+            probe: actionProbe(probes, containing: "UI_THIN_TOP_RIGHT")
+        )
         let topAnswer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch
         XCTAssertTrue(topAnswer.waitForExistence(timeout: 3))
         dismissAiPopup(app)
 
-        try tapActionButton(app: app, textContains: "UI_THIN_LEFT", accessibilityLabel: "Copy bubble text")
+        try tapActionButton(
+            app: app,
+            textContains: "UI_THIN_LEFT",
+            accessibilityLabel: "Copy bubble text",
+            probe: actionProbe(probes, containing: "UI_THIN_LEFT")
+        )
         let copyProbe = app.descendants(matching: .any)["manga-copy-probe"].firstMatch
         XCTAssertTrue(copyProbe.waitForExistence(timeout: 3))
         XCTAssertTrue(waitForCopyProbe(copyProbe, expected: "copy=UI_THIN_LEFT copy target", timeout: 3), copyProbe.label)
 
-        try tapActionButton(app: app, textContains: "UI_THIN_TOP_RIGHT", accessibilityLabel: "Copy bubble text")
+        try tapActionButton(
+            app: app,
+            textContains: "UI_THIN_TOP_RIGHT",
+            accessibilityLabel: "Copy bubble text",
+            probe: actionProbe(probes, containing: "UI_THIN_TOP_RIGHT")
+        )
         XCTAssertTrue(waitForCopyProbe(copyProbe, expected: "copy=UI_THIN_TOP_RIGHT", timeout: 3), copyProbe.label)
     }
 
@@ -241,20 +261,40 @@ final class ZoomPopupUITests: XCTestCase {
         tapAiButton(app: app, boxFrame: box.frame)
     }
 
-    private func tapActionButton(app: XCUIApplication, textContains: String, accessibilityLabel: String) throws {
+    private func tapActionButton(
+        app: XCUIApplication,
+        textContains: String,
+        accessibilityLabel: String,
+        probe: ActionProbe? = nil
+    ) throws {
         let box = app.switches.matching(NSPredicate(format: "label CONTAINS %@", textContains)).firstMatch
         XCTAssertTrue(box.waitForExistence(timeout: 5))
         let webView = app.webViews.firstMatch
         XCTAssertTrue(webView.waitForExistence(timeout: 3))
-        let tapPoint = hitSlopPoint(for: box.frame, in: webView.frame)
+        let boxFrame = probe?.box.screenRect(in: webView.frame) ?? box.frame
+        let tapPoint = hitSlopPoint(for: boxFrame, in: webView.frame)
         app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: tapPoint.x, dy: tapPoint.y))
             .tap()
 
+        if let probe {
+            let actionRect = accessibilityLabel.contains("Copy") ? probe.copy : probe.ai
+            let actionFrame = actionRect.screenRect(in: webView.frame)
+            let actionPoint = CGPoint(x: actionFrame.midX, y: actionFrame.midY)
+            app.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: actionPoint.x, dy: actionPoint.y))
+                .tap()
+            return
+        }
+
         let button = app.buttons.matching(
             NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", accessibilityLabel, textContains)
         ).firstMatch
-        XCTAssertTrue(button.waitForExistence(timeout: 3))
+        let didFindButton = button.waitForExistence(timeout: 3)
+        XCTAssertTrue(
+            didFindButton,
+            "\(accessibilityLabel) for \(textContains) not found; tap=\(tapPoint), boxFrame=\(boxFrame), probe=\(String(describing: probe))"
+        )
         XCTAssertTrue(button.isHittable, "\(accessibilityLabel) is not hittable for \(textContains), frame=\(button.frame)")
         button.tap()
     }
@@ -305,6 +345,12 @@ final class ZoomPopupUITests: XCTestCase {
     }
 
     private func dismissAiPopup(_ app: XCUIApplication) {
+        let close = app.buttons["Close ChatGPT"].firstMatch
+        if close.waitForExistence(timeout: 1) {
+            close.tap()
+            XCTAssertTrue(close.waitForNonExistence(timeout: 3))
+            return
+        }
         app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: 20, dy: app.frame.midY))
             .tap()
@@ -379,6 +425,13 @@ final class ZoomPopupUITests: XCTestCase {
         } catch {
             throw ProbeError("Malformed action probe: \(label), error=\(error)")
         }
+    }
+
+    private func actionProbe(_ probes: [ActionProbe], containing text: String) throws -> ActionProbe {
+        guard let probe = probes.first(where: { $0.text.contains(text) }) else {
+            throw ProbeError("Missing action probe containing \(text)")
+        }
+        return probe
     }
 
     private func assertVisible(_ rect: ActionRect, id: String, webViewFrame: CGRect, topInset: Double) {
@@ -536,6 +589,7 @@ final class ZoomPopupUITests: XCTestCase {
     private struct ActionProbe: Decodable {
         let id: String
         let text: String
+        let box: ActionRect
         let textRect: ActionRect
         let textRects: [ActionRect]
         let ai: ActionRect
@@ -549,5 +603,14 @@ final class ZoomPopupUITests: XCTestCase {
         let y: Double
         let width: Double
         let height: Double
+
+        func screenRect(in webViewFrame: CGRect) -> CGRect {
+            CGRect(
+                x: webViewFrame.minX + x,
+                y: webViewFrame.minY + y,
+                width: width,
+                height: height
+            )
+        }
     }
 }

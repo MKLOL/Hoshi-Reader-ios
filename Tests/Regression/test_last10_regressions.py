@@ -237,7 +237,9 @@ precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
         self.assertIn("Grid(alignment: .topLeading", popup)
         self.assertIn("GridRow", popup)
         self.assertIn(".gridCellColumns(columnCount)", popup)
-        self.assertIn("private static func isTableSeparator", popup)
+        self.assertIn("private static func isTableSeparator(_ line: String, header: String)", popup)
+        self.assertIn('guard line.contains("|"), header.contains("|") else { return false }', popup)
+        self.assertIn("guard headerCells.count >= 2, separatorCells.count == headerCells.count else { return false }", popup)
         self.assertIn("AttributedString(attributed[index..<next])", popup)
         swift = shutil.which("swift")
         if swift is not None:
@@ -294,6 +296,26 @@ assertEqual(
     AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, what is this?"),
     "Wait, what is this?",
     "valid wait final after FINAL marker"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, let's check the map."),
+    "Wait, let's check the map.",
+    "valid wait lets-check translation"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Let's check this out."),
+    "Let's check this out.",
+    "valid lets-check translation"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, let's check the comma placement."),
+    "",
+    "comma placement reasoning is hidden"
+)
+assertEqual(
+    AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, looking at the comma placement."),
+    "",
+    "looking-at comma reasoning is hidden"
 )
 assertEqual(
     AiThinkingTextSanitizer.stripUntaggedReasoning("Wait, let's check the comma placement.\n\nTranslation: Wait, what is this?"),
@@ -565,11 +587,12 @@ assertEqual(
         self.assertIn("minGlobalTop = Math.max(minGlobalTop, hostMinTop + gap);", place_actions)
         self.assertIn("hostTappableTopInset", html)
         self.assertIn(".ocr-box::before", html)
-        self.assertIn("inset: -8px;", html)
+        self.assertIn("inset: -20px;", html)
         self.assertIn("hitSlopBoxAt: function(x, y)", html)
         self.assertIn("document.querySelectorAll('.ocr-box')", html)
         self.assertIn("window.hoshiManga.hitSlopBoxAt(x, y)", html)
         self.assertIn("window.hoshiManga.clearRevealed();", html)
+        self.assertGreaterEqual(html.count("window.hoshiManga.clearRevealed();"), 4)
         self.assertIn("} else {\n              window.hoshiManga.placeActions(box);", html)
         self.assertIn("renderedBoxRect: function(box)", html)
         self.assertIn("var renderedTop = box.offsetTop;", place_actions)
@@ -831,7 +854,12 @@ assertEqual(
         self.assertIn("下段選択", ui_test)
         self.assertIn("lowerProbe.textRect.y + lowerProbe.textRect.height * 0.75", ui_test)
         self.assertIn('expected: "copy=UI_THIN_TOP_RIGHT"', ui_test)
-        self.assertIn("hitSlopPoint(for: box.frame, in: webView.frame)", ui_test)
+        self.assertIn("hitSlopPoint(for: boxFrame, in: webView.frame)", ui_test)
+        self.assertIn("probe?.box.screenRect(in: webView.frame) ?? box.frame", ui_test)
+        self.assertIn('let actionRect = accessibilityLabel.contains("Copy") ? probe.copy : probe.ai', ui_test)
+        self.assertIn("let actionFrame = actionRect.screenRect(in: webView.frame)", ui_test)
+        self.assertIn("let actionPoint = CGPoint(x: actionFrame.midX, y: actionFrame.midY)", ui_test)
+        self.assertIn("func actionProbe(_ probes: [ActionProbe], containing text: String)", ui_test)
         self.assertIn("boxFrame.width < 8", ui_test)
         self.assertIn("horizontalNudge = boxFrame.midX > webViewFrame.midX ? -6 : 6", ui_test)
         self.assertIn("label CONTAINS %@ AND label CONTAINS %@", ui_test)
@@ -846,13 +874,20 @@ assertEqual(
         self.assertIn("actionLayoutProbe", html)
         self.assertIn("var actions = frame && frame.querySelector('.ocr-actions')", html)
         self.assertIn("actions.dataset.bubbleText", html)
+        self.assertIn("document.addEventListener('touchend'", html)
+        self.assertIn("lastHandledTouchAt", html)
+        self.assertIn("distance > 14 || elapsed > 900", html)
         self.assertIn("hitSlopBoxAt", html)
         self.assertIn("return this.revealedBoxAt(x, y, 12) ||", html)
+        self.assertIn("window.hoshiManga.revealedBoxAt(x, y) ||\n            window.hoshiManga.hitSlopBoxAt(x, y) ||\n            directBox", html)
         self.assertIn("revealedBoxAt: function(x, y, slop)", html)
         self.assertIn("boxFromHitSlop: function(boxes, x, y, fixedSlop)", html)
         self.assertIn('"lower-select"', html)
         self.assertIn('lines: ["上段", "下段選択"]', html)
         self.assertIn("textRect: textRect", html)
+        self.assertIn("box: boxRect", html)
+        self.assertIn("if (rect.width < 10 || rect.height < 10)", html)
+        self.assertIn("slop = Math.max(slop, 20);", html)
         self.assertIn("var textRect = hostRect(window.hoshiManga.renderedBoxRect(box));", html)
         self.assertIn("placement: actions && actions.dataset", html)
         self.assertIn("unionBottom", html)
@@ -861,6 +896,8 @@ assertEqual(
         self.assertNotIn("assertDoesNotOverlap(probe.ai, probe.textRect", ui_test)
         self.assertNotIn("assertDoesNotOverlap(probe.copy, probe.textRect", ui_test)
         self.assertIn('let placement: String', ui_test)
+        self.assertIn('let box: ActionRect', ui_test)
+        self.assertIn("func screenRect(in webViewFrame: CGRect) -> CGRect", ui_test)
         self.assertIn('probe.placement == "below"', ui_test)
         self.assertIn("ProbeError(\"Requires IDB Zoom Fixture seeded into the app container.\")", ui_test)
         self.assertNotIn(".ocr-box.revealed .ocr-actions", html)
