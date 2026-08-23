@@ -25,6 +25,44 @@
 
 import Foundation
 
+/// Serializes sync requests from every `HttpSyncKvClient` in this process. The production sync
+/// endpoint is bearer-authenticated but currently also passes through a 500-request/minute global
+/// web limit. A full first sync can contain thousands of small bookmark/chat keys, so firing them
+/// as fast as URLSession can complete guarantees an HTTP 429 partway through the run.
+///
+/// 150 ms keeps the app below 400 requests/minute, leaving room for an occasional browser request
+/// or an in-flight reader push. This is deliberately process-wide: per-client gates would still
+/// race when a manual sync and a page-turn push overlap.
+private actor HttpSyncRequestGate {
+    private let minimumInterval: TimeInterval
+    private var nextRequestAt = Date.distantPast
+    private var blockedUntil = Date.distantPast
+
+    init(minimumInterval: TimeInterval) {
+        self.minimumInterval = minimumInterval
+    }
+
+    func wait() async throws {
+        // Reserve the slot BEFORE suspending. Actors are re-entrant across `await`; updating after
+        // sleep would let several concurrent callers wake together and burst past the server cap.
+        let now = Date()
+        let scheduledAt = max(now, nextRequestAt, blockedUntil)
+        nextRequestAt = scheduledAt.addingTimeInterval(minimumInterval)
+        let delay = scheduledAt.timeIntervalSince(now)
+        if delay > 0 {
+            try await Task.sleep(for: .seconds(delay))
+        }
+    }
+
+    /// Applies a server-requested cooldown to every sync caller, not just the request that saw the
+    /// 429. Existing future reservations are moved behind the same deadline.
+    func imposeCooldown(seconds: TimeInterval) {
+        let deadline = Date().addingTimeInterval(seconds)
+        if deadline > blockedUntil { blockedUntil = deadline }
+        if deadline > nextRequestAt { nextRequestAt = deadline }
+    }
+}
+
 // MARK: - Fetched body + headers
 
 /// Body + server headers from a successful `GET /v1/kv/{key}`.
@@ -114,6 +152,8 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     private static let jsonDecoder = JSONDecoder()
     private static let jsonEncoder = JSONEncoder()
+    private static let requestGate = HttpSyncRequestGate(minimumInterval: 0.150)
+    private static let maxRateLimitRetries = 5
 
     /// Android sends parts up to 64 MiB so each request stays under Cloudflare's ~100 MB cap, and
     /// uses the same value as the single-PUT-vs-multipart threshold.
@@ -366,33 +406,102 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     private func perform(_ request: URLRequest, uploadBody: Data? = nil) async throws -> (Data, URLResponse) {
-        do {
-            if let uploadBody {
-                var bodyless = request
-                bodyless.httpBody = nil
-                return try await session.upload(for: bodyless, from: uploadBody)
+        for attempt in 0...Self.maxRateLimitRetries {
+            do {
+                try await Self.requestGate.wait()
+                let result: (Data, URLResponse)
+                if let uploadBody {
+                    var bodyless = request
+                    bodyless.httpBody = nil
+                    result = try await session.upload(for: bodyless, from: uploadBody)
+                } else {
+                    result = try await session.data(for: request)
+                }
+                if shouldRetryRateLimit(response: result.1, attempt: attempt) {
+                    try await waitForRateLimit(response: result.1, attempt: attempt)
+                    continue
+                }
+                return result
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw HttpSyncError(friendlyMessage(error))
             }
-            return try await session.data(for: request)
-        } catch {
-            throw HttpSyncError(friendlyMessage(error))
         }
+        throw HttpSyncError("Sync server kept rate-limiting requests (HTTP 429). Try again in a moment.")
     }
 
     private func uploadFile(request: inout URLRequest, fileURL: URL) async throws -> (Data, URLResponse) {
-        do {
-            return try await session.upload(for: request, fromFile: fileURL)
-        } catch {
-            throw HttpSyncError(friendlyMessage(error))
+        for attempt in 0...Self.maxRateLimitRetries {
+            do {
+                try await Self.requestGate.wait()
+                let result = try await session.upload(for: request, fromFile: fileURL)
+                if shouldRetryRateLimit(response: result.1, attempt: attempt) {
+                    try await waitForRateLimit(response: result.1, attempt: attempt)
+                    continue
+                }
+                return result
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw HttpSyncError(friendlyMessage(error))
+            }
         }
+        throw HttpSyncError("Sync server kept rate-limiting requests (HTTP 429). Try again in a moment.")
     }
 
     private func downloadData(_ request: URLRequest) async throws -> (URL, URLResponse) {
-        do {
-            let (tempURL, response) = try await session.download(for: request)
-            return (tempURL, response)
-        } catch {
-            throw HttpSyncError(friendlyMessage(error))
+        for attempt in 0...Self.maxRateLimitRetries {
+            do {
+                try await Self.requestGate.wait()
+                let result = try await session.download(for: request)
+                if shouldRetryRateLimit(response: result.1, attempt: attempt) {
+                    try? FileManager.default.removeItem(at: result.0)
+                    try await waitForRateLimit(response: result.1, attempt: attempt)
+                    continue
+                }
+                return result
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw HttpSyncError(friendlyMessage(error))
+            }
         }
+        throw HttpSyncError("Sync server kept rate-limiting requests (HTTP 429). Try again in a moment.")
+    }
+
+    private func shouldRetryRateLimit(response: URLResponse, attempt: Int) -> Bool {
+        guard attempt < Self.maxRateLimitRetries,
+              let http = response as? HTTPURLResponse else { return false }
+        return http.statusCode == 429
+    }
+
+    /// Honor the server's Retry-After value when present. Flask-Limiter normally sends integer
+    /// seconds, while RFC 9110 also permits an HTTP date; support both and fall back to bounded
+    /// exponential backoff when a proxy strips the header.
+    private func waitForRateLimit(response: URLResponse, attempt: Int) async throws {
+        let delay = rateLimitDelay(response: response, attempt: attempt)
+        await Self.requestGate.imposeCooldown(seconds: delay)
+        try Task.checkCancellation()
+    }
+
+    private func rateLimitDelay(response: URLResponse, attempt: Int) -> TimeInterval {
+        guard let http = response as? HTTPURLResponse,
+              let raw = header(http, "Retry-After")?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return min(30, pow(2, Double(attempt + 1)))
+        }
+        if let seconds = TimeInterval(raw) {
+            return min(120, max(0.5, seconds))
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+        if let date = formatter.date(from: raw) {
+            return min(120, max(0.5, date.timeIntervalSinceNow))
+        }
+        return min(30, pow(2, Double(attempt + 1)))
     }
 
     private func ensureSuccess(response: URLResponse, data: Data) throws {
@@ -431,6 +540,9 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             return "Not found on server (HTTP 404)."
         case 413:
             return "Body too large for the sync server (HTTP 413)."
+        case 429:
+            if let detail { return "Sync server rate limit reached (HTTP 429): \(detail)" }
+            return "Sync server rate limit reached (HTTP 429). The app waited and retried, but the server is still busy."
         case 500...599:
             if let detail { return "Server is having trouble (HTTP \(code)): \(detail)" }
             return "Server is having trouble (HTTP \(code)). Try again in a moment."

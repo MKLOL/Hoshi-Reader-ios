@@ -110,6 +110,8 @@ class ReaderViewModel {
     let syncStats: Bool
     let statsSyncMode: StatisticsSyncMode
     let syncAudioBook: Bool
+    /// Reader setting: show a translate button after each pre-translated sentence.
+    var showSentenceTranslations: Bool
     var isSyncing = false
     private var pendingAutoExport = false
     private var debounceTask: Task<Void, Never>?
@@ -134,7 +136,8 @@ class ReaderViewModel {
         autoSyncEnabled: Bool,
         syncStats: Bool,
         statsSyncMode: StatisticsSyncMode,
-        syncAudioBook: Bool
+        syncAudioBook: Bool,
+        showSentenceTranslations: Bool
     ) {
         self.book = book
         self.document = document
@@ -145,6 +148,7 @@ class ReaderViewModel {
         self.syncStats = syncStats
         self.statsSyncMode = statsSyncMode
         self.syncAudioBook = syncAudioBook
+        self.showSentenceTranslations = showSentenceTranslations
         
         if let bookmark = BookStorage.loadBookmark(root: rootURL) {
             index = bookmark.chapterIndex
@@ -190,6 +194,8 @@ class ReaderViewModel {
         )
         
         highlights = BookStorage.loadHighlights(root: rootURL) ?? []
+
+        preloadSentenceTranslationsAndReloadIfNeeded()
     }
     
     var currentChapterCount: Int {
@@ -588,8 +594,9 @@ class ReaderViewModel {
         if let url = currentChapterURL {
             let cues = sasayakiPlayer.hasMatch ? sasayakiPlayer.cues(for: index) : nil
             let highlights = chapterHighlights()
-            bridge.updateState(url: url, progress: progress, sasayakiCues: cues, highlights: highlights)
-            bridge.send(.loadChapter(url: url, progress: progress, fragment: fragment, sasayakiCues: cues, highlights: highlights))
+            let anchors = chapterSentenceAnchors()
+            bridge.updateState(url: url, progress: progress, sasayakiCues: cues, highlights: highlights, sentenceAnchors: anchors)
+            bridge.send(.loadChapter(url: url, progress: progress, fragment: fragment, sasayakiCues: cues, highlights: highlights, sentenceAnchors: anchors))
         }
     }
     
@@ -597,8 +604,9 @@ class ReaderViewModel {
         if let url = currentChapterURL {
             let cues = sasayakiPlayer.hasMatch ? sasayakiPlayer.cues(for: index) : nil
             let highlights = chapterHighlights()
-            bridge.updateState(url: url, progress: currentProgress, sasayakiCues: cues, highlights: highlights)
-            bridge.send(.loadChapter(url: url, progress: currentProgress, fragment: nil, sasayakiCues: cues, highlights: highlights))
+            let anchors = chapterSentenceAnchors()
+            bridge.updateState(url: url, progress: currentProgress, sasayakiCues: cues, highlights: highlights, sentenceAnchors: anchors)
+            bridge.send(.loadChapter(url: url, progress: currentProgress, fragment: nil, sasayakiCues: cues, highlights: highlights, sentenceAnchors: anchors))
         }
     }
     
@@ -724,6 +732,72 @@ class ReaderViewModel {
         }
     }
     
+    /// The current chapter's pre-translated sentences, as JSON for `hoshiTranslations.apply`.
+    ///
+    /// `nil` when the book has no blob, when the reader setting is off, or when this chapter has
+    /// no translated sentences — all of which mean "place no buttons".
+    private func chapterSentenceAnchors() -> String? {
+        guard showSentenceTranslations,
+              let folder = book.folder,
+              let bookSyncId = syncId(for: book) else { return nil }
+        let anchors = EpubTranslationStore.shared.anchors(
+            folder: folder,
+            expectedSyncId: bookSyncId,
+            spineCount: document.spine.items.count,
+            spine: index
+        )
+        guard !anchors.isEmpty else { return nil }
+        guard let data = try? JSONEncoder().encode(anchors),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return json
+    }
+
+    /// Resolves a pressed button to its cached translation. Nil when the blob changed underneath
+    /// the rendered page (the reader then does nothing rather than guessing).
+    func sentenceTranslation(id: String) -> SentenceTranslation? {
+        guard showSentenceTranslations,
+              let folder = book.folder,
+              let bookSyncId = syncId(for: book) else { return nil }
+        return EpubTranslationStore.shared.lookup(
+            id: id,
+            folder: folder,
+            expectedSyncId: bookSyncId,
+            spineCount: document.spine.items.count
+        )
+    }
+
+    /// Applies the appearance toggle to the already-open reader. Reloading at the current progress
+    /// also tears down existing buttons immediately when disabled.
+    func setSentenceTranslationsEnabled(_ enabled: Bool) {
+        guard showSentenceTranslations != enabled else { return }
+        showSentenceTranslations = enabled
+        if enabled {
+            preloadSentenceTranslationsAndReloadIfNeeded()
+        } else {
+            loadCurrentChapter()
+        }
+    }
+
+    private func preloadSentenceTranslationsAndReloadIfNeeded() {
+        guard showSentenceTranslations,
+              let folder = book.folder,
+              let bookSyncId = syncId(for: book) else { return }
+        let spineCount = document.spine.items.count
+        Task { [weak self] in
+            let loaded = await Task.detached(priority: .userInitiated) {
+                EpubTranslationStore.shared.preload(
+                    folder: folder,
+                    expectedSyncId: bookSyncId,
+                    spineCount: spineCount
+                )
+            }.value
+            guard loaded, let self, self.showSentenceTranslations else { return }
+            self.loadCurrentChapter()
+        }
+    }
+
     private func chapterHighlights() -> String? {
         guard let range = chapterRange else { return nil }
         let list = highlights.filter { $0.character >= range.start && $0.character < range.end }

@@ -25,16 +25,20 @@ struct OpenAiError: LocalizedError {
 /// networking and pure helpers never hop the main actor under the project's default-MainActor mode.
 nonisolated struct OpenAiChatClient {
     private let endpoint: URL
+    /// User-facing provider name. Google/DeepSeek/Qwen share this wire client, but their failures
+    /// must never be mislabeled as OpenAI failures.
+    private let serviceName: String
     private let connectTimeout: TimeInterval = 30
     private let readTimeout: TimeInterval = 90
 
     /// `baseURL` lets the same Chat Completions client target any OpenAI-compatible provider
     /// (OpenAI, DeepSeek, Qwen, Moonshot, …); `/chat/completions` is appended to it.
-    init(baseURL: String = "https://api.openai.com/v1") {
+    init(baseURL: String = "https://api.openai.com/v1", serviceName: String = "OpenAI") {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.endpoint = URL(string: trimmed + "/chat/completions")
             ?? URL(string: "https://api.openai.com/v1/chat/completions")!
+        self.serviceName = serviceName
     }
 
     /// Sends `prompt` followed by `bubbleText` to `model` and returns the assistant's reply.
@@ -91,9 +95,9 @@ nonisolated struct OpenAiChatClient {
 
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         if !(200...299).contains(code) {
-            throw OpenAiError(message: Self.parseErrorMessage(code: code, data: data))
+            throw OpenAiError(message: Self.parseErrorMessage(code: code, data: data, serviceName: serviceName))
         }
-        return try Self.parseResponse(data)
+        return try Self.parseResponse(data, serviceName: serviceName)
     }
 
     // MARK: - Body builders (pure, testable)
@@ -150,25 +154,25 @@ nonisolated struct OpenAiChatClient {
     // MARK: - Response parsing (pure, testable)
 
     /// Extracts the assistant reply text from a successful chat-completions response body.
-    static func parseResponse(_ data: Data) throws -> String {
+    static func parseResponse(_ data: Data, serviceName: String = "OpenAI") throws -> String {
         guard let response = try? JSONDecoder().decode(ChatResponse.self, from: data) else {
-            throw OpenAiError(message: "Could not read the OpenAI response.")
+            throw OpenAiError(message: "Could not read the \(serviceName) response.")
         }
         let content = response.choices.first?.message?.content?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let content, !content.isEmpty else {
-            throw OpenAiError(message: "OpenAI returned an empty response.")
+            throw OpenAiError(message: "\(serviceName) returned an empty response.")
         }
         return content
     }
 
     /// Turns an error-status response body into a user-facing message.
-    static func parseErrorMessage(code: Int, data: Data) -> String {
+    static func parseErrorMessage(code: Int, data: Data, serviceName: String = "OpenAI") -> String {
         if let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data),
            let message = envelope.error?.message,
            !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return message
         }
-        return "OpenAI request failed (HTTP \(code))."
+        return "\(serviceName) request failed (HTTP \(code))."
     }
 
     // MARK: - Codable wire types

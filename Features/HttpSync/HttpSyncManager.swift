@@ -109,21 +109,28 @@ final class HttpSyncManager {
         // The reconciler streams phased progress through `onProgress`; we hop back onto the main
         // actor to update the @Observable `progress` so the settings screen's bar/label tracks it.
         let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+        // Sync the small model/prompt blob FIRST and independently. A corrupt book, a huge payload,
+        // or a later rate-limit error must never prevent the user's prompt/model edit from reaching
+        // the other device.
+        progress = HttpSyncProgress(
+            message: "Syncing translation settings",
+            detail: "Saving the selected model and prompts before syncing books."
+        )
+        var appSettingsOutcome = HttpSyncReconciler.AppSettingsOutcome()
+        if let aiSettings {
+            appSettingsOutcome = await HttpSyncReconciler.syncAppSettings(
+                transport: transport,
+                settings: aiSettings
+            )
+        }
+
         let reconciler = HttpSyncReconciler(transport: transport)
         var result = await reconciler.syncOnce(sinceCursor: cursor) { [weak self] update in
             await MainActor.run { self?.progress = update }
         }
-
-        progress = HttpSyncProgress(message: "Syncing ChatGPT settings", detail: "Checking shared model and prompt settings.")
-
-        // App-level AI chat settings LWW — drives the non-Sendable AiChatSettingsStore. One GET +
-        // maybe one PUT; cheap.
-        if let aiSettings {
-            let outcome = await HttpSyncReconciler.syncAppSettings(transport: transport, settings: aiSettings)
-            result.uploadedAppSettings = outcome.uploaded
-            result.downloadedAppSettings = outcome.downloaded
-            if let error = outcome.error { result.errors.append(error) }
-        }
+        result.uploadedAppSettings = appSettingsOutcome.uploaded
+        result.downloadedAppSettings = appSettingsOutcome.downloaded
+        if let error = appSettingsOutcome.error { result.errors.append(error) }
 
         if let newCursor = result.newLastSyncedAt {
             settings.lastSyncedAt = newCursor
@@ -260,20 +267,19 @@ final class HttpSyncManager {
         }
     }
 
-    /// Call after the ChatGPT model/prompt settings change. Debounced (the prompt fields edit
-    /// per-keystroke); runs the existing bidirectional app-settings LWW once typing settles.
-    /// (AI settings stay timestamp-LWW — a single small blob with no per-field merge to protect.)
+    /// Call after the translation model/prompt settings change. Debounced because prompt fields
+    /// edit per keystroke. This deliberately bypasses the book-push circuit breaker: one failed
+    /// bookmark must not suppress a later prompt/model save.
     private var aiSettingsPushTask: Task<Void, Never>?
     func onAiSettingsChanged() {
-        guard autoPushReady, let aiSettings else { return }
-        let config = settings.currentConfig()
+        guard settings.enabled, settings.isConfigured, let aiSettings else { return }
         aiSettingsPushTask?.cancel()
         aiSettingsPushTask = Task {
             try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, settings.enabled, settings.isConfigured else { return }
+            let config = settings.currentConfig()
             let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
-            let outcome = await HttpSyncReconciler.syncAppSettings(transport: transport, settings: aiSettings)
-            self.notePushOutcome(success: outcome.error == nil)
+            _ = await HttpSyncReconciler.syncAppSettings(transport: transport, settings: aiSettings)
         }
     }
 

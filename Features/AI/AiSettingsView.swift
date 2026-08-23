@@ -21,8 +21,6 @@ struct AiSettingsView: View {
     /// The picker selection — a known model id, or `customTag` when entering a custom id.
     @State private var selectedModelId = ""
     @State private var customModel = ""
-    @State private var promptText = ""
-    @State private var imagePromptText = ""
 
     private static let customTag = "__custom__"
 
@@ -35,6 +33,13 @@ struct AiSettingsView: View {
     private var isCustom: Bool { selectedModelId == Self.customTag }
     private var effectiveModelId: String { isCustom ? customModel : selectedModelId }
     private var provider: ChatProvider { ChatModelCatalog.provider(forModelId: effectiveModelId) }
+    private var keyPlaceholder: String {
+        switch provider.id {
+        case "anthropic": return "sk-ant-…"
+        case "google": return "AIza…"
+        default: return "sk-…"
+        }
+    }
 
     var body: some View {
         Form {
@@ -58,12 +63,12 @@ struct AiSettingsView: View {
             } header: {
                 Text("Translation model")
             } footer: {
-                Text("Cheaper and Chinese providers (DeepSeek, Qwen, Kimi) and Anthropic (Claude) "
-                    + "are included alongside OpenAI. A custom id is treated as an OpenAI model.")
+                Text("Gemini, DeepSeek, Qwen, Kimi, and Anthropic are included alongside OpenAI. "
+                    + "Known provider prefixes are routed to that provider.")
             }
 
             Section {
-                SecureField(provider.id == "anthropic" ? "sk-ant-…" : "sk-…", text: $apiKey)
+                SecureField(keyPlaceholder, text: $apiKey)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .onChange(of: apiKey) { _, newValue in store.setApiKey(newValue, for: provider) }
@@ -75,9 +80,11 @@ struct AiSettingsView: View {
             }
 
             Section {
-                TextEditor(text: $promptText)
+                TextEditor(text: Binding(
+                    get: { store.promptText },
+                    set: { store.setPromptText($0) }
+                ))
                     .frame(minHeight: 120)
-                    .onChange(of: promptText) { _, _ in saveSyncedFields() }
             } header: {
                 Text("Prompt")
             } footer: {
@@ -85,9 +92,11 @@ struct AiSettingsView: View {
             }
 
             Section {
-                TextEditor(text: $imagePromptText)
+                TextEditor(text: Binding(
+                    get: { store.imagePromptText },
+                    set: { store.setImagePromptText($0) }
+                ))
                     .frame(minHeight: 120)
-                    .onChange(of: imagePromptText) { _, _ in saveSyncedFields() }
             } header: {
                 Text("Image prompt")
             } footer: {
@@ -95,10 +104,21 @@ struct AiSettingsView: View {
             }
 
             Section {
+                Toggle("Use default Markdown text size", isOn: Binding(
+                    get: { store.useUniformMarkdownTextSize },
+                    set: { store.setUseUniformMarkdownTextSize($0) }
+                ))
+            } footer: {
+                Text("Keeps Markdown formatting but renders headings and inline code at the normal text size.")
+            }
+
+            Section {
                 Button("Reset prompts to defaults", role: .destructive) {
-                    promptText = AiChatDefaults.prompt
-                    imagePromptText = AiChatDefaults.imagePrompt
-                    saveSyncedFields()
+                    store.update(
+                        model: store.model,
+                        promptText: AiChatDefaults.prompt,
+                        imagePromptText: AiChatDefaults.imagePrompt
+                    )
                 }
             }
         }
@@ -109,11 +129,20 @@ struct AiSettingsView: View {
             saveModel()
             reloadKey()
         }
+        // A manual sync can change the selected model while this screen is open. Keep the picker
+        // aligned with the store that MangaAiController actually reads.
+        .onChange(of: store.model) { _, _ in
+            loadModelSelection()
+            reloadKey()
+        }
     }
 
     private func load() {
-        promptText = store.promptText
-        imagePromptText = store.imagePromptText
+        loadModelSelection()
+        reloadKey()
+    }
+
+    private func loadModelSelection() {
         // Seed the picker: a known model selects its row; anything else is "Custom".
         if ChatModelCatalog.isKnownModel(store.model) {
             selectedModelId = store.model
@@ -122,7 +151,6 @@ struct AiSettingsView: View {
             selectedModelId = Self.customTag
             customModel = store.model
         }
-        reloadKey()
     }
 
     /// Reloads the key field to the currently-selected provider's stored key.
@@ -134,12 +162,6 @@ struct AiSettingsView: View {
     private func saveModel() {
         let id = effectiveModelId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !id.isEmpty else { return }
-        store.update(model: id, promptText: promptText, imagePromptText: imagePromptText)
-    }
-
-    /// Pushes the synced fields through the store in one update so `lastEditedAt` is stamped at most
-    /// once per edit.
-    private func saveSyncedFields() {
-        store.update(model: effectiveModelId, promptText: promptText, imagePromptText: imagePromptText)
+        store.update(model: id, promptText: store.promptText, imagePromptText: store.imagePromptText)
     }
 }

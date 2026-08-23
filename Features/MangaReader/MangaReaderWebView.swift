@@ -19,6 +19,7 @@
 //     gated, and the scrollView's zoomScale/contentOffset feed JS for correct popup/crop mapping.
 //
 
+import QuartzCore
 import SwiftUI
 import WebKit
 
@@ -146,13 +147,18 @@ struct MangaReaderWebView: UIViewRepresentable {
     /// Empty artwork tapped — dismiss any lookup popup.
     var onTapOutside: () -> Void
     /// A bubble's sparkles button was tapped — bubble text for the AI controller.
-    var onAskAi: (String) -> Void
+    /// Bubble OCR text plus its mokuro address (`p{page}b{block}`), or nil when the page render
+    /// predates block ids. The address resolves the bubble's pre-computed offline translation.
+    var onAskAi: (String, String?) -> Void
     /// A bubble's copy button was tapped — bubble text to copy.
     var onCopy: (String) -> Void
     /// Called once the page HTML finished loading, with the controller load token for that navigation.
     var onPageReady: (Int) -> Void
     /// Host-pixel top inset that is visible but not reliably tappable inside the full-bleed WebView.
     var tappableTopInset: CGFloat = 0
+    /// Gates hardware-keyboard ← / → and trackpad two-finger page turns. Off during the screenshot
+    /// crop overlay and the go-to-page dialog so those aren't disturbed by a stray key/drag.
+    var pageTurnEnabled: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -167,7 +173,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         controllerJS.add(context.coordinator, name: "hoshiMangaClipboard")
         config.defaultWebpagePreferences.preferredContentMode = .mobile
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = MangaKeyCommandWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = backgroundColor
         webView.scrollView.backgroundColor = backgroundColor
@@ -193,10 +199,53 @@ struct MangaReaderWebView: UIViewRepresentable {
         swipeRight.cancelsTouchesInView = false
         webView.addGestureRecognizer(swipeRight)
 
-        let pinch = UIPinchGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePinch(_:)))
-        pinch.delegate = coordinator
-        pinch.cancelsTouchesInView = false
-        webView.addGestureRecognizer(pinch)
+        // UIScrollView already owns a coordinated pinch + pan pair. Observe its pinch for
+        // telemetry and state syncing, but never write zoomScale/contentOffset from this callback;
+        // doing so fights UIScrollView's pan recognizer and produces visible oscillation.
+        if let nativePinch = webView.scrollView.pinchGestureRecognizer {
+            nativePinch.addTarget(
+                coordinator,
+                action: #selector(Coordinator.observeNativePinch(_:))
+            )
+            coordinator.nativePinchRecognizer = nativePinch
+        }
+
+        // Keep UIScrollView's own pan recognizer paired with its own pinch recognizer. This target
+        // only observes native pan state for telemetry; UIKit remains the sole writer of the
+        // viewport.
+        let nativePan = webView.scrollView.panGestureRecognizer
+        nativePan.addTarget(
+            coordinator,
+            action: #selector(Coordinator.observeNativePan(_:))
+        )
+        coordinator.nativePanRecognizer = nativePan
+
+        // UIScrollView's built-in indirect pan reports zero translation when the fitted page cannot
+        // scroll, so it cannot drive a trackpad page turn. A read-only recognizer supplies that
+        // translation only at fit scale. It is rejected once the viewport is zoomed/pannable, where
+        // UIScrollView's native pan must remain the sole owner.
+        let trackpadPageTurn = UIPanGestureRecognizer(
+            target: coordinator,
+            action: #selector(Coordinator.handleTrackpadPageTurn(_:))
+        )
+        trackpadPageTurn.allowedScrollTypesMask = .continuous
+        trackpadPageTurn.allowedTouchTypes = []
+        trackpadPageTurn.cancelsTouchesInView = false
+        trackpadPageTurn.delegate = coordinator
+        webView.scrollView.addGestureRecognizer(trackpadPageTurn)
+        coordinator.trackpadPageTurnRecognizer = trackpadPageTurn
+
+        // Hardware keyboard (iPad), RTL manga: ← next page, → previous page (the next page sits to
+        // the left in right-to-left reading). Routed through the same `onNavigate` the swipes use,
+        // and gated identically via `pageTurnEnabled`.
+        webView.onArrowLeft = { [weak coordinator] in
+            guard let coordinator, coordinator.parent.pageTurnEnabled else { return }
+            coordinator.parent.onNavigate(.forward)
+        }
+        webView.onArrowRight = { [weak coordinator] in
+            guard let coordinator, coordinator.parent.pageTurnEnabled else { return }
+            coordinator.parent.onNavigate(.backward)
+        }
 
         controller.attach(webView)
         return webView
@@ -225,7 +274,10 @@ struct MangaReaderWebView: UIViewRepresentable {
         scrollView.minimumZoomScale = 1
         scrollView.maximumZoomScale = 5
         scrollView.bouncesZoom = true
-        scrollView.pinchGestureRecognizer?.isEnabled = false
+        scrollView.pinchGestureRecognizer?.isEnabled = true
+        // UIScrollView's native pan must receive continuous trackpad scroll events so UIKit can
+        // coordinate them with native transform events from its pinch recognizer.
+        scrollView.panGestureRecognizer.allowedScrollTypesMask = .all
         // Allow free diagonal panning when zoomed in. With directional lock on, a drag snaps to one
         // axis ("only left/right/up/down"); we want the page to follow the finger in any direction.
         scrollView.isDirectionalLockEnabled = false
@@ -237,6 +289,21 @@ struct MangaReaderWebView: UIViewRepresentable {
         controllerJS.removeScriptMessageHandler(forName: "hoshiManga")
         controllerJS.removeScriptMessageHandler(forName: "hoshiMangaAi")
         controllerJS.removeScriptMessageHandler(forName: "hoshiMangaClipboard")
+        if let nativePinch = coordinator.nativePinchRecognizer {
+            nativePinch.removeTarget(
+                coordinator,
+                action: #selector(Coordinator.observeNativePinch(_:))
+            )
+        }
+        if let nativePan = coordinator.nativePanRecognizer {
+            nativePan.removeTarget(
+                coordinator,
+                action: #selector(Coordinator.observeNativePan(_:))
+            )
+        }
+        if let trackpadPageTurn = coordinator.trackpadPageTurnRecognizer {
+            webView.scrollView.removeGestureRecognizer(trackpadPageTurn)
+        }
         webView.scrollView.delegate = nil
         webView.navigationDelegate = nil
     }
@@ -247,6 +314,9 @@ struct MangaReaderWebView: UIViewRepresentable {
         var parent: MangaReaderWebView
         var lastLoadToken = 0
         var allowedImagePaths: Set<String> = []
+        /// Native trackpad debounce — held here so it survives the per-page HTML reload a turn
+        /// triggers (a JS-side debounce gets wiped by the reload → multi-page jumps).
+        var wheelDebouncer = MangaWheelDebouncer()
         /// Snapshotted from the controller in updateUIView so the scheme handler never reaches
         /// into MainActor-isolated state from its (main-thread) callback.
         var bookRoot: URL?
@@ -256,6 +326,24 @@ struct MangaReaderWebView: UIViewRepresentable {
         /// WKNavigation -> controller load token. `didFinish` can arrive out of order during fast
         /// page turns, so the host only trusts completions for the navigation it asked to load.
         private var navigationLoadTokens: [ObjectIdentifier: Int] = [:]
+        weak var nativePinchRecognizer: UIPinchGestureRecognizer?
+        weak var nativePanRecognizer: UIPanGestureRecognizer?
+        weak var trackpadPageTurnRecognizer: UIPanGestureRecognizer?
+        private var previousPinchLocation: CGPoint?
+        private var pinchUsesIndirectInput = false
+        private var indirectPinchTransform: MangaIndirectPinchTransform?
+        private var trackpadPanSession: TrackpadPanSession?
+#if DEBUG
+        private var gestureTelemetrySequence = 0
+#endif
+
+        private struct TrackpadPanSession {
+            var totalTranslation: CGPoint = .zero
+            var appliedTranslation: CGPoint = .zero
+            /// Once any part of this sequence participates in zoom/pan, it can never become a page
+            /// turn—even if the pinch returns to 1x before the fingers leave the trackpad.
+            var usedForViewport = false
+        }
 
         init(_ parent: MangaReaderWebView) {
             self.parent = parent
@@ -275,6 +363,10 @@ struct MangaReaderWebView: UIViewRepresentable {
             MangaReaderWebView.configureZoom(for: webView.scrollView)
             parent.controller.syncHostViewport()
             parent.onPageReady(finishedLoadToken)
+            // Re-assert first responder so hardware-keyboard arrows keep turning pages after a
+            // load (loadHTMLString can drop it). No-op cost when already first responder; safe here
+            // because a page turn has already cleared any text selection / popups.
+            if webView.window != nil { webView.becomeFirstResponder() }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -313,14 +405,18 @@ struct MangaReaderWebView: UIViewRepresentable {
                     highlightSelection(count: count, in: message.webView)
                 }
             case "hoshiManga":
-                // Only event currently routed: "selectedNothing" (empty artwork tap).
-                if let body = message.body as? [String: Any], (body["event"] as? String) == "selectedNothing" {
-                    parent.onTapOutside()
+                guard let body = message.body as? [String: Any] else { return }
+                switch body["event"] as? String {
+                case "selectedNothing":
+                    parent.onTapOutside() // empty artwork tap
+                default:
+                    break
                 }
             case "hoshiMangaAi":
                 if let body = message.body as? [String: Any], let text = body["text"] as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !trimmed.isEmpty { parent.onAskAi(trimmed) }
+                    let blockId = (body["blockId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                    if !trimmed.isEmpty { parent.onAskAi(trimmed, blockId) }
                 }
             case "hoshiMangaClipboard":
                 if let body = message.body as? [String: Any], let text = body["text"] as? String {
@@ -386,41 +482,292 @@ struct MangaReaderWebView: UIViewRepresentable {
             parent.controller.syncHostViewport()
         }
 
+        @objc func observeNativePinch(_ gesture: UIPinchGestureRecognizer) {
+            guard let scrollView = gesture.view as? UIScrollView else { return }
+            let rawLocation = gesture.location(in: scrollView)
+            let viewportLocation = CGPoint(
+                x: rawLocation.x - scrollView.bounds.minX,
+                y: rawLocation.y - scrollView.bounds.minY
+            )
+            gestureTelemetry(
+                "NATIVE_PINCH touches=\(gesture.numberOfTouches) " +
+                "scale=\(telemetryNumber(gesture.scale)) " +
+                "velocity=\(telemetryNumber(gesture.velocity)) " +
+                "raw=\(telemetryPoint(rawLocation)) " +
+                "viewport=\(telemetryPoint(viewportLocation))",
+                gesture: gesture,
+                scrollView: scrollView
+            )
+            if gesture.state == .began || gesture.state == .changed {
+                wheelDebouncer.suppressCurrentGesture(now: CACurrentMediaTime())
+                trackpadPanSession?.usedForViewport = true
+            }
+            parent.controller.syncHostViewport()
+        }
+
+        @objc func observeNativePan(_ gesture: UIPanGestureRecognizer) {
+            guard let scrollView = gesture.view as? UIScrollView else { return }
+            let translation = gesture.translation(in: scrollView)
+            gestureTelemetry(
+                "NATIVE_PAN touches=\(gesture.numberOfTouches) " +
+                "translation=\(telemetryPoint(translation)) " +
+                "velocity=\(telemetryPoint(gesture.velocity(in: scrollView)))",
+                gesture: gesture,
+                scrollView: scrollView
+            )
+            parent.controller.syncHostViewport()
+        }
+
+        @objc func handleTrackpadPageTurn(_ gesture: UIPanGestureRecognizer) {
+            guard let scrollView = gesture.view as? UIScrollView else { return }
+            let translation = gesture.translation(in: scrollView)
+            gestureTelemetry(
+                "TRACKPAD_PAGE_TURN translation=\(telemetryPoint(translation)) " +
+                "velocity=\(telemetryPoint(gesture.velocity(in: scrollView)))",
+                gesture: gesture,
+                scrollView: scrollView
+            )
+            guard gesture.state == .ended else { return }
+            commitTrackpadPageTurn(translation: translation)
+        }
+
         @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-            guard let webView = gesture.view as? WKWebView else { return }
-            let scrollView = webView.scrollView
+            guard let scrollView = gesture.view as? UIScrollView else { return }
             MangaReaderWebView.configureZoom(for: scrollView)
+            let rawLocation = gesture.location(in: scrollView)
+            // A UIScrollView's bounds origin follows contentOffset. Normalize the recognizer's
+            // indirect-input location back into viewport coordinates; otherwise our own scrolling
+            // would look like extra trackpad movement and feed back into the gesture.
+            let viewportLocation = CGPoint(
+                x: rawLocation.x - scrollView.bounds.minX,
+                y: rawLocation.y - scrollView.bounds.minY
+            )
+            let eventUsesIndirectInput = gesture.state == .began
+                ? gesture.numberOfTouches == 0
+                : pinchUsesIndirectInput
+            // Preserve the already-verified direct-touch path; the viewport normalization is for
+            // the zero-touch trackpad event stream identified by device telemetry.
+            let currentLocation = eventUsesIndirectInput ? viewportLocation : rawLocation
+            gestureTelemetry(
+                "PINCH_IN touches=\(gesture.numberOfTouches) scale=\(telemetryNumber(gesture.scale)) " +
+                "velocity=\(telemetryNumber(gesture.velocity)) raw=\(telemetryPoint(rawLocation)) " +
+                "viewport=\(telemetryPoint(viewportLocation))",
+                gesture: gesture,
+                scrollView: scrollView
+            )
 
             switch gesture.state {
-            case .began, .changed:
-                let currentScale = scrollView.zoomScale
-                let rawScale = currentScale * gesture.scale
-                let newScale = min(max(rawScale, scrollView.minimumZoomScale), scrollView.maximumZoomScale)
-                if abs(newScale - currentScale) > 0.001 {
-                    let anchor = gesture.location(in: webView)
-                    zoom(scrollView, to: newScale, anchoredAt: anchor)
+            case .began:
+                pinchUsesIndirectInput = gesture.numberOfTouches == 0
+                if pinchUsesIndirectInput {
+                    let pendingPan = claimPendingTrackpadTranslation()
+                    indirectPinchTransform = MangaIndirectPinchTransform(
+                        currentOffset: scrollView.contentOffset,
+                        scale: max(scrollView.zoomScale, 0.001),
+                        anchor: currentLocation,
+                        initialPanTranslation: pendingPan
+                    )
+                    indirectPinchTransform?.setScaleFactor(gesture.scale)
+                    wheelDebouncer.suppressCurrentGesture(now: CACurrentMediaTime())
+                    applyIndirectPinch(in: scrollView)
+                } else {
+                    previousPinchLocation = currentLocation
+                    applyDirectPinchDelta(gesture, in: scrollView, currentLocation: currentLocation)
                 }
-                gesture.scale = 1
                 parent.controller.syncHostViewport()
-            case .ended, .cancelled, .failed:
+            case .changed:
+                if pinchUsesIndirectInput {
+                    trackpadPanSession?.usedForViewport = true
+                    indirectPinchTransform?.setScaleFactor(gesture.scale)
+                    indirectPinchTransform?.setCurrentAnchor(currentLocation)
+                    wheelDebouncer.suppressCurrentGesture(now: CACurrentMediaTime())
+                    applyIndirectPinch(in: scrollView)
+                } else {
+                    if previousPinchLocation == nil {
+                        previousPinchLocation = currentLocation
+                    }
+                    applyDirectPinchDelta(gesture, in: scrollView, currentLocation: currentLocation)
+                }
+                parent.controller.syncHostViewport()
+            case .ended:
+                if pinchUsesIndirectInput {
+                    trackpadPanSession?.usedForViewport = true
+                    indirectPinchTransform?.setScaleFactor(gesture.scale)
+                    indirectPinchTransform?.setCurrentAnchor(currentLocation)
+                    wheelDebouncer.suppressCurrentGesture(now: CACurrentMediaTime())
+                    applyIndirectPinch(in: scrollView)
+                } else {
+                    applyDirectPinchDelta(gesture, in: scrollView, currentLocation: currentLocation)
+                }
+                previousPinchLocation = nil
+                indirectPinchTransform = nil
+                pinchUsesIndirectInput = false
+                parent.controller.syncHostViewport()
+            case .cancelled, .failed:
+                if pinchUsesIndirectInput {
+                    trackpadPanSession?.usedForViewport = true
+                    wheelDebouncer.suppressCurrentGesture(now: CACurrentMediaTime())
+                }
+                previousPinchLocation = nil
+                indirectPinchTransform = nil
+                pinchUsesIndirectInput = false
                 parent.controller.syncHostViewport()
             default:
                 break
             }
+            gestureTelemetry(
+                "PINCH_OUT indirect=\(pinchUsesIndirectInput) transform=\(indirectPinchTransform != nil)",
+                gesture: gesture,
+                scrollView: scrollView
+            )
         }
 
-        private func zoom(_ scrollView: UIScrollView, to scale: CGFloat, anchoredAt anchor: CGPoint) {
+        private func applyDirectPinchDelta(
+            _ gesture: UIPinchGestureRecognizer,
+            in scrollView: UIScrollView,
+            currentLocation: CGPoint
+        ) {
+            let previousLocation = previousPinchLocation ?? currentLocation
             let oldScale = max(scrollView.zoomScale, 0.001)
-            let contentPoint = CGPoint(
-                x: (anchor.x + scrollView.contentOffset.x) / oldScale,
-                y: (anchor.y + scrollView.contentOffset.y) / oldScale
+            let rawScale = oldScale * gesture.scale
+            let newScale = min(max(rawScale, scrollView.minimumZoomScale), scrollView.maximumZoomScale)
+            let proposedOffset = MangaViewportGestureMath.zoomOffset(
+                currentOffset: scrollView.contentOffset,
+                oldScale: oldScale,
+                newScale: newScale,
+                previousAnchor: previousLocation,
+                currentAnchor: currentLocation
             )
-            scrollView.setZoomScale(scale, animated: false)
-            let proposedOffset = CGPoint(
-                x: contentPoint.x * scale - anchor.x,
-                y: contentPoint.y * scale - anchor.y
-            )
+            scrollView.setZoomScale(newScale, animated: false)
             scrollView.setContentOffset(clamped(proposedOffset, in: scrollView), animated: false)
+            previousPinchLocation = currentLocation
+            gesture.scale = 1
+        }
+
+        private func applyIndirectPinch(in scrollView: UIScrollView) {
+            guard let transform = indirectPinchTransform else { return }
+            let newScale = min(
+                max(transform.unclampedScale, scrollView.minimumZoomScale),
+                scrollView.maximumZoomScale
+            )
+            let proposedOffset = transform.offset(atScale: newScale)
+            scrollView.setZoomScale(newScale, animated: false)
+            scrollView.setContentOffset(clamped(proposedOffset, in: scrollView), animated: false)
+        }
+
+        private func claimPendingTrackpadTranslation() -> CGPoint {
+            guard var session = trackpadPanSession else { return .zero }
+            let pending = CGPoint(
+                x: session.totalTranslation.x - session.appliedTranslation.x,
+                y: session.totalTranslation.y - session.appliedTranslation.y
+            )
+            session.appliedTranslation = session.totalTranslation
+            session.usedForViewport = true
+            trackpadPanSession = session
+            return pending
+        }
+
+        @objc func handleTrackpadPan(_ gesture: UIPanGestureRecognizer) {
+            guard let scrollView = gesture.view as? UIScrollView else { return }
+            MangaReaderWebView.configureZoom(for: scrollView)
+            gestureTelemetry(
+                "TRACKPAD_PAN_IN translation=\(telemetryPoint(gesture.translation(in: scrollView))) " +
+                "velocity=\(telemetryPoint(gesture.velocity(in: scrollView)))",
+                gesture: gesture,
+                scrollView: scrollView
+            )
+
+            switch gesture.state {
+            case .began:
+                trackpadPanSession = TrackpadPanSession(
+                    usedForViewport: pinchUsesIndirectInput || viewportNeedsPan(scrollView)
+                )
+                consumeTrackpadTranslation(from: gesture, in: scrollView)
+            case .changed:
+                if trackpadPanSession == nil {
+                    trackpadPanSession = TrackpadPanSession(
+                        usedForViewport: pinchUsesIndirectInput || viewportNeedsPan(scrollView)
+                    )
+                }
+                consumeTrackpadTranslation(from: gesture, in: scrollView)
+            case .ended:
+                consumeTrackpadTranslation(from: gesture, in: scrollView)
+                let completed = trackpadPanSession
+                trackpadPanSession = nil
+                guard let completed, !completed.usedForViewport else { return }
+                commitTrackpadPageTurn(translation: completed.totalTranslation)
+            case .cancelled, .failed:
+                trackpadPanSession = nil
+            default:
+                break
+            }
+            let session = trackpadPanSession
+            gestureTelemetry(
+                "TRACKPAD_PAN_OUT total=\(telemetryPoint(session?.totalTranslation ?? .zero)) " +
+                "applied=\(telemetryPoint(session?.appliedTranslation ?? .zero)) " +
+                "viewport=\(session?.usedForViewport ?? false) transform=\(indirectPinchTransform != nil)",
+                gesture: gesture,
+                scrollView: scrollView
+            )
+        }
+
+        private func consumeTrackpadTranslation(
+            from gesture: UIPanGestureRecognizer,
+            in scrollView: UIScrollView
+        ) {
+            guard var session = trackpadPanSession else { return }
+            let translation = gesture.translation(in: scrollView)
+            session.totalTranslation = translation
+            let pending = CGPoint(
+                x: session.totalTranslation.x - session.appliedTranslation.x,
+                y: session.totalTranslation.y - session.appliedTranslation.y
+            )
+
+            if indirectPinchTransform != nil || viewportNeedsPan(scrollView) {
+                session.usedForViewport = true
+            }
+            if session.usedForViewport {
+                wheelDebouncer.suppressCurrentGesture(now: CACurrentMediaTime())
+                session.appliedTranslation = session.totalTranslation
+                if var transform = indirectPinchTransform {
+                    transform.addPanTranslation(pending)
+                    indirectPinchTransform = transform
+                    trackpadPanSession = session
+                    applyIndirectPinch(in: scrollView)
+                } else {
+                    let proposedOffset = MangaViewportGestureMath.panOffset(
+                        currentOffset: scrollView.contentOffset,
+                        translationDelta: pending
+                    )
+                    scrollView.setContentOffset(clamped(proposedOffset, in: scrollView), animated: false)
+                }
+                parent.controller.syncHostViewport()
+            }
+            trackpadPanSession = session
+        }
+
+        private func commitTrackpadPageTurn(translation: CGPoint) {
+            guard parent.pageTurnEnabled,
+                  abs(translation.x) > abs(translation.y) else { return }
+            // UIPan reports finger direction; the previous WheelEvent path reported the opposite
+            // scroll direction. Negating preserves RTL behavior: fingers right means forward.
+            if let direction = wheelDebouncer.feed(
+                deltaX: -translation.x,
+                now: CACurrentMediaTime()
+            ) {
+                parent.onNavigate(direction)
+            }
+        }
+
+        private func viewportNeedsPan(_ scrollView: UIScrollView) -> Bool {
+            if scrollView.zoomScale > scrollView.minimumZoomScale + 0.001 {
+                return true
+            }
+            let inset = scrollView.adjustedContentInset
+            return abs(scrollView.contentOffset.x + inset.left) > 1 ||
+                abs(scrollView.contentOffset.y + inset.top) > 1 ||
+                scrollView.contentSize.width > scrollView.bounds.width + 1 ||
+                scrollView.contentSize.height > scrollView.bounds.height + 1
         }
 
         private func clamped(_ offset: CGPoint, in scrollView: UIScrollView) -> CGPoint {
@@ -438,18 +785,34 @@ struct MangaReaderWebView: UIViewRepresentable {
         // MARK: Swipe navigation (gated when zoomed/scrollable)
 
         @objc func handleSwipeLeft(_ gesture: UISwipeGestureRecognizer) {
-            guard !parent.controller.isZoomedOrScrollable else { return }
+            guard parent.pageTurnEnabled, !parent.controller.isZoomedOrScrollable else { return }
             parent.onNavigate(MangaPageNavigation.direction(for: .left))
         }
 
         @objc func handleSwipeRight(_ gesture: UISwipeGestureRecognizer) {
-            guard !parent.controller.isZoomedOrScrollable else { return }
+            guard parent.pageTurnEnabled, !parent.controller.isZoomedOrScrollable else { return }
             parent.onNavigate(MangaPageNavigation.direction(for: .right))
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-            true
+            gestureTelemetry(
+                "SIMULTANEOUS yes first=\(telemetryRecognizerName(gestureRecognizer)):" +
+                "\(gestureRecognizer.state.rawValue) second=\(telemetryRecognizerName(otherGestureRecognizer)):" +
+                "\(otherGestureRecognizer.state.rawValue)"
+            )
+            return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldReceive event: UIEvent
+        ) -> Bool {
+            gestureTelemetry(
+                "EVENT recognizer=\(telemetryRecognizerName(gestureRecognizer)) " +
+                "type=\(event.type.rawValue) subtype=\(event.subtype.rawValue)"
+            )
+            return true
         }
 
         /// Keep the page-turn swipe recognizers from starting while the page is zoomed/panned. They
@@ -461,6 +824,12 @@ struct MangaReaderWebView: UIViewRepresentable {
             if gestureRecognizer is UISwipeGestureRecognizer {
                 return !parent.controller.isZoomedOrScrollable
             }
+            if gestureRecognizer === trackpadPageTurnRecognizer {
+                guard let scrollView = gestureRecognizer.view as? UIScrollView else { return false }
+                let pinchState = nativePinchRecognizer?.state
+                let pinchIsActive = pinchState == .began || pinchState == .changed
+                return !pinchIsActive && !viewportNeedsPan(scrollView)
+            }
             return true
         }
 
@@ -470,7 +839,91 @@ struct MangaReaderWebView: UIViewRepresentable {
             if let i = value as? Int { return CGFloat(i) }
             return nil
         }
+
+        private func telemetryRecognizerName(_ gesture: UIGestureRecognizer) -> String {
+            if gesture === nativePinchRecognizer { return "nativePinch" }
+            if gesture === nativePanRecognizer { return "nativePan" }
+            if gesture === trackpadPageTurnRecognizer { return "trackpadPageTurn" }
+            return String(describing: type(of: gesture))
+        }
+
+        private func telemetryNumber(_ value: CGFloat) -> String {
+            String(format: "%.4f", Double(value))
+        }
+
+        private func telemetryPoint(_ point: CGPoint) -> String {
+            "(\(telemetryNumber(point.x)),\(telemetryNumber(point.y)))"
+        }
+
+        private func gestureTelemetry(
+            _ event: String,
+            gesture: UIGestureRecognizer? = nil,
+            scrollView: UIScrollView? = nil
+        ) {
+#if DEBUG
+            gestureTelemetrySequence += 1
+            var fields = [
+                "HOSHI_GESTURE",
+                "seq=\(gestureTelemetrySequence)",
+                "t=\(String(format: "%.6f", CACurrentMediaTime()))",
+                event
+            ]
+            if let gesture {
+                fields.append("state=\(gesture.state.rawValue)")
+            }
+            if let scrollView {
+                let contentSize = CGPoint(
+                    x: scrollView.contentSize.width,
+                    y: scrollView.contentSize.height
+                )
+                let boundsSize = CGPoint(
+                    x: scrollView.bounds.width,
+                    y: scrollView.bounds.height
+                )
+                fields.append("zoom=\(telemetryNumber(scrollView.zoomScale))")
+                fields.append("offset=\(telemetryPoint(scrollView.contentOffset))")
+                fields.append("content=\(telemetryPoint(contentSize))")
+                fields.append("bounds=\(telemetryPoint(boundsSize))")
+            }
+            let line = fields.joined(separator: " ") + "\n"
+            if let data = line.data(using: .utf8) {
+                FileHandle.standardError.write(data)
+            }
+#endif
+        }
     }
+}
+
+/// A `WKWebView` that turns the iPad hardware keyboard's ← / → into page turns. The closures fire
+/// on the main thread whenever the WebView (or its web content) is the first responder;
+/// `MangaReaderWebView` re-asserts first responder after each page load so arrows keep working
+/// across turns. `wantsPriorityOverSystemBehavior` ensures the arrows beat WebKit's own caret /
+/// scroll handling.
+final class MangaKeyCommandWebView: WKWebView {
+    var onArrowLeft: (() -> Void)?
+    var onArrowRight: (() -> Void)?
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        // Grab first responder as soon as the view is on screen so the very first arrow press
+        // (before the page's first `didFinish`) still routes here. Re-asserted after each load too.
+        if window != nil { becomeFirstResponder() }
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        let left = UIKeyCommand(input: UIKeyCommand.inputLeftArrow, modifierFlags: [],
+                                action: #selector(handleLeftArrowKey(_:)))
+        let right = UIKeyCommand(input: UIKeyCommand.inputRightArrow, modifierFlags: [],
+                                 action: #selector(handleRightArrowKey(_:)))
+        left.wantsPriorityOverSystemBehavior = true
+        right.wantsPriorityOverSystemBehavior = true
+        return [left, right]
+    }
+
+    @objc private func handleLeftArrowKey(_ sender: UIKeyCommand) { onArrowLeft?() }
+    @objc private func handleRightArrowKey(_ sender: UIKeyCommand) { onArrowRight?() }
 }
 
 /// Page-index math for right-to-left manga paging. Mirrors Android `MangaPageNavigation`: a

@@ -210,6 +210,25 @@ nonisolated enum SyncKeys {
     static func chat(_ syncId: String, suffix: String) -> String { "books/\(syncId)/chat/\(suffix)" }
     static func payloadZip(_ syncId: String) -> String { "books/\(syncId)/payload.zip" }
     static func payloadManifest(_ syncId: String) -> String { "books/\(syncId)/payload.manifest" }
+    /// One blob per book holding every bubble's pre-computed offline translation. Deliberately a
+    /// single key rather than one per bubble: a volume has thousands of bubbles and the server is
+    /// rate-limited, so per-bubble keys would take minutes per book to pull.
+    static func pretranslations(_ syncId: String) -> String { "books/\(syncId)/pretranslations" }
+
+    // MARK: - EPUB (iOS-only keyspace)
+
+    /// EPUB content payload. Deliberately NOT `payload.zip`: Android's `parseBookKey` matches a
+    /// closed set of suffixes and skips anything else without fetching it, so routing EPUBs to
+    /// their own keys keeps the Android client completely unaffected by EPUB sync — it never
+    /// downloads a book it was not built to expect. Widening this to the shared `payload.*` keys
+    /// later is a one-line change on each platform.
+    /// See docs/EPUB_TRANSLATION_ARCHITECTURE.md §4.
+    static func epubZip(_ syncId: String) -> String { "books/\(syncId)/epub.zip" }
+    static func epubManifest(_ syncId: String) -> String { "books/\(syncId)/epub.manifest" }
+    /// One blob per book holding every sentence's pre-computed translation + explanation, keyed by
+    /// the sentence's chapter address (`c{spine}s{normalizedStart}`). The EPUB counterpart of
+    /// `pretranslations`, on its own key for the same Android-isolation reason.
+    static func sentences(_ syncId: String) -> String { "books/\(syncId)/sentences" }
 }
 
 // MARK: - Edit-depth revision comparison (cross-device-critical; mirror of Android)

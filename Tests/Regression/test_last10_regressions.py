@@ -63,7 +63,7 @@ class LastTenRegressionTests(unittest.TestCase):
     def test_offline_translation_fails_closed_without_downloaded_model(self):
         controller = read("Features/AI/MangaAiController.swift")
         ask_prefix = controller[
-            controller.index("func ask(bubbleText: String, book: BookMetadata)"):
+            controller.index("func ask(bubbleText: String, blockId:"):
             controller.index("let apiKey = settings.apiKey")
         ]
         self.assertIn("if offlineSettings.useOnDeviceTranslation {", ask_prefix)
@@ -74,11 +74,9 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("model: result.modelId", controller)
         self.assertNotIn("model: model.id", method_body(controller, "private func askOnDevice"))
 
-    def test_manga_ai_dictionary_lookup_uses_cxx_string_helper(self):
+    def test_manga_ai_dictionary_context_uses_cxx_string_helper(self):
         controller = read("Features/AI/MangaAiController.swift")
-        popup = read("Features/AI/MangaAiPopupView.swift")
         result = method_body(controller, "private static func toResult")
-        lookup = method_body(popup, "private func lookUp")
         self.assertIn("cxxStringToSwift($0.name)", result)
         self.assertIn("cxxStringToSwift($0.description)", result)
         self.assertIn("cxxStringToSwift($0.dict_name)", result)
@@ -86,9 +84,6 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("cxxStringToSwift(result.matched)", result)
         self.assertNotIn("String($0.name)", result)
         self.assertNotIn("String($0.dict_name)", result)
-        self.assertIn("cxxStringToSwift(style.dict_name)", lookup)
-        self.assertIn("cxxStringToSwift(style.styles)", lookup)
-        self.assertNotIn("String(style.dict_name)", lookup)
 
     def test_download_delete_and_cancel_suppress_late_callbacks(self):
         manager = read("Features/AI/offline/ModelDownloadManager.swift")
@@ -130,6 +125,189 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertRegex(settings, r"var isConfigured: Bool \{[^}]*Self\.isSecureBaseURL\(baseURL\)", re.S)
         self.assertRegex(settings, r"var isConfigured: Bool \{[^}]*HttpSyncSettingsStore\.isSecureBaseURL\(baseURL\)", re.S)
 
+    def test_http_sync_retries_rate_limits_and_resumes_from_checkpoint(self):
+        kv = read("Features/HttpSync/HttpSyncKv.swift")
+        reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
+        gate = method_body(kv, "func wait() async throws")
+
+        self.assertIn("HttpSyncRequestGate(minimumInterval: 0.150)", kv)
+        self.assertIn("http.statusCode == 429", kv)
+        self.assertIn('"Retry-After"', kv)
+        self.assertIn("maxRateLimitRetries", kv)
+        self.assertLess(gate.index("nextRequestAt ="), gate.index("Task.sleep"))
+        self.assertIn("imposeCooldown(seconds:", kv)
+        self.assertIn(
+            "transport.listAll(prefix: SyncKeys.allBooksPrefix, since: nil)",
+            reconciler,
+        )
+        self.assertIn("HttpSyncAppliedKeyStore.load()", reconciler)
+        self.assertIn("let applied = appliedKeys[meta.key]", reconciler)
+        self.assertIn("applied.matches(meta)", reconciler)
+        self.assertIn('private static let filename = ".http_sync_applied_keys.json"', reconciler)
+        self.assertIn("if inbound.listingSucceeded", reconciler)
+
+    def test_epub_translation_buttons_have_scroll_reader_css(self):
+        paginated = read("Features/Reader/ReaderWebView/ReaderWebView.swift")
+        continuous = read("Features/Reader/ScrollReaderWebView/ScrollReaderWebView.swift")
+
+        for selector in (".hoshi-tl {", ".hoshi-tl::before {", ".hoshi-tl::after {"):
+            self.assertIn(selector, paginated)
+            self.assertIn(selector, continuous)
+        self.assertIn("left: -0.7em;", continuous)
+        self.assertIn("bottom: -0.7em;", continuous)
+
+    def test_translation_sync_uses_etag_ledger_not_equal_byte_size(self):
+        reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
+        pretranslations = method_body(reconciler, "private func applyPretranslationsFromRemote")
+        sentences = method_body(reconciler, "private func applySentenceTranslationsFromRemote")
+
+        self.assertNotIn("localSize == remoteSize", pretranslations)
+        self.assertNotIn("localSize == remoteSize", sentences)
+        self.assertNotIn("meta.size", pretranslations)
+        self.assertNotIn("meta.size", sentences)
+        self.assertIn("applied.matches(meta)", reconciler)
+        self.assertIn("localArtifact: applied.localArtifact", reconciler)
+
+    def test_applied_reading_key_requires_its_local_artifact(self):
+        reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
+        check = method_body(reconciler, "private func localReadingArtifactIsPresent")
+
+        self.assertIn("BookStorage.loadBookmark(root: root) != nil", check)
+        self.assertIn("SyncKeys.chat(parsed.syncId, suffix: suffix) == key", check)
+        self.assertIn("FileNames.pretranslations", check)
+        self.assertIn("FileNames.sentenceTranslations", check)
+        self.assertIn("applied.localArtifact?.matches", check)
+        self.assertIn("size.int64Value > 0", reconciler)
+
+    def test_dual_payload_manifests_use_metadata_or_reject_ambiguity(self):
+        reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
+        inbound = method_body(reconciler, "private func pullChangedKeys")
+
+        self.assertIn("remoteFormatBySyncId[parsed.syncId] = remote.blob.contentType", inbound)
+        self.assertIn("if let mokuro = pair.mokuro, let epub = pair.epub", inbound)
+        self.assertIn("switch remoteFormatBySyncId[bookSyncId]", inbound)
+        self.assertIn("both payload.manifest and epub.manifest exist without authoritative metadata", inbound)
+        self.assertNotIn("payloadManifests.map", inbound)
+
+    def test_remote_epub_import_checks_manifest_format_and_parse(self):
+        payload = read("Features/HttpSync/HttpSyncPayload.swift")
+        reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
+        download = method_body(payload, "func downloadAndUnpack")
+        remote_import = method_body(reconciler, "private func importRemoteOnlyBook")
+
+        self.assertIn("manifest.format == expectedFormat", download)
+        self.assertIn("manifest.format == format", remote_import)
+        self.assertIn("guard detected == format", remote_import)
+        self.assertIn("guard let parsed = try? BookStorage.loadEpub(root)", remote_import)
+        self.assertLess(
+            remote_import.index("guard let parsed = try? BookStorage.loadEpub(root)"),
+            remote_import.index("let metadata = BookMetadata("),
+        )
+
+    def test_epub_sentence_blob_contract_is_fail_closed(self):
+        store = read("Features/AI/EpubTranslationStore.swift")
+        reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
+        validation = method_body(store, "func validationError")
+        apply_sentences = method_body(reconciler, "private func applySentenceTranslationsFromRemote")
+
+        self.assertIn("syncId == expectedSyncId", validation)
+        self.assertIn("spineCount == expectedSpineCount", validation)
+        self.assertIn("entry.spine >= 0", validation)
+        self.assertIn("entry.spine < expectedSpineCount", validation)
+        self.assertIn("entry.start >= 0", validation)
+        self.assertIn("entry.len > 0", validation)
+        self.assertIn('id == "c\\(entry.spine)s\\(entry.start)"', validation)
+        self.assertIn("normalized.unicodeScalars.count == entry.len", validation)
+        self.assertIn("entry.hash == EpubTranslationStore.textHash(normalized)", validation)
+        self.assertIn("entry.translation.trimmingCharacters", validation)
+        self.assertIn("syncId(for: localMetadata) == expectedSyncId", apply_sentences)
+        self.assertIn("BookStorage.loadEpub(root)", apply_sentences)
+        self.assertIn("blob.validationError", apply_sentences)
+        self.assertIn('SentenceAnchor(id: "\\(id)#\\(entry.hash)"', store)
+
+    def test_epub_translation_js_uses_code_point_offsets(self):
+        translations = read("Features/Reader/ReaderWebView/translations.js")
+        resolve = method_body(translations, "resolve(chapter, anchor)")
+
+        self.assertIn("Array.from(want)", resolve)
+        self.assertIn("start < 0", resolve)
+        self.assertNotIn("chapter.text.substr(", resolve)
+        self.assertNotIn("indexOf(want", resolve)
+        if shutil.which("node") is None:
+            self.skipTest("node is required for the supplementary-plane translation probe")
+        js_path = ROOT / "Features/Reader/ReaderWebView/translations.js"
+        probe = textwrap.dedent(f"""
+            const fs = require('fs');
+            global.window = {{}};
+            eval(fs.readFileSync({str(js_path)!r}, 'utf8'));
+            const chapter = {{ chars: Array.from('甲𠀀乙'), text: '甲𠀀乙', ends: [0, 1, 2] }};
+            const resolve = window.hoshiTranslations.resolve.bind(window.hoshiTranslations);
+            if (resolve(chapter, {{ start: 1, len: 1, text: '𠀀' }}) !== 1) {{
+              throw new Error('supplementary-plane code point did not resolve to ends[1]');
+            }}
+            if (resolve(chapter, {{ start: -1, len: 1, text: '甲' }}) !== -1) {{
+              throw new Error('negative start was accepted');
+            }}
+            if (resolve(chapter, {{ start: 2, len: 1, text: '𠀀' }}) !== -1) {{
+              throw new Error('stale offset was allowed to target another code point');
+            }}
+        """)
+        subprocess.run(["node", "-e", probe], check=True, capture_output=True, text=True)
+
+    def test_sentence_translation_toggle_updates_open_reader(self):
+        view = read("Features/Reader/ReaderView/ReaderView.swift")
+        model = read("Features/Reader/ReaderView/ReaderViewModel.swift")
+
+        self.assertIn(".onChange(of: userConfig.readerShowSentenceTranslations)", view)
+        self.assertIn("viewModel.setSentenceTranslationsEnabled(enabled)", view)
+        toggle = method_body(model, "func setSentenceTranslationsEnabled")
+        self.assertIn("preloadSentenceTranslationsAndReloadIfNeeded()", toggle)
+        self.assertIn("loadCurrentChapter()", toggle)
+        self.assertIn("Task.detached(priority: .userInitiated)", model)
+
+    def test_keychain_pastes_publish_configuration_changes(self):
+        http = read("Features/HttpSync/HttpSyncSettingsStore.swift")
+        ai = read("Features/AI/AiChatSettingsStore.swift")
+
+        self.assertIn("private var tokenRevision = 0", http)
+        self.assertIn("_ = tokenRevision", http)
+        self.assertIn("tokenRevision &+= 1", http)
+        self.assertIn("trimmingCharacters(in: .whitespacesAndNewlines)", http)
+        self.assertIn("private var apiKeyRevision = 0", ai)
+        self.assertIn("_ = apiKeyRevision", ai)
+        self.assertIn("apiKeyRevision &+= 1", ai)
+
+    def test_translation_settings_sync_before_books_and_ignores_book_breaker(self):
+        manager = read("Features/HttpSync/HttpSyncManager.swift")
+        reconcile = method_body(manager, "private func runReconcile() async")
+        settings_push = method_body(manager, "func onAiSettingsChanged()")
+
+        self.assertLess(
+            reconcile.index("syncAppSettings"),
+            reconcile.index("reconciler.syncOnce"),
+        )
+        self.assertIn("guard settings.enabled, settings.isConfigured, let aiSettings", settings_push)
+        self.assertNotIn("autoPushReady", settings_push)
+        self.assertNotIn("notePushOutcome", settings_push)
+
+    def test_gemini_uses_google_and_never_displays_openai_fallback_labels(self):
+        catalog = read("Features/AI/ChatModelCatalog.swift")
+        client = read("Features/AI/OpenAiChatClient.swift")
+        gemini = read("Features/AI/GeminiChatClient.swift")
+        popup = read("Features/AI/MangaAiPopupView.swift")
+
+        self.assertIn('id: "gemini-3.6-flash"', catalog)
+        self.assertIn('baseURL: "https://generativelanguage.googleapis.com/v1beta"', catalog)
+        self.assertIn("wireFormat: .gemini", catalog)
+        self.assertIn("case .gemini:", catalog)
+        self.assertIn("GeminiChatClient()", catalog)
+        self.assertIn("models/\\(encodedModel):generateContent", gemini)
+        self.assertIn('forHTTPHeaderField: "x-goog-api-key"', gemini)
+        self.assertIn("serviceName: provider.displayName", catalog)
+        self.assertIn(r'"\(serviceName) request failed', client)
+        self.assertIn("controller.activeBackendName", popup)
+        self.assertNotIn("Asking ChatGPT", popup)
+
     def test_page_ready_is_tied_to_navigation_load_token(self):
         view = read("Features/MangaReader/MangaReaderView.swift")
         webview = read("Features/MangaReader/MangaReaderWebView.swift")
@@ -169,7 +347,6 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn(".frame(width: width, height: height)", popup)
         self.assertIn(".scrollIndicators(.visible)", popup)
         self.assertNotIn("let maxCharactersPerToken = 8", popup)
-        self.assertIn("appendWrappedNonJapanese", popup)
         self.assertIn("import NaturalLanguage", tokenizer)
         self.assertIn("NLTokenizer(unit: .word)", tokenizer)
         self.assertNotIn("maxUnbrokenCharacters", tokenizer)
@@ -212,49 +389,29 @@ precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
         self.assertIn("FileNames.aiChatLog", history)
         self.assertIn("var screenshotImage: AiChatImage?", types)
 
-    def test_ai_popup_strips_thinking_without_losing_tappable_renderer(self):
+    def test_ai_popup_strips_thinking_and_uses_library_markdown_renderer(self):
         popup = read("Features/AI/MangaAiPopupView.swift")
         sanitizer = read("Features/AI/AiThinkingTextSanitizer.swift")
         project = read("Hoshi Reader.xcodeproj/project.pbxproj")
 
-        self.assertNotIn("import MarkdownUI", popup)
+        self.assertIn("import Textual", popup)
         self.assertIn("let visible = AiThinkingTextSanitizer.strip(response)", popup)
-        self.assertIn("Self.responseBlocks(visible)", popup)
-        self.assertIn("lineView(line)", popup)
-        self.assertIn("lookUp(word: scanText", popup)
-        self.assertIn("inlineOnlyPreservingWhitespace", popup)
-        self.assertIn("let attributed = markdown(line)", popup)
-        self.assertIn("materializeInlineMarkdown", popup)
-        self.assertIn("intent.contains(.stronglyEmphasized)", popup)
-        self.assertIn("visible.contains(\"**\")", popup)
-        self.assertIn("strippingCommonMarkdownMarkers", popup)
-        self.assertIn(".accessibilityLabel(Self.accessibilityText(for: line))", popup)
+        self.assertIn("StructuredText(markdown: visible)", popup)
+        self.assertIn("HoshiMarkdownStyle(useUniformTextSize:", popup)
+        self.assertIn("private struct HoshiMarkdownStyle: StructuredText.Style", popup)
+        self.assertGreaterEqual(popup.count(".foregroundColor(.white)"), 5)
+        self.assertGreaterEqual(popup.count(".foregroundStyle(.white)"), 3)
+        self.assertIn(".textual.highlighterTheme(.init(", popup)
+        self.assertIn("foregroundColor: DynamicColor(.white)", popup)
+        self.assertNotIn("tokenProperties:", popup)
+        self.assertIn(".textual.textSelection(.enabled)", popup)
+        self.assertNotIn("responseBlocks", popup)
+        self.assertNotIn("markdownHeading", popup)
+        self.assertNotIn("parseTableRow", popup)
+        self.assertNotIn("AttributedString(markdown:", popup)
         self.assertIn("progress.totalTokens > 0", popup)
         self.assertIn("progress.thinkingTokens", popup)
         self.assertIn("%d answer tokens · %d thinking tokens", popup)
-        self.assertIn("case .table(let rows)", popup)
-        self.assertIn("private func tableView", popup)
-        self.assertIn("Grid(alignment: .topLeading", popup)
-        self.assertIn("GridRow", popup)
-        self.assertIn(".gridCellColumns(columnCount)", popup)
-        self.assertIn("private static func isTableSeparator(_ line: String, header: String)", popup)
-        self.assertIn('guard line.contains("|"), header.contains("|") else { return false }', popup)
-        self.assertIn("guard headerCells.count >= 2, separatorCells.count == headerCells.count else { return false }", popup)
-        self.assertIn("AttributedString(attributed[index..<next])", popup)
-        swift = shutil.which("swift")
-        if swift is not None:
-            probe = (
-                'import Foundation\n'
-                'let parsed = try! AttributedString(markdown: "**stuff** and **日本語**", '
-                'options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))\n'
-                'precondition(String(parsed.characters) == "stuff and 日本語")\n'
-                'let runDescriptions = parsed.runs.map { String(describing: $0.inlinePresentationIntent) }.joined(separator: "|")\n'
-                'precondition(runDescriptions.contains("rawValue: 2"))\n'
-                'let malformed = try! AttributedString(markdown: "**bo", '
-                'options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))\n'
-                'precondition(String(malformed.characters).contains("**"))\n'
-            )
-            subprocess.run([swift, "-e", probe], check=True, capture_output=True, text=True)
         self.assertIn('private static let startTags = ["<think>", "<thinking>"]', sanitizer)
         self.assertIn('private static let endTags = ["</think>", "</thinking>"]', sanitizer)
         self.assertIn('"thinking processes"', sanitizer)
@@ -273,7 +430,22 @@ precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
         self.assertIn('"answer:"', sanitizer)
         self.assertIn("options: [.caseInsensitive]", sanitizer)
         self.assertIn('return ""', sanitizer)
-        self.assertNotIn("MarkdownUI", project)
+        self.assertIn('XCRemoteSwiftPackageReference "textual"', project)
+        self.assertIn("Textual in Frameworks", project)
+
+    def test_ai_markdown_default_size_option_is_persistent_and_local(self):
+        store = read("Features/AI/AiChatSettingsStore.swift")
+        settings = read("Features/AI/AiSettingsView.swift")
+        popup = read("Features/AI/MangaAiPopupView.swift")
+
+        self.assertIn("private(set) var useUniformMarkdownTextSize: Bool", store)
+        self.assertIn("defaults.bool(forKey: Keys.useUniformMarkdownTextSize)", store)
+        size_setter = method_body(store, "func setUseUniformMarkdownTextSize")
+        self.assertIn("defaults.set(enabled, forKey: Keys.useUniformMarkdownTextSize)", size_setter)
+        self.assertNotIn("onAiSettingsChanged", size_setter)
+        self.assertIn('Toggle("Use default Markdown text size"', settings)
+        self.assertIn('Image(systemName: "textformat.size")', popup)
+        self.assertIn("let scale = useUniformTextSize ? 1 :", popup)
 
     def test_thinking_sanitizer_preserves_valid_wait_translations(self):
         sanitizer = read("Features/AI/AiThinkingTextSanitizer.swift")
@@ -797,9 +969,42 @@ assertEqual(
         self.assertIn("private func mangaActionTopInset(for geometry: GeometryProxy)", view)
         self.assertIn("AiChatSettingsStore.shared.isConfigured ? 140 : 72", view)
         self.assertIn("private static func configureZoom(for scrollView: UIScrollView)", webview)
-        self.assertIn("scrollView.pinchGestureRecognizer?.isEnabled = false", webview)
+        self.assertIn("scrollView.pinchGestureRecognizer?.isEnabled = true", webview)
+        self.assertIn("scrollView.panGestureRecognizer.allowedScrollTypesMask = .all", webview)
+        self.assertIn("observeNativePinch", webview)
+        self.assertIn("observeNativePan", webview)
+        self.assertNotIn("let pinch = UIPinchGestureRecognizer", webview)
+        self.assertNotIn("let trackpadPan = UIPanGestureRecognizer", webview)
+        self.assertIn("let trackpadPageTurn = UIPanGestureRecognizer", webview)
+        self.assertIn("trackpadPageTurn.allowedScrollTypesMask = .continuous", webview)
+        self.assertIn("trackpadPageTurn.allowedTouchTypes = []", webview)
+        page_turn = method_body(webview, "@objc func handleTrackpadPageTurn")
+        self.assertIn("gesture.state == .ended", page_turn)
+        self.assertIn("commitTrackpadPageTurn(translation: translation)", page_turn)
+        native_pan = method_body(webview, "@objc func observeNativePan")
+        self.assertNotIn("setContentOffset", native_pan)
+        self.assertNotIn("commitTrackpadPageTurn", native_pan)
+        should_begin = method_body(webview, "func gestureRecognizerShouldBegin")
+        self.assertIn("gestureRecognizer === trackpadPageTurnRecognizer", should_begin)
+        self.assertIn("!pinchIsActive && !viewportNeedsPan(scrollView)", should_begin)
         self.assertIn("handlePinch", webview)
-        self.assertIn("scrollView.setZoomScale(scale, animated: false)", webview)
+        self.assertIn("gesture.numberOfTouches == 0", webview)
+        self.assertIn("rawLocation.x - scrollView.bounds.minX", webview)
+        self.assertIn("setCurrentAnchor(currentLocation)", webview)
+        self.assertIn("previousPinchLocation", webview)
+        self.assertIn("MangaIndirectPinchTransform", webview)
+        self.assertIn("claimPendingTrackpadTranslation", webview)
+        self.assertIn("session.appliedTranslation = session.totalTranslation", webview)
+        self.assertIn("MangaViewportGestureMath.zoomOffset", webview)
+        self.assertIn("MangaViewportGestureMath.panOffset", webview)
+        self.assertIn("session.usedForViewport = true", webview)
+        self.assertIn("gesture.scale = 1", webview)
+        self.assertNotIn("scrollView.panGestureRecognizer.translation", webview)
+        self.assertNotIn("addEventListener('wheel'", html)
+        self.assertNotIn("event: 'wheel'", html)
+        project = read("Hoshi Reader.xcodeproj/project.pbxproj")
+        self.assertEqual(project.count("INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;"), 2)
+        self.assertIn("scrollView.setZoomScale(newScale, animated: false)", webview)
         self.assertIn("MangaReaderWebView.configureZoom(for: webView.scrollView)", webview)
         self.assertIn("hostOffsetLeftValue", html)
         self.assertIn("x: x * scale,", html)
@@ -928,9 +1133,9 @@ assertEqual(
         stub_call = view[view.index("} else if uiTestingAiStubEnabled"):view.index("} else {", view.index("} else if uiTestingAiStubEnabled"))]
         self.assertIn("#if DEBUG", stub_call)
         self.assertIn("#else", stub_call)
-        self.assertIn("aiController.ask(bubbleText: text, book: metadata)", stub_call)
+        self.assertIn("aiController.ask(bubbleText: text, blockId: blockId, book: metadata)", stub_call)
         self.assertIn("aiController.resolveForUITest(bubbleText: text, book: metadata)", view)
-        self.assertIn('accessibilityLabel("Close ChatGPT")', popup)
+        self.assertIn('accessibilityLabel("Close translation")', popup)
         self.assertIn("testNearTopAiButtonRespondsAndSecondTapDoesNotCrash", ui_test)
         self.assertIn('app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"', ui_test)
         self.assertIn('app.buttons["Ask about this bubble"]', ui_test)

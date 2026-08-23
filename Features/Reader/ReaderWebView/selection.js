@@ -16,7 +16,7 @@ window.hoshiSelection = {
     isVertical() {
         return window.getComputedStyle(document.body).writingMode === "vertical-rl";
     },
-    
+
     isScanBoundary(char) {
         return /^[\s\u3000]$/.test(char) || this.scanDelimiters.includes(char);
     },
@@ -43,6 +43,11 @@ window.hoshiSelection = {
         return !!el?.closest('rt, rp');
     },
     
+    isTranslationButton(node) {
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        return !!el?.closest('.hoshi-tl');
+    },
+
     findParagraph(node) {
         let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
         return el?.closest('p, .glossary-content') || null;
@@ -50,9 +55,11 @@ window.hoshiSelection = {
     
     createWalker(rootNode) {
         const root = rootNode || document.body;
-        
+
         return document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-            acceptNode: (n) => this.isFurigana(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+            acceptNode: (n) => (this.isFurigana(n) || this.isTranslationButton(n))
+                ? NodeFilter.FILTER_REJECT
+                : NodeFilter.FILTER_ACCEPT
         });
     },
     
@@ -318,6 +325,18 @@ window.hoshiSelection = {
     },
     
     selectText(x, y, maxLength) {
+        // A sentence-translation button is handled here rather than with its own click listener:
+        // the reader drives selection from a native tap recognizer, so a competing JS listener
+        // would race it. Checking first means one tap does exactly one thing.
+        const button = document.elementFromPoint(x, y)?.closest?.('.hoshi-tl');
+        if (button) {
+            this.clearSelection();
+            try {
+                webkit.messageHandlers.sentenceTranslate.postMessage({ id: button.dataset.tl || '' });
+            } catch (e) {}
+            return null;
+        }
+
         const hit = this.getCharacterAtPoint(x, y);
         
         if (!hit) {

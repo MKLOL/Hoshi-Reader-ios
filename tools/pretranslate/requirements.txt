@@ -1,0 +1,7 @@
+requests>=2.32
+remotezip>=0.12.3
+# EPUB path: \p{Radical} / \p{Unified_Ideograph} in the shared
+# normalizer, which stdlib `re` cannot express.
+regex>=2024.5.15
+# Official, actively maintained SDK used by gemini_epub_batch.py.
+google-genai>=2.16,<3

@@ -13,7 +13,7 @@ window.hoshiReader = {
     cueWrappers: new Map(),
     nodeStartOffsets: new WeakMap(),
     nodeStartRawOffsets: new WeakMap(),
-    
+
     isVertical() {
         return window.getComputedStyle(document.body).writingMode === "vertical-rl";
     },
@@ -23,6 +23,14 @@ window.hoshiReader = {
         return !!el?.closest('rt, rp');
     },
     
+    // Sentence-translation buttons are chrome, not text. They carry no text node today, so this is
+    // defensive — but every offset in the reader (bookmarks, highlights, Sasayaki cues) is counted
+    // by these walkers, so the guard is cheap next to the failure it prevents.
+    isTranslationButton(node) {
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        return !!el?.closest('.hoshi-tl');
+    },
+
     countChars(text) {
         return Array.from(this.normalizeText(text)).length;
     },
@@ -43,7 +51,9 @@ window.hoshiReader = {
         const root = rootNode || document.body;
         
         return document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-            acceptNode: (n) => this.isFurigana(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+            acceptNode: (n) => (this.isFurigana(n) || this.isTranslationButton(n))
+                ? NodeFilter.FILTER_REJECT
+                : NodeFilter.FILTER_ACCEPT
         });
     },
     

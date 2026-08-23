@@ -13,7 +13,7 @@ window.hoshiReader = {
     cueWrappers: new Map(),
     nodeStartOffsets: new WeakMap(),
     nodeStartRawOffsets: new WeakMap(),
-    
+
     isVertical() {
         return window.getComputedStyle(document.body).writingMode === "vertical-rl";
     },
@@ -39,11 +39,19 @@ window.hoshiReader = {
         return this.ttuRegex.test(char || '');
     },
     
+    // Sentence-translation buttons are chrome, not text — see reader.js.
+    isTranslationButton(node) {
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        return !!el?.closest('.hoshi-tl');
+    },
+
     createWalker(rootNode) {
         const root = rootNode || document.body;
         
         return document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-            acceptNode: (n) => this.isFurigana(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+            acceptNode: (n) => (this.isFurigana(n) || this.isTranslationButton(n))
+                ? NodeFilter.FILTER_REJECT
+                : NodeFilter.FILTER_ACCEPT
         });
     },
     

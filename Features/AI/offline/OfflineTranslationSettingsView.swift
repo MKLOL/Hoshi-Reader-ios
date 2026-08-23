@@ -44,8 +44,8 @@ struct OfflineTranslationSettingsView: View {
             } footer: {
                 if anyDownloaded {
                     Text("Translate speech bubbles fully on-device using a downloaded model. No API "
-                        + "key or connection needed. Quality is lower than ChatGPT. Screenshot "
-                        + "(vision) translation still uses ChatGPT. Private thinking can improve "
+                        + "key or connection needed. Quality may be lower than the selected cloud model. Screenshot "
+                        + "(vision) translation still uses the selected cloud provider. Private thinking can improve "
                         + "some answers but is slower; turn it off for the most predictable offline "
                         + "behavior. The answer token limit controls how long the visible response "
                         + "may be before generation is stopped.")

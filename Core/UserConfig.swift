@@ -26,7 +26,7 @@ enum Themes: String, CaseIterable, Codable {
     case dark = "Dark"
     case sepia = "Sepia"
     case custom = "Custom"
-    
+
     var colorScheme: ColorScheme? {
         switch self {
         case .light: .light
@@ -139,6 +139,12 @@ class UserConfig {
         didSet { UserDefaults.standard.set(readerHideFurigana, forKey: "readerHideFurigana") }
     }
     
+    /// Show a translate button after every pre-translated sentence. Only has an effect on a book
+    /// whose `sentence_translations.json` has been synced down.
+    var readerShowSentenceTranslations: Bool {
+        didSet { UserDefaults.standard.set(readerShowSentenceTranslations, forKey: "readerShowSentenceTranslations") }
+    }
+
     var continuousMode: Bool {
         didSet { UserDefaults.standard.set(continuousMode, forKey: "continuousMode") }
     }
@@ -375,6 +381,7 @@ class UserConfig {
         self.selectedFont = defaults.string(forKey: "selectedFont") ?? "Hiragino Mincho ProN"
         self.fontSize = defaults.object(forKey: "fontSize") as? Int ?? 22
         self.readerHideFurigana = defaults.object(forKey: "readerHideFurigana") as? Bool ?? false
+        self.readerShowSentenceTranslations = defaults.object(forKey: "readerShowSentenceTranslations") as? Bool ?? true
         
         self.continuousMode = defaults.object(forKey: "continuousMode") as? Bool ?? false
         self.chapterSwipeDistance = defaults.object(forKey: "chapterSwipeDistance") as? Int ?? 20

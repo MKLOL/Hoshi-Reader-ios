@@ -26,6 +26,14 @@ nonisolated enum FileNames: Sendable {
     static let mokuro = "mokuro.json"
     /// Per-manga ChatGPT exchange history.
     static let aiChatLog = "ai_chat_log.json"
+    /// Pre-computed offline translations for this volume's speech bubbles, produced by the
+    /// desktop pre-translation tool and synced as `books/{syncId}/pretranslations`. A read-only
+    /// cache — deliberately NOT chat history.
+    static let pretranslations = "pretranslations.json"
+    /// Pre-computed offline translations for an EPUB's sentences, produced by the desktop tool and
+    /// synced as `books/{syncId}/sentences`. The novel counterpart of `pretranslations.json`; a
+    /// separate name so the bubble-addressed store can never read a sentence-addressed blob.
+    static let sentenceTranslations = "sentence_translations.json"
     /// Subfolder of flattened page images inside a mokuro book directory.
     static let mokuroImages = "images"
 }

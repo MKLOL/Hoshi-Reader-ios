@@ -213,6 +213,124 @@ nonisolated struct HttpSyncAiChatSettingsBlob: Codable, Equatable {
     }
 }
 
+// MARK: - Offline pre-translations
+
+/// One pre-computed translation + explanation for a single speech bubble.
+///
+/// `hash` is a short sha256 of the source Japanese. The reader compares it against the bubble it
+/// actually tapped so a re-OCR that shifted the text can be detected rather than silently serving
+/// the wrong line.
+nonisolated struct HttpSyncPretranslationEntry: Codable, Equatable {
+    let text: String
+    let hash: String
+    let translation: String
+    let explanation: String
+}
+
+/// Every bubble's offline translation for one volume, produced by the desktop pre-translation
+/// tool (tools/pretranslate) and stored at `books/{syncId}/pretranslations`.
+///
+/// `entries` is keyed by the bubble's mokuro address, `p{pageIndex}b{blockIndex}` — derived from
+/// the OCR file itself, so it survives re-imports and is stable across platforms. A flat map keeps
+/// a lookup to one dictionary hit.
+///
+/// Field names MUST match the Android `PretranslationsBlob` and the Python writer in
+/// tools/pretranslate/hoshi_pretranslate/blob.py.
+nonisolated struct HttpSyncPretranslationsBlob: Codable, Equatable {
+    /// Highest blob version this build understands. A blob stamped newer is rejected rather than
+    /// silently decoded into whatever subset of fields happens to still match.
+    static let supportedVersion = 1
+
+    let version: Int
+    let syncId: String
+    let title: String
+    /// Which model produced these, for display and for invalidation after a re-run.
+    let model: String
+    let promptId: String
+    let generatedAt: String
+    let entries: [String: HttpSyncPretranslationEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case version, syncId, title, model, promptId, generatedAt, entries
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        syncId = try c.decodeIfPresent(String.self, forKey: .syncId) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        promptId = try c.decodeIfPresent(String.self, forKey: .promptId) ?? ""
+        generatedAt = try c.decodeIfPresent(String.self, forKey: .generatedAt) ?? ""
+        entries = try c.decodeIfPresent([String: HttpSyncPretranslationEntry].self, forKey: .entries) ?? [:]
+    }
+}
+
+// MARK: - EPUB sentence translations
+
+/// One pre-computed translation + explanation for a single sentence of a novel.
+///
+/// `start`/`len` are counts of *matchable* characters (kana, kanji, radicals, alphanumerics —
+/// `String.filtered()`'s character class) from the start of the chapter. That is the same offset
+/// space Sasayaki cues use, so `reader.js` can map it straight back to a DOM range.
+///
+/// `hash` is a short sha256 of the sentence's NORMALIZED text — not its raw text, unlike the manga
+/// blob. Both sides of the manga path read the same `mokuro.json`, but a sentence is reassembled
+/// from DOM nodes at runtime and will not match the tool's raw string byte for byte (whitespace,
+/// entity decoding, inline markup). Normalizing first removes that class of false mismatch while
+/// still catching a chapter whose words actually changed.
+nonisolated struct HttpSyncSentenceEntry: Codable, Equatable {
+    let spine: Int
+    let start: Int
+    let len: Int
+    let text: String
+    let hash: String
+    let translation: String
+    let explanation: String
+}
+
+/// Every sentence's offline translation for one novel, produced by the desktop tool
+/// (tools/pretranslate, EPUB mode) and stored at `books/{syncId}/sentences`.
+///
+/// `entries` is keyed by the sentence's chapter address, `c{spineIndex}s{normalizedStart}`.
+///
+/// Field names MUST match the Python writer in
+/// tools/pretranslate/hoshi_pretranslate/epub_blob.py.
+nonisolated struct HttpSyncSentencesBlob: Codable, Equatable {
+    static let supportedVersion = 1
+    /// Guards against reading a bubble-addressed blob as a sentence-addressed one.
+    static let expectedKind = "epub"
+
+    let version: Int
+    let kind: String
+    let syncId: String
+    let title: String
+    let model: String
+    let promptId: String
+    let generatedAt: String
+    /// Number of spine items the tool saw. A mismatch against the book means the blob was made
+    /// from a different build of this EPUB and its addresses cannot be trusted.
+    let spineCount: Int
+    let entries: [String: HttpSyncSentenceEntry]
+
+    enum CodingKeys: String, CodingKey {
+        case version, kind, syncId, title, model, promptId, generatedAt, spineCount, entries
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
+        syncId = try c.decodeIfPresent(String.self, forKey: .syncId) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
+        promptId = try c.decodeIfPresent(String.self, forKey: .promptId) ?? ""
+        generatedAt = try c.decodeIfPresent(String.self, forKey: .generatedAt) ?? ""
+        spineCount = try c.decodeIfPresent(Int.self, forKey: .spineCount) ?? 0
+        entries = try c.decodeIfPresent([String: HttpSyncSentenceEntry].self, forKey: .entries) ?? [:]
+    }
+}
+
 /// Manifest describing a book's payload.zip.
 nonisolated struct HttpSyncPayloadManifest: Codable, Equatable {
     let sha256: String

@@ -64,3 +64,19 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# TestFlight shipping secrets
+.shipenv
+build/testflight/
+# altool suggests ./private_keys as the FIRST search path, so an ASC signing key
+# can easily land in the repo. Never commit one.
+private_keys/
+AuthKey_*.p8
+*.p8
+*.mobileprovision
+*.xcarchive/
+*.p12
+
+# Pre-translation working directories: the source .epub (copyrighted), multi-MB batch
+# request/response JSONL, and per-book checkpoints. All regenerable, none belongs in git.
+tools/pretranslate/work/

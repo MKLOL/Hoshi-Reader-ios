@@ -46,6 +46,8 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "sasayaki_playback.json",   // per-device playhead
     "bookinfo.json",            // derived locally at import
     "highlights.json",          // per-device
+    "pretranslations.json",     // synced as …/pretranslations
+    "sentence_translations.json", // synced as …/sentences
     httpSyncPayloadShaCacheFilename,
 ]
 
@@ -54,6 +56,28 @@ nonisolated let httpSyncPayloadExcludedDirs: Set<String> = ["Sasayaki"]
 
 /// Sidecar caching the last-computed payload sha so an unchanged book isn't re-zipped/re-hashed.
 nonisolated let httpSyncPayloadShaCacheFilename = ".payload.sha256.cache"
+
+/// Which pair of KV keys a book's payload lives under.
+///
+/// Mokuro keeps the original `payload.*` keys. EPUB deliberately gets its own: Android's
+/// `parseBookKey` matches a closed set of suffixes and skips anything else without fetching it, so
+/// routing novels here means the Android client never downloads a book it was not built to expect
+/// and needs no changes at all. See docs/EPUB_TRANSLATION_ARCHITECTURE.md §4.
+nonisolated struct HttpSyncPayloadKeys {
+    let zip: String
+    let manifest: String
+
+    static func forFormat(_ format: ContentType, syncId: String) -> HttpSyncPayloadKeys {
+        switch format {
+        case .mokuro:
+            return HttpSyncPayloadKeys(zip: SyncKeys.payloadZip(syncId),
+                                       manifest: SyncKeys.payloadManifest(syncId))
+        case .epub:
+            return HttpSyncPayloadKeys(zip: SyncKeys.epubZip(syncId),
+                                       manifest: SyncKeys.epubManifest(syncId))
+        }
+    }
+}
 
 /// Zips a book directory, computes sha256 of the resulting bytes, and uploads zip + manifest iff
 /// the server has no manifest yet. Downloads + unpacks remote-only books. All file IO is off the
@@ -71,7 +95,8 @@ nonisolated struct HttpSyncPayloadCodec {
         originalName: String,
         format: ContentType
     ) async throws -> Bool {
-        if try await fetchManifest(transport: transport, syncId: syncId) != nil {
+        let keys = HttpSyncPayloadKeys.forFormat(format, syncId: syncId)
+        if try await fetchManifest(transport: transport, keys: keys) != nil {
             // Server already has this book — refuse to re-upload regardless of local mtime drift.
             return false
         }
@@ -90,7 +115,7 @@ nonisolated struct HttpSyncPayloadCodec {
         Self.writeCachedSha(bookRoot: bookRoot, sha: sha)
 
         // PUT zip first so the manifest never points at a missing or stale blob.
-        _ = try await transport.putFile(key: SyncKeys.payloadZip(syncId), contentType: "application/zip", fileURL: zipURL)
+        _ = try await transport.putFile(key: keys.zip, contentType: "application/zip", fileURL: zipURL)
         let manifest = HttpSyncPayloadManifest(
             sha256: sha,
             sizeBytes: size,
@@ -99,7 +124,7 @@ nonisolated struct HttpSyncPayloadCodec {
         )
         let body = try Self.jsonEncoder.encode(manifest)
         _ = try await transport.put(
-            key: SyncKeys.payloadManifest(syncId),
+            key: keys.manifest,
             contentType: "application/json; charset=utf-8",
             body: body
         )
@@ -112,16 +137,24 @@ nonisolated struct HttpSyncPayloadCodec {
     func downloadAndUnpack(
         transport: HttpSyncKvTransport,
         syncId: String,
+        keys: HttpSyncPayloadKeys,
+        expectedFormat: ContentType,
         targetDir: URL
     ) async throws -> HttpSyncPayloadManifest {
-        guard let manifest = try await fetchManifest(transport: transport, syncId: syncId) else {
+        guard let manifest = try await fetchManifest(transport: transport, keys: keys) else {
             throw HttpSyncError("No payload manifest for \(syncId).")
+        }
+        guard manifest.format == expectedFormat else {
+            throw HttpSyncError(
+                "Payload manifest for \(syncId) declares \(manifest.format.rawValue), "
+                + "but \(keys.manifest) requires \(expectedFormat.rawValue)."
+            )
         }
         let fileManager = FileManager.default
         let zipURL = fileManager.temporaryDirectory.appendingPathComponent("hoshi-sync-download-\(UUID().uuidString).zip")
         defer { try? fileManager.removeItem(at: zipURL) }
 
-        guard try await transport.downloadToFile(key: SyncKeys.payloadZip(syncId), targetURL: zipURL) != nil else {
+        guard try await transport.downloadToFile(key: keys.zip, targetURL: zipURL) != nil else {
             throw HttpSyncError("Payload zip missing for \(syncId) (manifest existed).")
         }
         // Offload sha verification + unzip so a large download never blocks the UI. Reference
@@ -144,12 +177,15 @@ nonisolated struct HttpSyncPayloadCodec {
 
     /// Fetches just the remote manifest (no payload). `nil` if the server has none. Throws on
     /// network errors or malformed JSON.
-    func fetchManifest(transport: HttpSyncKvTransport, syncId: String) async throws -> HttpSyncPayloadManifest? {
-        guard let fetched = try await transport.get(key: SyncKeys.payloadManifest(syncId)) else { return nil }
+    func fetchManifest(
+        transport: HttpSyncKvTransport,
+        keys: HttpSyncPayloadKeys
+    ) async throws -> HttpSyncPayloadManifest? {
+        guard let fetched = try await transport.get(key: keys.manifest) else { return nil }
         do {
             return try Self.jsonDecoder.decode(HttpSyncPayloadManifest.self, from: fetched.body)
         } catch {
-            throw HttpSyncError("Manifest for \(syncId): malformed JSON.")
+            throw HttpSyncError("Manifest at \(keys.manifest): malformed JSON.")
         }
     }
 

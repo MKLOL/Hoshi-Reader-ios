@@ -16,6 +16,7 @@
 		48C8125F2F5F47C000127630 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 48C8125E2F5F47C000127630 /* PrivacyInfo.xcprivacy */; };
 		48FE8D502F76AB88002C2C49 /* ShareExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 48FE8D462F76AB88002C2C49 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		5784FD089920275CA0864F51 /* ZoomPopupUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */; };
+		A70000000000000000000001 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = A70000000000000000000003 /* Textual */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -164,6 +165,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				01DFBF552FD2710700CE1CD2 /* LLM in Frameworks */,
+				A70000000000000000000001 /* Textual in Frameworks */,
 				48568CD32F1EC9A400F9C126 /* EPUBKit in Frameworks */,
 				482B74F22F4664CB00398222 /* SwiftUIIntrospect in Frameworks */,
 				48BC0BDF2F5C316B00EDAC3F /* CHoshiDicts in Frameworks */,
@@ -211,7 +213,6 @@
 			children = (
 				D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */,
 			);
-			name = UITests;
 			path = UITests;
 			sourceTree = "<group>";
 		};
@@ -241,6 +242,7 @@
 				482B74F12F4664CB00398222 /* SwiftUIIntrospect */,
 				48BC0BDE2F5C316B00EDAC3F /* CHoshiDicts */,
 				D11A0000000000000000BBBB /* LLM */,
+				A70000000000000000000003 /* Textual */,
 			);
 			productName = "Hoshi Reader";
 			productReference = 48D95BC52F1BF4D80074AD70 /* Hoshi Reader.app */;
@@ -322,6 +324,7 @@
 				48A18AB92F465F1F00AC8514 /* XCRemoteSwiftPackageReference "SwiftUI-Introspect" */,
 				48BC0BDD2F5C316B00EDAC3F /* XCRemoteSwiftPackageReference "hoshidicts" */,
 				D11A0000000000000000AAAA /* XCLocalSwiftPackageReference "Libraries/LLM.swift" */,
+				A70000000000000000000002 /* XCRemoteSwiftPackageReference "textual" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 48107AAE2F114021009E12D1;
@@ -451,9 +454,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = GPLBDQ2MBT;
+				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -519,9 +522,9 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 12;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = GPLBDQ2MBT;
+				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -553,6 +556,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_ENTITLEMENTS = HoshiReader.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
@@ -575,8 +579,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				CODE_SIGN_ENTITLEMENTS = HoshiReader.entitlements;
-				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshireader;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -595,6 +598,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_ENTITLEMENTS = HoshiReader.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
@@ -617,8 +621,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
-				CODE_SIGN_ENTITLEMENTS = HoshiReader.entitlements;
-				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshireader;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -648,7 +651,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi.ShareExtension;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshireader.ShareExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -677,7 +680,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshi.ShareExtension;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshireader.ShareExtension;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -774,6 +777,14 @@
 				kind = branch;
 			};
 		};
+		A70000000000000000000002 /* XCRemoteSwiftPackageReference "textual" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gonzalezreal/textual";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.5.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -790,6 +801,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 48BC0BDD2F5C316B00EDAC3F /* XCRemoteSwiftPackageReference "hoshidicts" */;
 			productName = CHoshiDicts;
+		};
+		A70000000000000000000003 /* Textual */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A70000000000000000000002 /* XCRemoteSwiftPackageReference "textual" */;
+			productName = Textual;
 		};
 		D11A0000000000000000BBBB /* LLM */ = {
 			isa = XCSwiftPackageProductDependency;

@@ -53,7 +53,8 @@ struct ReaderLoader: View {
                 autoSyncEnabled: userConfig.enableSync && userConfig.enableAutoSync,
                 syncStats: userConfig.enableSync && userConfig.statisticsEnableSync,
                 statsSyncMode: userConfig.statisticsSyncMode,
-                syncAudioBook: userConfig.enableSasayaki && userConfig.sasayakiEnableSync
+                syncAudioBook: userConfig.enableSasayaki && userConfig.sasayakiEnableSync,
+                showSentenceTranslations: userConfig.readerShowSentenceTranslations
             )
         }
     }
@@ -65,6 +66,9 @@ struct ReaderView: View {
     @Environment(UserConfig.self) private var userConfig
     @State private var viewModel: ReaderViewModel
     @State private var topSafeArea: CGFloat = UIApplication.topSafeArea
+    /// Shared with the manga reader: the same tutor reply, the same popup, the same offline-first
+    /// ordering. Only the cache it reads differs (sentences rather than bubbles).
+    @State private var aiController = MangaAiController()
     @State private var focusMode = false
     @State private var inactiveSince: Date?
     @State private var topBarLeftWidth: CGFloat = 0
@@ -147,7 +151,8 @@ struct ReaderView: View {
         autoSyncEnabled: Bool,
         syncStats: Bool,
         statsSyncMode: StatisticsSyncMode,
-        syncAudioBook: Bool
+        syncAudioBook: Bool,
+        showSentenceTranslations: Bool
     ) {
         _viewModel = State(initialValue: ReaderViewModel(
             book: book,
@@ -158,7 +163,8 @@ struct ReaderView: View {
             autoSyncEnabled: autoSyncEnabled,
             syncStats: syncStats,
             statsSyncMode: statsSyncMode,
-            syncAudioBook: syncAudioBook
+            syncAudioBook: syncAudioBook,
+            showSentenceTranslations: showSentenceTranslations
         ))
     }
     
@@ -231,7 +237,12 @@ struct ReaderView: View {
                             onRestoreCompleted: {
                                 viewModel.handleRestoreCompleted()
                             },
-                            onHighlightCreated: viewModel.addHighlight
+                            onHighlightCreated: viewModel.addHighlight,
+                            onSentenceTranslate: { id in
+                                viewModel.closePopups()
+                                guard let cached = viewModel.sentenceTranslation(id: id) else { return }
+                                aiController.ask(bubbleText: cached.sentenceText, sentenceId: id, book: viewModel.book)
+                            }
                         )
                         .id(WebViewState(
                             verticalWriting: userConfig.verticalWriting,
@@ -276,7 +287,12 @@ struct ReaderView: View {
                             onRestoreCompleted: {
                                 viewModel.handleRestoreCompleted()
                             },
-                            onHighlightCreated: viewModel.addHighlight
+                            onHighlightCreated: viewModel.addHighlight,
+                            onSentenceTranslate: { id in
+                                viewModel.closePopups()
+                                guard let cached = viewModel.sentenceTranslation(id: id) else { return }
+                                aiController.ask(bubbleText: cached.sentenceText, sentenceId: id, book: viewModel.book)
+                            }
                         )
                         .id(WebViewState(
                             verticalWriting: userConfig.verticalWriting,
@@ -560,6 +576,18 @@ struct ReaderView: View {
                 }
             }
         }
+        .overlay {
+            // Same popup the manga reader uses — a cached sentence reply is the same shape as a
+            // cached bubble reply, including the "Ask ChatGPT instead" escape hatch.
+            if aiController.isPresented {
+                MangaAiPopupView(
+                    controller: aiController,
+                    book: viewModel.book,
+                    userConfig: userConfig,
+                    coverURL: viewModel.book.coverURL
+                )
+            }
+        }
         .sheet(item: $viewModel.activeSheet) { item in
             switch item {
             case .appearance:
@@ -628,6 +656,9 @@ struct ReaderView: View {
         .onChange(of: sasayakiTextColor) { _, _ in updateSasayakiColors() }
         .onChange(of: sasayakiBackgroundColor) { _, _ in updateSasayakiColors() }
         .onChange(of: userConfig.sasayakiAutoScroll) { _, _ in viewModel.sasayakiPlayer.updateIdleTimerDisabled() }
+        .onChange(of: userConfig.readerShowSentenceTranslations) { _, enabled in
+            viewModel.setSentenceTranslationsEnabled(enabled)
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             let shouldResync = inactiveSince.map { Date.now.timeIntervalSince($0) >= 600 } ?? false
             inactiveSince = nil
@@ -651,6 +682,8 @@ struct ReaderView: View {
             viewModel.isPaused = true
         }
         .onDisappear {
+            // Cancel any in-flight request when leaving the reader, as the manga reader does.
+            aiController.dismiss()
             viewModel.sasayakiPlayer.teardown()
             Task {
                 await viewModel.flushAutoSync()

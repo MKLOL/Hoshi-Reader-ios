@@ -146,7 +146,8 @@ nonisolated enum MangaPageHtml {
             longSide / Double(imageHeight)
         )
         let boxes = page.textBoxes
-            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight, readabilityFitScale: readabilityFitScale) }
+            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight,
+                               readabilityFitScale: readabilityFitScale, pageIndex: page.index) }
             .joined(separator: "\n")
         let uiTestBoxes = uiTestActionBoxesHtml(
             imageWidth: imageWidth,
@@ -335,7 +336,8 @@ nonisolated enum MangaPageHtml {
         imageWidth: Int,
         imageHeight: Int,
         readabilityFitScale: Double,
-        extraAttributes: String = ""
+        extraAttributes: String = "",
+        pageIndex: Int? = nil
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
         let topPct = percent(box.top, imageHeight)
@@ -369,8 +371,11 @@ nonisolated enum MangaPageHtml {
         // Join with literal `\n` so the shared selection scanner sees mokuro's line boundaries
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
         let text = box.lines.map(escapeHtmlText).joined(separator: "\n")
+        // The bubble's mokuro address, used to look up its pre-computed offline translation. Same
+        // form on every platform and in the desktop tool: `p{pageIndex}b{blockIndex}`.
+        let blockAttribute = pageIndex.map { " data-hoshi-block=\"p\($0)b\(box.blockIndex)\"" } ?? ""
         return """
-            <div class="ocr-box\(verticalClass)" \(extraAttributes) role="button" tabindex="0" \
+            <div class="ocr-box\(verticalClass)"\(blockAttribute) \(extraAttributes) role="button" tabindex="0" \
         aria-pressed="false" style="left: \(leftPct)%; top: \(topPct)%; \
         width: \(widthPct)%; height: \(heightPct)%; --hoshi-drawn-fs: \(drawnCqw)cqw; \
         --hoshi-reveal-fs: \(revealCqw)cqw;">\
@@ -489,6 +494,7 @@ nonisolated enum MangaPageHtml {
           actions.setAttribute('aria-hidden', 'true');
           actions.dataset.placement = 'hidden';
           delete actions.dataset.bubbleText;
+          delete actions.dataset.blockId;
           actions.style.left = '-9999px';
           actions.style.top = '-9999px';
         },
@@ -725,6 +731,9 @@ nonisolated enum MangaPageHtml {
           var gap = 4;
           var bubbleText = box.querySelector('p');
           actions.dataset.bubbleText = bubbleText ? (bubbleText.textContent || '') : '';
+          // Carry the bubble's mokuro address so the AI request can find its pre-computed
+          // offline translation without re-matching on text.
+          actions.dataset.blockId = (box.dataset && box.dataset.hoshiBlock) || '';
           var aiButton = actions.querySelector('.ocr-ai-btn');
           var copyButton = actions.querySelector('.ocr-copy-btn');
           var uiTestSuffix = box.dataset && box.dataset.hoshiUiTest ? (' ' + actions.dataset.bubbleText) : '';
@@ -1050,9 +1059,10 @@ nonisolated enum MangaPageHtml {
           if (aiBtn) {
             var aiActions = aiBtn.closest('.ocr-actions');
             var aiText = aiActions && aiActions.dataset ? aiActions.dataset.bubbleText : '';
+            var aiBlockId = aiActions && aiActions.dataset ? (aiActions.dataset.blockId || '') : '';
             var h = handlers();
             if (aiText && h && h.hoshiMangaAi) {
-              h.hoshiMangaAi.postMessage({ text: aiText });
+              h.hoshiMangaAi.postMessage({ text: aiText, blockId: aiBlockId });
             }
             window.hoshiManga.clearRevealed();
             return '__ai__';

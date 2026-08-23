@@ -80,7 +80,7 @@ struct AppearanceView: View {
                         .pickerStyle(.segmented)
                         .frame(width: 100)
                     }
-                    
+
                     HStack {
                         Picker("Font", selection: fontSelection) {
                             ForEach(FontManager.defaultFonts, id: \.self) { font in
@@ -150,8 +150,10 @@ struct AppearanceView: View {
                         Stepper("", value: $userConfig.fontSize, in: 16...40)
                             .labelsHidden()
                     }
-                    
+
                     Toggle("Hide Furigana", isOn: $userConfig.readerHideFurigana)
+
+                    Toggle("Sentence translations", isOn: $userConfig.readerShowSentenceTranslations)
                 }
                 
                 Section("Layout") {

@@ -25,6 +25,8 @@ nonisolated enum ChatWireFormat {
     case openAICompatible
     /// Anthropic Messages API (`/v1/messages`, `x-api-key` + `anthropic-version`).
     case anthropic
+    /// Native Google Gemini `models/{model}:generateContent` API.
+    case gemini
 }
 
 /// A cloud LLM provider: where to send requests, how to authenticate, and which on-device Keychain
@@ -126,13 +128,12 @@ nonisolated enum ChatModelCatalog {
         keysURL: "https://platform.moonshot.ai/console/api-keys"
     )
 
-    // Google Gemini via its OpenAI-compatible endpoint (`Authorization: Bearer <key>`), so it reuses
-    // the same Chat Completions client — no Gemini-specific code needed.
+    // Google Gemini uses its native API, never the OpenAI-compatible transport.
     static let google = ChatProvider(
         id: "google",
         displayName: "Google (Gemini)",
-        baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
-        wireFormat: .openAICompatible,
+        baseURL: "https://generativelanguage.googleapis.com/v1beta",
+        wireFormat: .gemini,
         keychainKey: "moe.antimony.hoshi.apikey.google",
         keysURL: "https://aistudio.google.com/apikey"
     )
@@ -159,10 +160,9 @@ nonisolated enum ChatModelCatalog {
         .init(id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", provider: anthropic, note: "cheap"),
 
         // Google Gemini (Flash models are fast + cheap, strong at JP→EN)
-        .init(id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", provider: google, note: "best"),
-        .init(id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", provider: google, note: nil),
-        .init(id: "gemini-2.5-flash-lite", displayName: "Gemini 2.5 Flash-Lite", provider: google, note: "cheap"),
-        .init(id: "gemini-2.0-flash", displayName: "Gemini 2.0 Flash", provider: google, note: nil),
+        .init(id: "gemini-3.6-flash", displayName: "Gemini 3.6 Flash", provider: google, note: "recommended"),
+        .init(id: "gemini-3.1-pro-preview", displayName: "Gemini 3.1 Pro", provider: google, note: "best"),
+        .init(id: "gemini-3.1-flash-lite", displayName: "Gemini 3.1 Flash-Lite", provider: google, note: "cheap"),
 
         // DeepSeek (very cheap, strong JP→EN)
         .init(id: "deepseek-chat", displayName: "DeepSeek V3", provider: deepSeek, note: "cheapest"),
@@ -182,7 +182,22 @@ nonisolated enum ChatModelCatalog {
     /// the original free-text behaviour (any unrecognised id is treated as an OpenAI model).
     static func provider(forModelId modelId: String) -> ChatProvider {
         let trimmed = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("gemini-") { return google }
+        if trimmed.hasPrefix("claude-") { return anthropic }
+        if trimmed.hasPrefix("deepseek-") { return deepSeek }
+        if trimmed.hasPrefix("qwen-") { return qwen }
+        if trimmed.hasPrefix("moonshot-") { return moonshot }
         return models.first { $0.id == trimmed }?.provider ?? openAI
+    }
+
+    /// Replace Google model ids that now return 404 for some API keys.
+    static func replacementModelId(for modelId: String) -> String {
+        switch modelId.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "gemini-2.5-pro": return "gemini-3.1-pro-preview"
+        case "gemini-2.5-flash", "gemini-2.0-flash": return "gemini-3.6-flash"
+        case "gemini-2.5-flash-lite": return "gemini-3.1-flash-lite"
+        default: return modelId
+        }
     }
 
     /// The catalog entry for `modelId`, or `nil` if it's a custom id not in the list.
@@ -205,8 +220,11 @@ nonisolated enum CloudChat {
         case .anthropic:
             return try await AnthropicChatClient()
                 .complete(apiKey: apiKey, model: model, prompt: prompt, bubbleText: bubbleText)
+        case .gemini:
+            return try await GeminiChatClient()
+                .complete(apiKey: apiKey, model: model, prompt: prompt, bubbleText: bubbleText)
         case .openAICompatible:
-            return try await OpenAiChatClient(baseURL: provider.baseURL)
+            return try await OpenAiChatClient(baseURL: provider.baseURL, serviceName: provider.displayName)
                 .complete(apiKey: apiKey, model: model, prompt: prompt, bubbleText: bubbleText)
         }
     }
@@ -217,8 +235,11 @@ nonisolated enum CloudChat {
         case .anthropic:
             return try await AnthropicChatClient()
                 .completeImage(apiKey: apiKey, model: model, prompt: prompt, image: image)
+        case .gemini:
+            return try await GeminiChatClient()
+                .completeImage(apiKey: apiKey, model: model, prompt: prompt, image: image)
         case .openAICompatible:
-            return try await OpenAiChatClient(baseURL: provider.baseURL)
+            return try await OpenAiChatClient(baseURL: provider.baseURL, serviceName: provider.displayName)
                 .completeImage(apiKey: apiKey, model: model, prompt: prompt, image: image)
         }
     }

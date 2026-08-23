@@ -27,6 +27,8 @@ struct ScrollReaderWebView: UIViewRepresentable {
     var onProgressChanged: ((Double) -> Void)
     var onRestoreCompleted: (() -> Void)
     var onHighlightCreated: (HighlightColor, HighlightData) -> Void
+    /// A pre-translated sentence's button was pressed; the payload is its `c{spine}s{start}` id.
+    var onSentenceTranslate: (String) -> Void = { _ in }
     let maxSelectionLength: Int = 16
     
     func makeCoordinator() -> Coordinator {
@@ -38,8 +40,9 @@ struct ScrollReaderWebView: UIViewRepresentable {
         config.userContentController.add(context.coordinator, name: "textSelected")
         config.userContentController.add(context.coordinator, name: "restoreCompleted")
         config.userContentController.add(context.coordinator, name: "selectionState")
+        config.userContentController.add(context.coordinator, name: "sentenceTranslate")
         config.defaultWebpagePreferences.preferredContentMode = .mobile
-        
+
         let webView = HoshiWKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = .clear
@@ -79,12 +82,13 @@ struct ScrollReaderWebView: UIViewRepresentable {
             bridge.pendingCommands.removeAll()
             for command in commands {
                 switch command {
-                case .loadChapter(let url, let progress, let fragment, let sasayakiCues, let highlights):
+                case .loadChapter(let url, let progress, let fragment, let sasayakiCues, let highlights, let sentenceAnchors):
                     context.coordinator.currentURL = url
                     context.coordinator.pendingProgress = progress
                     context.coordinator.pendingFragment = fragment
                     context.coordinator.pendingSasayakiCues = sasayakiCues
                     context.coordinator.pendingHighlights = highlights
+                    context.coordinator.pendingSentenceAnchors = sentenceAnchors
                     context.coordinator.isRestoring = true
                     if let appDirectory = try? BookStorage.getAppDirectory() {
                         webView.scrollView.delegate = nil
@@ -140,6 +144,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
             context.coordinator.pendingFragment = nil
             context.coordinator.pendingSasayakiCues = bridge.sasayakiCues
             context.coordinator.pendingHighlights = bridge.highlights
+            context.coordinator.pendingSentenceAnchors = bridge.sentenceAnchors
             context.coordinator.isRestoring = true
             guard let appDirectory = try? BookStorage.getAppDirectory() else { return }
             webView.scrollView.delegate = nil
@@ -152,6 +157,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "restoreCompleted")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "selectionState")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "sentenceTranslate")
     }
     
     class Coordinator: NSObject, WKNavigationDelegate, UIGestureRecognizerDelegate, WKScriptMessageHandler, UIScrollViewDelegate {
@@ -162,6 +168,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
         var pendingFragment: String?
         var pendingSasayakiCues: String?
         var pendingHighlights: String?
+        var pendingSentenceAnchors: String?
         var shouldSyncProgressAfterRestore = false
         var lastProgressUpdate: CFTimeInterval = 0
         var isRestoring = true
@@ -171,6 +178,13 @@ struct ScrollReaderWebView: UIViewRepresentable {
         }
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "sentenceTranslate" {
+                if let body = message.body as? [String: Any],
+                   let id = body["id"] as? String, !id.isEmpty {
+                    parent.onSentenceTranslate(id)
+                }
+                return
+            }
             if message.name == "selectionState" {
                 if let hasSelection = message.body as? Bool, let hv = message.webView as? HoshiWKWebView {
                     hv.hasSelection = hasSelection
@@ -220,7 +234,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
-            
+
             if handleInternalLink(url: url) {
                 decisionHandler(.cancel)
                 return
@@ -245,6 +259,14 @@ struct ScrollReaderWebView: UIViewRepresentable {
             return js
         }
         
+        private var translationsJs: String {
+            guard let url = Bundle.main.url(forResource: "translations", withExtension: "js"),
+                  let js = try? String(contentsOf: url, encoding: String.Encoding.utf8) else {
+                return ""
+            }
+            return js
+        }
+
         private var highlightsJs: String {
             guard let url = Bundle.main.url(forResource: "highlights", withExtension: "js"),
                   let js = try? String(contentsOf: url, encoding: String.Encoding.utf8) else {
@@ -366,6 +388,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
             ruby > rt, ruby > rp {
                 -webkit-user-select: none;
             }
+            \(sentenceButtonCss)
             .hoshi-sasayaki-cue.hoshi-sasayaki-active {
                 color: var(--hoshi-sasayaki-text-color) !important;
                 background-color: var(--hoshi-sasayaki-background-color) !important;
@@ -392,6 +415,15 @@ struct ScrollReaderWebView: UIViewRepresentable {
             }()
             pendingHighlights = nil
             
+            // After the cue and highlight wrapping, both of which split text nodes.
+            let translationsSetupScript: String = {
+                if let anchors = pendingSentenceAnchors {
+                    return "window.hoshiTranslations.apply(\(anchors));"
+                }
+                return ""
+            }()
+            pendingSentenceAnchors = nil
+
             let initialRestoreScript: String = {
                 if let fragment = pendingFragment {
                     shouldSyncProgressAfterRestore = true
@@ -420,6 +452,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 \(selectionJs)
                 \(readerJs)
                 \(highlightsJs)
+                \(translationsJs)
                 window.hoshiReader.registerCopyText();
                 
                 if (\(parent.userConfig.readerHideFurigana)) {
@@ -465,6 +498,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                     window.hoshiReader.buildNodeOffsets();
                     \(sasayakiSetupScript)
                     \(highlightsSetupScript)
+                    \(translationsSetupScript)
                     \(initialRestoreScript)
                 });
             })();

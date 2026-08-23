@@ -44,4 +44,37 @@ nonisolated struct MokuroTextBox: Codable, Equatable {
     let vertical: Bool
     /// OCR lines; for vertical text each entry is one column, ordered right-to-left.
     let lines: [String]
+    /// This block's index in the source `mokuro.json` page, NOT its position in `textBoxes`.
+    /// Blocks with an unusable box are dropped during parsing, so the two diverge — and the
+    /// offline pre-translation cache addresses bubbles by the mokuro index, which every platform
+    /// and the desktop tool agree on. Defaults to 0 for older decoded data.
+    var blockIndex: Int = 0
+
+    enum CodingKeys: String, CodingKey {
+        case left, top, width, height, fontSize, vertical, lines, blockIndex
+    }
+
+    init(left: Int, top: Int, width: Int, height: Int, fontSize: Int, vertical: Bool,
+         lines: [String], blockIndex: Int = 0) {
+        self.left = left
+        self.top = top
+        self.width = width
+        self.height = height
+        self.fontSize = fontSize
+        self.vertical = vertical
+        self.lines = lines
+        self.blockIndex = blockIndex
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        left = try c.decode(Int.self, forKey: .left)
+        top = try c.decode(Int.self, forKey: .top)
+        width = try c.decode(Int.self, forKey: .width)
+        height = try c.decode(Int.self, forKey: .height)
+        fontSize = try c.decode(Int.self, forKey: .fontSize)
+        vertical = try c.decode(Bool.self, forKey: .vertical)
+        lines = try c.decodeIfPresent([String].self, forKey: .lines) ?? []
+        blockIndex = try c.decodeIfPresent(Int.self, forKey: .blockIndex) ?? 0
+    }
 }

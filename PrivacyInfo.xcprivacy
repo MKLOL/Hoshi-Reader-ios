@@ -24,6 +24,28 @@
 				<string>54BD.1</string>
 			</array>
 		</dict>
+		<dict>
+			<!-- HttpSyncReconciler checks free space before writing synced books
+			     (availableCapacityBytes -> "free < needed"), so 85F4.1: check whether
+			     there is sufficient disk space to write files. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>85F4.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- MokuroBookParser and HttpSyncReconciler read modificationDate/size of
+			     files inside the app's own Books container for cache invalidation and
+			     sync reconciliation, so C617.1: metadata of files inside the app container. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

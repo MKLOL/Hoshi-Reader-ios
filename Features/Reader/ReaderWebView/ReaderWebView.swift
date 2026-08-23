@@ -33,7 +33,7 @@ struct HighlightData {
 }
 
 enum WebViewCommand {
-    case loadChapter(url: URL, progress: Double, fragment: String?, sasayakiCues: String? = nil, highlights: String? = nil)
+    case loadChapter(url: URL, progress: Double, fragment: String?, sasayakiCues: String? = nil, highlights: String? = nil, sentenceAnchors: String? = nil)
     case restoreProgress(Double)
     case jumpToFragment(String)
     case clearSelection
@@ -52,17 +52,20 @@ class WebViewBridge {
     private(set) var progress: Double = 0
     private(set) var sasayakiCues: String?
     private(set) var highlights: String?
+    /// JSON `[{id, start, len, text}]` for the current chapter's pre-translated sentences.
+    private(set) var sentenceAnchors: String?
     var pendingCommands: [WebViewCommand] = []
     
     func send(_ command: WebViewCommand) {
         pendingCommands.append(command)
     }
     
-    func updateState(url: URL, progress: Double, sasayakiCues: String? = nil, highlights: String? = nil) {
+    func updateState(url: URL, progress: Double, sasayakiCues: String? = nil, highlights: String? = nil, sentenceAnchors: String? = nil) {
         self.chapterURL = url
         self.progress = progress
         self.sasayakiCues = sasayakiCues
         self.highlights = highlights
+        self.sentenceAnchors = sentenceAnchors
     }
     
     func updateProgress(_ progress: Double) {
@@ -136,6 +139,8 @@ struct ReaderWebView: UIViewRepresentable {
     var onPageTurn: (() -> Void)
     var onRestoreCompleted: (() -> Void)
     var onHighlightCreated: (HighlightColor, HighlightData) -> Void
+    /// A pre-translated sentence's button was pressed; the payload is its `c{spine}s{start}` id.
+    var onSentenceTranslate: (String) -> Void = { _ in }
     let maxSelectionLength: Int = 16
     
     func makeCoordinator() -> Coordinator {
@@ -147,8 +152,9 @@ struct ReaderWebView: UIViewRepresentable {
         config.userContentController.add(context.coordinator, name: "textSelected")
         config.userContentController.add(context.coordinator, name: "restoreCompleted")
         config.userContentController.add(context.coordinator, name: "selectionState")
+        config.userContentController.add(context.coordinator, name: "sentenceTranslate")
         config.defaultWebpagePreferences.preferredContentMode = .mobile
-        
+
         let webView = HoshiWKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = .clear
@@ -200,12 +206,13 @@ struct ReaderWebView: UIViewRepresentable {
             bridge.pendingCommands.removeAll()
             for command in commands {
                 switch command {
-                case .loadChapter(let url, let progress, let fragment, let sasayakiCues, let highlights):
+                case .loadChapter(let url, let progress, let fragment, let sasayakiCues, let highlights, let sentenceAnchors):
                     context.coordinator.currentURL = url
                     context.coordinator.pendingProgress = progress
                     context.coordinator.pendingFragment = fragment
                     context.coordinator.pendingSasayakiCues = sasayakiCues
                     context.coordinator.pendingHighlights = highlights
+                    context.coordinator.pendingSentenceAnchors = sentenceAnchors
                     if let appDirectory = try? BookStorage.getAppDirectory() {
                         webView.alpha = 0
                         webView.loadFileURL(url, allowingReadAccessTo: appDirectory)
@@ -257,6 +264,7 @@ struct ReaderWebView: UIViewRepresentable {
             context.coordinator.pendingFragment = nil
             context.coordinator.pendingSasayakiCues = bridge.sasayakiCues
             context.coordinator.pendingHighlights = bridge.highlights
+            context.coordinator.pendingSentenceAnchors = bridge.sentenceAnchors
             guard let appDirectory = try? BookStorage.getAppDirectory() else { return }
             webView.alpha = 0
             webView.loadFileURL(url, allowingReadAccessTo: appDirectory)
@@ -267,6 +275,7 @@ struct ReaderWebView: UIViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "restoreCompleted")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "selectionState")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "sentenceTranslate")
     }
     
     class Coordinator: NSObject, WKNavigationDelegate, UIGestureRecognizerDelegate, WKScriptMessageHandler {
@@ -275,6 +284,7 @@ struct ReaderWebView: UIViewRepresentable {
         var currentURL: URL?
         var pendingProgress: Double = 0
         var pendingFragment: String?
+        var pendingSentenceAnchors: String?
         var pendingSasayakiCues: String?
         var pendingHighlights: String?
         var shouldSyncProgressAfterRestore = false
@@ -284,6 +294,13 @@ struct ReaderWebView: UIViewRepresentable {
         }
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "sentenceTranslate" {
+                if let body = message.body as? [String: Any],
+                   let id = body["id"] as? String, !id.isEmpty {
+                    parent.onSentenceTranslate(id)
+                }
+                return
+            }
             if message.name == "selectionState" {
                 if let hasSelection = message.body as? Bool, let hv = message.webView as? HoshiWKWebView {
                     hv.hasSelection = hasSelection
@@ -328,7 +345,7 @@ struct ReaderWebView: UIViewRepresentable {
                 decisionHandler(.allow)
                 return
             }
-            
+
             if handleInternalLink(url: url) {
                 decisionHandler(.cancel)
                 return
@@ -353,6 +370,14 @@ struct ReaderWebView: UIViewRepresentable {
             return js
         }
         
+        private var translationsJs: String {
+            guard let url = Bundle.main.url(forResource: "translations", withExtension: "js"),
+                  let js = try? String(contentsOf: url, encoding: String.Encoding.utf8) else {
+                return ""
+            }
+            return js
+        }
+
         private var highlightsJs: String {
             guard let url = Bundle.main.url(forResource: "highlights", withExtension: "js"),
                   let js = try? String(contentsOf: url, encoding: String.Encoding.utf8) else {
@@ -496,6 +521,7 @@ struct ReaderWebView: UIViewRepresentable {
             ruby > rt, ruby > rp {
                 -webkit-user-select: none;
             }
+            \(sentenceButtonCss)
             .hoshi-sasayaki-cue.hoshi-sasayaki-active {
                 color: var(--hoshi-sasayaki-text-color) !important;
                 background-color: var(--hoshi-sasayaki-background-color) !important;
@@ -547,6 +573,16 @@ struct ReaderWebView: UIViewRepresentable {
             }()
             pendingHighlights = nil
             
+            // Runs after the cue and highlight wrapping above, both of which split text nodes and
+            // rebuild the offset map. Placing buttons first would leave them at stale positions.
+            let translationsSetupScript: String = {
+                if let anchors = pendingSentenceAnchors {
+                    return "window.hoshiTranslations.apply(\(anchors));"
+                }
+                return ""
+            }()
+            pendingSentenceAnchors = nil
+
             let initialRestoreScript: String = {
                 if let fragment = pendingFragment {
                     shouldSyncProgressAfterRestore = true
@@ -579,6 +615,7 @@ struct ReaderWebView: UIViewRepresentable {
                 \(selectionJs)
                 \(readerJs)
                 \(highlightsJs)
+                \(translationsJs)
                 window.hoshiReader.pageHeight = \(pageHeight);
                 window.hoshiReader.pageWidth = \(pageWidth);
                 window.hoshiReader.registerCopyText();
@@ -626,6 +663,7 @@ struct ReaderWebView: UIViewRepresentable {
                     window.hoshiReader.buildNodeOffsets();
                     \(sasayakiSetupScript)
                     \(highlightsSetupScript)
+                    \(translationsSetupScript)
                     \(initialRestoreScript)
                 });
             })();

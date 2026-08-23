@@ -5,10 +5,9 @@
 //  Copyright © 2026 Manhhao.
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
-//  The manga ChatGPT popup: shows the speech-bubble text, the model's reply (rendered as basic
-//  markdown), loading + error states, an optional screenshot thumbnail, and a per-book history
-//  browser. Tapping a Japanese word in the reply or in a history entry runs a dictionary lookup
-//  through the existing LookupEngine + PopupView, matching the in-reader dictionary popup.
+//  The manga AI popup: shows the speech-bubble text, the model's reply (rendered as GitHub-flavored
+//  Markdown by Textual), loading + error states, an optional screenshot thumbnail, and a per-book
+//  history browser.
 //
 //  Ported from Android features/ai/AiChatPopup.kt (AiChatPopupView + AiChatHistoryView). The
 //  caller presents this as a full-screen overlay above the manga page.
@@ -16,7 +15,7 @@
 
 import SwiftUI
 import UIKit
-import CHoshiDicts
+import Textual
 
 struct MangaAiPopupView: View {
     @Bindable var controller: MangaAiController
@@ -24,10 +23,9 @@ struct MangaAiPopupView: View {
     let userConfig: UserConfig
     var coverURL: URL?
 
+    @State private var settings = AiChatSettingsStore.shared
     @State private var showHistory = false
     @State private var historyEntries: [AiChatEntry] = []
-    /// The currently open dictionary lookup (from tapping a Japanese word), if any.
-    @State private var wordLookup: WordLookupState?
     /// Screenshot opened in the fullscreen pinch-zoom viewer, if any.
     @State private var zoomedScreenshot: UIImage?
 
@@ -59,26 +57,6 @@ struct MangaAiPopupView: View {
                     ZoomableScreenshotViewer(image: zoomed) { zoomedScreenshot = nil }
                         .transition(.opacity)
                         .zIndex(50)
-                }
-
-                // The dictionary lookup popup, layered above the card.
-                if let lookup = wordLookup {
-                    PopupView(
-                        userConfig: userConfig,
-                        isVisible: .constant(true),
-                        selectionData: SelectionData(text: lookup.word, sentence: lookup.sentence, rect: lookup.rect, normalizedOffset: nil),
-                        lookupResults: lookup.results,
-                        dictionaryStyles: lookup.styles,
-                        screenSize: geometry.size,
-                        isVertical: false,
-                        isFullWidth: false,
-                        coverURL: coverURL,
-                        documentTitle: book.title,
-                        clearSelection: false,
-                        onTextSelected: nil,
-                        onTapOutside: { wordLookup = nil },
-                        onSwipeDismiss: { wordLookup = nil }
-                    )
                 }
             }
         }
@@ -114,7 +92,7 @@ struct MangaAiPopupView: View {
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.15), lineWidth: 1))
         // Swallow taps so they don't fall through to the dismiss backdrop.
         .contentShape(Rectangle())
-        .onTapGesture { wordLookup = nil }
+        .onTapGesture { }
     }
 
     private var header: some View {
@@ -123,15 +101,25 @@ struct MangaAiPopupView: View {
                 .font(.headline)
             Spacer()
             Button {
+                settings.setUseUniformMarkdownTextSize(!settings.useUniformMarkdownTextSize)
+            } label: {
+                Image(systemName: "textformat.size")
+                    .foregroundStyle(settings.useUniformMarkdownTextSize ? Color.accentColor : Color.primary)
+            }
+            .help(settings.useUniformMarkdownTextSize
+                  ? "Use Markdown heading sizes"
+                  : "Use default text size")
+            .accessibilityLabel(settings.useUniformMarkdownTextSize
+                                ? "Use Markdown heading sizes"
+                                : "Use default text size")
+            Button {
                 guard controller.state != .browsingHistory else {
                     showHistory = true
                     reloadHistory()
-                    wordLookup = nil
                     return
                 }
                 showHistory.toggle()
                 if showHistory { reloadHistory() }
-                wordLookup = nil
             } label: {
                 Image(systemName: showHistory ? "bubble.left.and.bubble.right" : "clock.arrow.circlepath")
             }
@@ -142,17 +130,15 @@ struct MangaAiPopupView: View {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
             }
-            .accessibilityLabel("Close ChatGPT")
+            .accessibilityLabel("Close translation")
         }
         .padding(16)
     }
 
-    /// The card title, reflecting the active backend while a request is in flight (an on-device
-    /// translation reads "On-device translation"; the cloud path keeps "ChatGPT"). Mirrors Android
-    /// `AiChatPopupView`'s `if (state.onDevice) "On-device translation" else "ChatGPT"`.
+    /// The card title reflects the actual backend selected for this request.
     private var headerTitle: String {
-        if showHistory || controller.state == .browsingHistory { return "ChatGPT history" }
-        return controller.state.isOnDevice ? "On-device translation" : "ChatGPT"
+        if showHistory || controller.state == .browsingHistory { return "Translation history" }
+        return controller.state.isOnDevice ? "On-device translation" : controller.activeBackendName
     }
 
     // MARK: - Current exchange
@@ -167,6 +153,19 @@ struct MangaAiPopupView: View {
             loadingBody(onDevice: onDevice)
         case .result(let entry):
             entryView(entry)
+            // A pre-translated reply is instant and free, so it is what a tap shows. Offer the
+            // live model for the times it isn't enough.
+            if controller.isShowingPretranslation {
+                Button {
+                    controller.askLive()
+                } label: {
+                    Label("Ask ChatGPT instead", systemImage: "sparkles")
+                        .font(.subheadline)
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                .padding(.top, 4)
+            }
         case .error(let message):
             errorBody(message)
         case .browsingHistory:
@@ -178,7 +177,7 @@ struct MangaAiPopupView: View {
 
     /// Loading state. For the on-device path it shows "Translating on-device…" plus the live reply
     /// forming + a live tok/s counter (observed from `OfflineLlmManager.generationProgress`). The
-    /// cloud path keeps the plain "Asking ChatGPT…" spinner. Mirrors Android `LoadingBody`.
+    /// cloud path names the provider actually receiving the request.
     @ViewBuilder
     private func loadingBody(onDevice: Bool) -> some View {
         let progress = onDevice ? OfflineLlmManager.shared.generationProgress : nil
@@ -186,7 +185,7 @@ struct MangaAiPopupView: View {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 ProgressView()
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(onDevice ? "Translating on-device…" : "Asking ChatGPT…")
+                    Text(onDevice ? "Translating on-device…" : "Asking \(controller.activeBackendName)…")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     // Live tok/s while the on-device model generates, including hidden thinking
@@ -244,7 +243,7 @@ struct MangaAiPopupView: View {
             .foregroundStyle(.red)
         // The "missing API key" failure already points at Settings; retrying would fail the same
         // way, so only offer Retry for other errors.
-        if !message.lowercased().hasPrefix("set your openai api key") {
+        if !(message.lowercased().hasPrefix("set your ") && message.lowercased().contains("api key")) {
             Button("Retry") { controller.retry() }
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -263,7 +262,7 @@ struct MangaAiPopupView: View {
     @ViewBuilder
     private var historyBody: some View {
         if historyEntries.isEmpty {
-            Text("No ChatGPT chats for this manga yet.")
+            Text("No translation history for this manga yet.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -280,195 +279,25 @@ struct MangaAiPopupView: View {
         }
     }
 
-    // MARK: - Response rendering (tappable Japanese words)
+    // MARK: - Response rendering
 
-    /// Renders the response. Japanese spans become tap targets that run a dictionary lookup; other
-    /// text renders as basic markdown.
+    /// Textual owns all Markdown parsing and rendering, including headings, lists, tables, links,
+    /// block quotes, inline emphasis, and code blocks.
     @ViewBuilder
     private func responseText(_ response: String) -> some View {
         let visible = AiThinkingTextSanitizer.strip(response)
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(Self.responseBlocks(visible)) { block in
-                switch block.kind {
-                case .blank:
-                    Spacer().frame(height: 4)
-                case .line(let line):
-                    lineView(line)
-                case .table(let rows):
-                    tableView(rows)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func lineView(_ line: String) -> some View {
-        // Fine-grained tokens so the flow layout can wrap naturally: Japanese characters are
-        // individual tap targets, while non-Japanese text breaks on word / whitespace boundaries.
-        let tokens = Self.tokenize(line)
-        WrapHStack(runs: tokens) { token in
-            if let scanText = token.scanText {
-                Text(token.attributed)
-                    .foregroundStyle(.primary)
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .onTapGesture { lookUp(word: scanText, sentence: line, frame: proxy.frame(in: .global)) }
-                        }
-                    )
-            } else {
-                Text(token.attributed)
-                    .foregroundStyle(.primary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Self.accessibilityText(for: line))
-    }
-
-    private static func markdown(_ text: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        let parsed = (try? AttributedString(markdown: text, options: options))
-            ?? AttributedString(strippingCommonMarkdownMarkers(from: text))
-        let visible = String(parsed.characters)
-        if visible.contains("**") || visible.contains("__") || visible.contains("`") {
-            return AttributedString(strippingCommonMarkdownMarkers(from: visible))
-        }
-        return materializeInlineMarkdown(parsed)
-    }
-
-    private static func materializeInlineMarkdown(_ input: AttributedString) -> AttributedString {
-        var output = input
-        for run in output.runs {
-            guard let intent = run.inlinePresentationIntent else { continue }
-            if intent.contains(.code) {
-                output[run.range].font = .system(.body, design: .monospaced)
-            } else if intent.contains(.stronglyEmphasized) {
-                output[run.range].font = .body.bold()
-            } else if intent.contains(.emphasized) {
-                output[run.range].font = .body.italic()
-            }
-        }
-        return output
-    }
-
-    private static func strippingCommonMarkdownMarkers(from text: String) -> String {
-        text.replacingOccurrences(of: "**", with: "")
-            .replacingOccurrences(of: "__", with: "")
-            .replacingOccurrences(of: "`", with: "")
-    }
-
-    private static func accessibilityText(for line: String) -> String {
-        String(markdown(line).characters)
-    }
-
-    @ViewBuilder
-    private func tableView(_ rows: [[String]]) -> some View {
-        ScrollView(.horizontal) {
-            let columnCount = max(1, rows.map(\.count).max() ?? 1)
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
-                    GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
-                            lineView(cell)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .frame(minWidth: 96, alignment: .leading)
-                        }
-                    }
-                    .background(rowIndex == 0 ? Color.primary.opacity(0.06) : Color.clear)
-                    if rowIndex == 0 {
-                        Divider()
-                            .gridCellColumns(columnCount)
-                    }
-                }
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+        StructuredText(markdown: visible)
+            .textual.structuredTextStyle(
+                HoshiMarkdownStyle(useUniformTextSize: settings.useUniformMarkdownTextSize)
             )
-        }
-        .scrollIndicators(.visible)
-        .padding(.vertical, 2)
-    }
-
-    private struct ResponseBlock: Identifiable {
-        enum Kind {
-            case blank
-            case line(String)
-            case table([[String]])
-        }
-
-        let id = UUID()
-        let kind: Kind
-    }
-
-    private static func responseBlocks(_ text: String) -> [ResponseBlock] {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var blocks: [ResponseBlock] = []
-        var index = 0
-        while index < lines.count {
-            let line = lines[index]
-            if line.isEmpty {
-                blocks.append(ResponseBlock(kind: .blank))
-                index += 1
-                continue
-            }
-            if index + 1 < lines.count, isTableSeparator(lines[index + 1], header: line) {
-                var rows = [parseTableRow(line)]
-                index += 2
-                while index < lines.count, lines[index].contains("|"), !lines[index].trimmingCharacters(in: .whitespaces).isEmpty {
-                    rows.append(parseTableRow(lines[index]))
-                    index += 1
-                }
-                blocks.append(ResponseBlock(kind: .table(normalizedTableRows(rows))))
-                continue
-            }
-            blocks.append(ResponseBlock(kind: .line(line)))
-            index += 1
-        }
-        return blocks
-    }
-
-    private static func parseTableRow(_ line: String) -> [String] {
-        var parts = line.split(separator: "|", omittingEmptySubsequences: false).map {
-            String($0).trimmingCharacters(in: .whitespaces)
-        }
-        if parts.first?.isEmpty == true { parts.removeFirst() }
-        if parts.last?.isEmpty == true { parts.removeLast() }
-        return parts
-    }
-
-    private static func isTableSeparator(_ line: String, header: String) -> Bool {
-        guard line.contains("|"), header.contains("|") else { return false }
-        let headerCells = parseTableRow(header)
-        let separatorCells = parseTableRow(line)
-        guard headerCells.count >= 2, separatorCells.count == headerCells.count else { return false }
-        return separatorCells.allSatisfy { cell in
-            let trimmed = cell.trimmingCharacters(in: .whitespaces)
-            let hyphenCount = trimmed.filter { $0 == "-" }.count
-            return hyphenCount >= 3 && trimmed.allSatisfy { $0 == "-" || $0 == ":" || $0.isWhitespace }
-        }
-    }
-
-    private static func normalizedTableRows(_ rows: [[String]]) -> [[String]] {
-        let width = rows.map(\.count).max() ?? 0
-        return rows.map { row in
-            row + Array(repeating: "", count: max(0, width - row.count))
-        }
-    }
-
-    // MARK: - Dictionary lookup
-
-    private func lookUp(word: String, sentence: String, frame: CGRect) {
-        let results = LookupEngine.shared.lookup(word, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength)
-        guard !results.isEmpty else { return }
-        var styles: [String: String] = [:]
-        for style in LookupEngine.shared.getStyles() {
-            styles[cxxStringToSwift(style.dict_name)] = cxxStringToSwift(style.styles)
-        }
-        wordLookup = WordLookupState(word: word, sentence: sentence, rect: frame, results: results, styles: styles)
+            .textual.highlighterTheme(.init(
+                foregroundColor: DynamicColor(.white),
+                backgroundColor: DynamicColor(Color.white.opacity(0.08))
+            ))
+            .textual.textSelection(.enabled)
+            .foregroundStyle(.white)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Helpers
@@ -479,7 +308,6 @@ struct MangaAiPopupView: View {
     }
 
     private func dismiss() {
-        wordLookup = nil
         controller.dismiss()
     }
 
@@ -488,187 +316,69 @@ struct MangaAiPopupView: View {
         return UIImage(data: data)
     }
 
-    // MARK: - Run splitting
+}
 
-    struct TextRun: Identifiable {
-        let id = UUID()
-        let text: String
-        let isJapanese: Bool
+/// Textual library theme for high-contrast AI replies. This styles Textual's parsed nodes; it does
+/// not parse or rewrite Markdown.
+private struct HoshiMarkdownStyle: StructuredText.Style {
+    let useUniformTextSize: Bool
+
+    var inlineStyle: InlineStyle {
+        let codeScale: CGFloat = useUniformTextSize ? 1 : 0.85
+        return InlineStyle()
+            .code(
+                .monospaced,
+                .fontScale(codeScale),
+                .foregroundColor(.white),
+                .backgroundColor(Color.white.opacity(0.10))
+            )
+            .emphasis(.italic, .foregroundColor(.white))
+            .link(.foregroundColor(.white))
+            .strong(.fontWeight(.semibold), .foregroundColor(.white))
+            .strikethrough(.strikethroughStyle(.single), .foregroundColor(.white))
     }
 
-    private struct WordLookupState {
-        let word: String
-        let sentence: String
-        let rect: CGRect
-        let results: [LookupResult]
-        let styles: [String: String]
+    var headingStyle: HoshiMarkdownHeadingStyle {
+        HoshiMarkdownHeadingStyle(useUniformTextSize: useUniformTextSize)
     }
+    let paragraphStyle: StructuredText.GitHubParagraphStyle = .gitHub
+    let blockQuoteStyle = HoshiMarkdownBlockQuoteStyle()
+    let codeBlockStyle: StructuredText.GitHubCodeBlockStyle = .gitHub
+    let listItemStyle: StructuredText.DefaultListItemStyle = .default
+    let unorderedListMarker: StructuredText.HierarchicalSymbolListMarker = .hierarchical(
+        .disc, .circle, .square
+    )
+    let orderedListMarker: StructuredText.DecimalListMarker = .decimal
+    let tableStyle: StructuredText.GitHubTableStyle = .gitHub
+    let tableCellStyle: StructuredText.GitHubTableCellStyle = .gitHub
+    let thematicBreakStyle: StructuredText.GitHubThematicBreakStyle = .gitHub
+}
 
-    /// One layout token: an attributed fragment plus, for Japanese characters, the text to
-    /// scan from that character on tap (the rest of its run, clipped to a sane scan window).
-    struct Token: Identifiable {
-        let id = UUID()
-        let attributed: AttributedString
-        let scanText: String?
-    }
+private struct HoshiMarkdownHeadingStyle: StructuredText.HeadingStyle {
+    let useUniformTextSize: Bool
+    private static let markdownScales: [CGFloat] = [2, 1.5, 1.25, 1, 0.875, 0.85]
 
-    /// Tokenizes a line for the wrapping layout. Markdown is parsed before Japanese splitting, so
-    /// emphasis spanning Japanese text is consumed instead of leaking literal `**` markers.
-    static func tokenize(_ line: String) -> [Token] {
-        var tokens: [Token] = []
-        let attributed = markdown(line)
-        let visibleChars = Array(String(attributed.characters))
-
-        var index = attributed.characters.startIndex
-        var visibleOffset = 0
-        var nonJapaneseStart: AttributedString.Index?
-
-        func flushNonJapanese(upTo end: AttributedString.Index) {
-            guard let start = nonJapaneseStart, start < end else {
-                nonJapaneseStart = nil
-                return
-            }
-            appendWrappedNonJapanese(AttributedString(attributed[start..<end]), to: &tokens)
-            nonJapaneseStart = nil
-        }
-
-        while index < attributed.characters.endIndex {
-            let ch = attributed.characters[index]
-            let next = attributed.characters.index(after: index)
-            if ch.isMangaAiJapanese {
-                flushNonJapanese(upTo: index)
-                var scanEnd = visibleOffset
-                while scanEnd < visibleChars.count,
-                      scanEnd < visibleOffset + 16,
-                      visibleChars[scanEnd].isMangaAiJapanese {
-                    scanEnd += 1
-                }
-                let scan = String(visibleChars[visibleOffset..<scanEnd])
-                tokens.append(Token(attributed: AttributedString(attributed[index..<next]), scanText: scan))
-            } else if nonJapaneseStart == nil {
-                nonJapaneseStart = index
-            }
-            index = next
-            visibleOffset += 1
-        }
-        flushNonJapanese(upTo: attributed.characters.endIndex)
-        return tokens
-    }
-
-    private static func appendWrappedNonJapanese(_ text: AttributedString, to tokens: inout [Token]) {
-        var index = text.characters.startIndex
-        for segment in MangaAiTextTokenizer.segments(in: String(text.characters)) {
-            var end = index
-            for _ in segment.text {
-                guard end < text.characters.endIndex else { break }
-                end = text.characters.index(after: end)
-            }
-            let fragment = AttributedString(text[index..<end])
-            if !fragment.characters.isEmpty {
-                tokens.append(Token(attributed: fragment, scanText: nil))
-            }
-            index = end
-        }
-    }
-
-    /// Splits a line into maximal Japanese / non-Japanese runs in order.
-    static func splitRuns(_ line: String) -> [TextRun] {
-        var runs: [TextRun] = []
-        var current = ""
-        var currentIsJapanese: Bool? = nil
-        for ch in line {
-            let isJp = ch.isMangaAiJapanese
-            if currentIsJapanese == nil {
-                currentIsJapanese = isJp
-                current = String(ch)
-            } else if isJp == currentIsJapanese {
-                current.append(ch)
-            } else {
-                runs.append(TextRun(text: current, isJapanese: currentIsJapanese!))
-                current = String(ch)
-                currentIsJapanese = isJp
-            }
-        }
-        if let flag = currentIsJapanese, !current.isEmpty {
-            runs.append(TextRun(text: current, isJapanese: flag))
-        }
-        return runs
+    func makeBody(configuration: Configuration) -> some View {
+        let level = min(max(configuration.headingLevel, 1), 6)
+        let scale = useUniformTextSize ? 1 : Self.markdownScales[level - 1]
+        configuration.label
+            .foregroundStyle(.white)
+            .textual.fontScale(scale)
+            .fontWeight(.semibold)
+            .textual.blockSpacing(.fontScaled(top: 1.2, bottom: 0.5))
     }
 }
 
-/// A simple wrapping horizontal layout for the per-line text runs.
-private struct WrapHStack<Run: Identifiable, Content: View>: View {
-    let runs: [Run]
-    @ViewBuilder let content: (Run) -> Content
-
-    var body: some View {
-        // SwiftUI's native flow layout (iOS 16+ via Layout). Falls back to a simple HStack wrap.
-        FlowLayout(spacing: 0) {
-            ForEach(runs) { run in
-                content(run)
-            }
+private struct HoshiMarkdownBlockQuoteStyle: StructuredText.BlockQuoteStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.white.opacity(0.45))
+                .textual.frame(width: .fontScaled(0.2))
+            configuration.label
+                .foregroundStyle(.white)
+                .textual.padding(.horizontal, .fontScaled(1))
         }
-    }
-}
-
-/// Minimal flow layout that wraps subviews to the available width.
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 0
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > maxWidth, x > 0 {
-                x = 0
-                y += lineHeight + spacing
-                lineHeight = 0
-            }
-            x += size.width + spacing
-            lineHeight = max(lineHeight, size.height)
-        }
-        return CGSize(width: maxWidth.isFinite ? maxWidth : x, height: y + lineHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let maxWidth = bounds.width
-        var x: CGFloat = bounds.minX
-        var y: CGFloat = bounds.minY
-        var lineHeight: CGFloat = 0
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > bounds.minX + maxWidth, x > bounds.minX {
-                x = bounds.minX
-                y += lineHeight + spacing
-                lineHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            x += size.width + spacing
-            lineHeight = max(lineHeight, size.height)
-        }
-    }
-}
-
-private extension Character {
-    /// Hiragana, katakana, CJK ideographs, and Japanese iteration/long-vowel marks.
-    var isMangaAiJapanese: Bool {
-        if self == "ー" || self == "々" || self == "〆" || self == "〤" { return true }
-        for scalar in unicodeScalars {
-            let v = scalar.value
-            let isJapanese =
-                (0x3040...0x309F).contains(v) ||
-                (0x30A0...0x30FF).contains(v) ||
-                (0x31F0...0x31FF).contains(v) ||
-                (0x3400...0x4DBF).contains(v) ||
-                (0x4E00...0x9FFF).contains(v) ||
-                (0xF900...0xFAFF).contains(v) ||
-                (0x20000...0x2A6DF).contains(v)
-            if !isJapanese { return false }
-        }
-        return true
     }
 }
 

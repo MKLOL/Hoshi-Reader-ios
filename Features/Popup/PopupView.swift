@@ -54,8 +54,9 @@ struct PopupLayout {
         spaceBelow >= height
     }
     
-    /// iPad gets a taller popup floor: the user wants the definition readable WITHOUT scrolling,
-    /// and a phone-tuned popupHeight setting (default 170pt) is tiny on a 1210pt screen.
+    /// iPad gets an even taller popup floor than the phone: the user wants the definition readable
+    /// WITHOUT scrolling, and a phone-tuned popupHeight setting (default 170pt) is tiny on a
+    /// 1210pt screen.
     var preferTallPopup = false
 
     // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
@@ -66,7 +67,12 @@ struct PopupLayout {
         if preferTallPopup {
             return max(1, min(max(maxHeight, screenSize.height * 0.32), screenSize.height * 0.42))
         }
-        return max(1, min(maxHeight, screenSize.height * 0.20))
+        // The phone used to be capped at 20% of the screen with no floor, which made the cap —
+        // not the user's `popupHeight` setting — the binding constraint: ~175pt on a 874pt phone,
+        // enough for a headword and about two lines of gloss, so almost every lookup needed a
+        // scroll. Give it the same shape as the iPad, one notch smaller: a floor so a tap is
+        // readable out of the box, and a ceiling so a definition never swallows the page.
+        return max(1, min(max(maxHeight, screenSize.height * 0.30), screenSize.height * 0.38))
     }
 
     var width: CGFloat {
@@ -370,23 +376,23 @@ struct PopupView: View {
     /// Shared by the initial popup render and the in-popup redirect lookup pipeline so both
     /// paths produce identical entry shapes (see ``PopupWebView`` `lookupRedirect`).
     static func entryDict(from result: LookupResult) -> [String: Any] {
-        let expression = String(result.term.expression)
-        let reading = String(result.term.reading)
-        let matched = String(result.matched)
+        let expression = cxxStringToSwift(result.term.expression)
+        let reading = cxxStringToSwift(result.term.reading)
+        let matched = cxxStringToSwift(result.matched)
         let deinflectionTrace = result.trace.reversed().map {
             [
-                "name": String($0.name),
-                "description": String($0.description),
+                "name": cxxStringToSwift($0.name),
+                "description": cxxStringToSwift($0.description),
             ]
         }
 
         var glossaries: [[String: Any]] = []
         for glossary in result.term.glossaries {
             var entry: [String: Any] = [:]
-            entry["dictionary"] = String(glossary.dict_name)
-            entry["content"] = String(glossary.glossary)
-            entry["definitionTags"] = String(glossary.definition_tags)
-            entry["termTags"] = String(glossary.term_tags)
+            entry["dictionary"] = cxxStringToSwift(glossary.dict_name)
+            entry["content"] = cxxStringToSwift(glossary.glossary)
+            entry["definitionTags"] = cxxStringToSwift(glossary.definition_tags)
+            entry["termTags"] = cxxStringToSwift(glossary.term_tags)
             glossaries.append(entry)
         }
 
@@ -396,11 +402,11 @@ struct PopupView: View {
             for frequencyTag in frequency.frequencies {
                 var tag: [String: Any] = [:]
                 tag["value"] = Int(frequencyTag.value)
-                tag["displayValue"] = String(frequencyTag.display_value)
+                tag["displayValue"] = cxxStringToSwift(frequencyTag.display_value)
                 frequencyTags.append(tag)
             }
             var entry: [String: Any] = [:]
-            entry["dictionary"] = String(frequency.dict_name)
+            entry["dictionary"] = cxxStringToSwift(frequency.dict_name)
             entry["frequencies"] = frequencyTags
             frequencies.append(entry)
         }
@@ -415,12 +421,12 @@ struct PopupView: View {
                 }
             }
             var entry: [String: Any] = [:]
-            entry["dictionary"] = String(pitchEntry.dict_name)
+            entry["dictionary"] = cxxStringToSwift(pitchEntry.dict_name)
             entry["pitchPositions"] = pitchPositions
             pitches.append(entry)
         }
 
-        let rules = String(result.term.rules).split(separator: " ").map { String($0) }
+        let rules = cxxStringToSwift(result.term.rules).split(separator: " ").map { String($0) }
 
         var entry: [String: Any] = [:]
         entry["expression"] = expression

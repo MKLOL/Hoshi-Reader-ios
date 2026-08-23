@@ -54,6 +54,10 @@ final class MangaAiController {
     private(set) var state: State = .idle
     /// True while the popup should be presented (any non-idle state).
     var isPresented: Bool { state != .idle }
+    /// Backend for the current/most-recent request. The popup used to hard-code "ChatGPT" even
+    /// while a Gemini request was correctly going to Google, making routing failures impossible
+    /// to understand.
+    private(set) var activeBackendName: String
 
     /// Called after an exchange is appended to disk — the orchestrator wires this to the HTTP KV
     /// chat push so the new entry syncs to other devices.
@@ -69,6 +73,12 @@ final class MangaAiController {
     private let offlineDownloads: ModelDownloadManager
     private var task: Task<Void, Never>?
     private var requestGeneration = 0
+    /// True when the reply on screen came from the pre-translation cache, so the popup can offer
+    /// to ask the live model instead.
+    private(set) var isShowingPretranslation = false
+    /// Re-runs the current bubble against the live model, bypassing the cache.
+    private var askLiveRequest: (() -> Void)?
+
     /// Replays the last request for the popup's Retry button (the original bubble text or image
     /// crop is captured here; `State.error` carries no payload to reconstruct it from).
     private var lastRequest: (() -> Void)?
@@ -83,19 +93,46 @@ final class MangaAiController {
         self.offlineSettings = offlineSettings
         self.offlineManager = offlineManager
         self.offlineDownloads = offlineDownloads
+        self.activeBackendName = settings.currentProvider.displayName
     }
 
     // MARK: - Requests
 
     /// Asks ChatGPT about a speech-bubble OCR string. Builds a dictionary lookup context from the
     /// bubble (best-effort), runs the request, persists the exchange, and updates `state`.
-    func ask(bubbleText: String, book: BookMetadata) {
+    ///
+    /// `blockId` is the bubble's mokuro address (`p{page}b{block}`) when the reader knew it. While
+    /// the device is offline it is used to serve a pre-computed translation from
+    /// `pretranslations.json` instead of failing — see `serveOfflinePretranslation`.
+    /// - Parameter sentenceId: an EPUB sentence's `c{spine}s{start}` address, when the request came
+    ///   from a novel's translate button rather than a manga bubble. It selects which offline cache
+    ///   is consulted; everything downstream — on-device, cloud, persistence, error handling — is
+    ///   identical for both, which is why this is a parameter and not a second method.
+    func ask(bubbleText: String, blockId: String? = nil, sentenceId: String? = nil,
+             book: BookMetadata, forceLive: Bool = false) {
         let trimmed = bubbleText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        lastRequest = { [weak self] in self?.ask(bubbleText: trimmed, book: book) }
+        lastRequest = { [weak self] in
+            self?.ask(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book, forceLive: forceLive)
+        }
+        // Lets the popup offer "Ask ChatGPT" on a cached reply.
+        askLiveRequest = { [weak self] in
+            self?.ask(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book, forceLive: true)
+        }
 
-        // On-device path: when the toggle is on, never silently fall back to the cloud.
+        // A pre-translated bubble is served immediately, online or not — it is the same tutor
+        // format, already paid for, and instant. A live request only happens when the user
+        // explicitly asks for one.
+        if !forceLive,
+           serveOfflinePretranslation(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book) {
+            return
+        }
+
+        // On-device path FIRST: when the toggle is on, never silently fall back to anything else.
+        // The local model works without a network, so it outranks the pre-translation cache even
+        // in airplane mode — the cache is only a better answer than an outright failure.
         if offlineSettings.useOnDeviceTranslation {
+            activeBackendName = "On-device translation"
             guard !offlineDownloads.downloadedModelIds().isEmpty else {
                 state = .error("On-device translation is on but no model is downloaded. Download "
                     + "one in Settings → On-device translation.")
@@ -107,6 +144,7 @@ final class MangaAiController {
 
         let model = settings.model
         let provider = ChatModelCatalog.provider(forModelId: model)
+        activeBackendName = provider.displayName
         let apiKey = settings.apiKey(for: provider)
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             state = .error("Set your \(provider.displayName) API key in Settings → Translation model.")
@@ -118,6 +156,7 @@ final class MangaAiController {
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
         let requestGeneration = beginRequest()
+        isShowingPretranslation = false
         state = .loading(bubbleText: trimmed, onDevice: false)
         task = Task {
             defer { self.finishRequest(generation: requestGeneration) }
@@ -139,9 +178,63 @@ final class MangaAiController {
                 self.state = .result(entry)
             } catch {
                 if !self.isCurrentRequest(requestGeneration) { return }
+                // A reachability check can say "online" and the request still fail because the
+                // uplink is dead or behind a captive portal. Treat that like being offline.
+                if NetworkReachability.isNetworkFailure(error),
+                   self.serveOfflinePretranslation(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book) {
+                    return
+                }
                 self.state = .error(Self.message(for: error))
             }
         }
+    }
+
+    // MARK: - Offline pre-translations
+
+    /// Serves this bubble's pre-computed translation, if the desktop tool produced one.
+    ///
+    /// Returns `false` when there is nothing cached, so the caller can continue to the normal
+    /// request path (and end up showing a real error).
+    ///
+    /// The result is deliberately NOT persisted: a cache hit is not an exchange the user had, and
+    /// writing it would push a synthetic entry into `ai_chat_log.json` and out to every other
+    /// device via the chat sync keys. That is why this bypasses `persist` entirely.
+    @discardableResult
+    private func serveOfflinePretranslation(bubbleText: String, blockId: String?,
+                                            sentenceId: String?, book: BookMetadata) -> Bool {
+        guard let folder = book.folder else { return false }
+        // A novel's sentences and a manga's bubbles are addressed differently and live in
+        // different blobs, but produce the same thing: a translation plus an explanation.
+        let cachedModel: String
+        let cachedResponse: String
+        if let sentenceId {
+            guard let cached = EpubTranslationStore.shared.lookup(id: sentenceId, folder: folder) else {
+                return false
+            }
+            cachedModel = cached.model
+            cachedResponse = cached.markdownResponse
+        } else {
+            guard let cached = PretranslationStore.shared.lookup(
+                blockId: blockId, bubbleText: bubbleText, folder: folder
+            ) else { return false }
+            cachedModel = cached.model
+            cachedResponse = cached.markdownResponse
+        }
+
+        cancel()
+        _ = beginRequest()
+        isShowingPretranslation = true
+        activeBackendName = "Pre-translated"
+        state = .result(AiChatEntry(
+            bubbleText: bubbleText,
+            prompt: settings.promptText,
+            model: cachedModel,
+            response: cachedResponse,
+            timestampSeconds: Date().timeIntervalSinceReferenceDate,
+            dictionaryLookup: Self.buildDictionaryLookup(query: bubbleText),
+            debugInfo: "offline pre-translation"
+        ))
+        return true
     }
 
     /// Translates a bubble fully on-device via `OfflineLlmManager`. Builds the same dictionary
@@ -152,6 +245,7 @@ final class MangaAiController {
         let lookup = Self.buildDictionaryLookup(query: trimmed)
 
         let requestGeneration = beginRequest()
+        isShowingPretranslation = false
         state = .loading(bubbleText: trimmed, onDevice: true)
         task = Task { [offlineManager] in
             defer { self.finishRequest(generation: requestGeneration) }
@@ -219,6 +313,7 @@ final class MangaAiController {
         lastRequest = { [weak self] in self?.translateCrop(image: image, book: book) }
         let model = settings.model
         let provider = ChatModelCatalog.provider(forModelId: model)
+        activeBackendName = provider.displayName
         let apiKey = settings.apiKey(for: provider)
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             // Vision crops always use the cloud (the on-device text models aren't multimodal). If
@@ -266,6 +361,11 @@ final class MangaAiController {
     /// Re-runs the most recent request (the popup's Retry button). No-op if there's nothing to retry.
     func retry() {
         lastRequest?()
+    }
+
+    /// Asks the live model about the bubble currently shown, ignoring the pre-translation cache.
+    func askLive() {
+        askLiveRequest?()
     }
 
     /// Cancels any in-flight request without dismissing the popup.

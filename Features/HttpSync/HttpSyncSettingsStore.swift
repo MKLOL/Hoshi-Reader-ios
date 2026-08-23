@@ -43,6 +43,10 @@ final class HttpSyncSettingsStore {
     }
 
     private let defaults: UserDefaults
+    /// Keychain-backed computed properties do not automatically participate in Observation.
+    /// Bumping this after a successful paste makes `isConfigured` and the Sync button refresh in
+    /// the same UI transaction.
+    private var tokenRevision = 0
 
     /// Base URL of the sync server, e.g. `https://dragos.games/api/book_sync`. No trailing slash.
     var baseURL: String {
@@ -78,8 +82,16 @@ final class HttpSyncSettingsStore {
     /// Bearer token sent in the `Authorization` header. Stored in the Keychain, NOT UserDefaults.
     /// Reading hits the Keychain each access (cheap; tokens are short and infrequently read).
     var token: String {
-        get { Keychain.get(SecretKeys.httpSyncToken) ?? "" }
-        set { Keychain.set(newValue.isEmpty ? nil : newValue, for: SecretKeys.httpSyncToken) }
+        get {
+            _ = tokenRevision
+            return Keychain.get(SecretKeys.httpSyncToken) ?? ""
+        }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if Keychain.set(trimmed.isEmpty ? nil : trimmed, for: SecretKeys.httpSyncToken) {
+                tokenRevision &+= 1
+            }
+        }
     }
 
     /// True iff we have a secure base URL and a token — the precondition for any network call.

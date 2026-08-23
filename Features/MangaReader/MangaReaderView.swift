@@ -334,17 +334,17 @@ struct MangaReaderView: View {
                         withAnimation(.default.speed(2)) { focusMode = false }
                     }
                 },
-                onAskAi: { text in
+                onAskAi: { text, blockId in
                     if let onAskAi {
                         onAskAi(text)
                     } else if uiTestingAiStubEnabled {
 #if DEBUG
                         aiController.resolveForUITest(bubbleText: text, book: metadata)
 #else
-                        aiController.ask(bubbleText: text, book: metadata)
+                        aiController.ask(bubbleText: text, blockId: blockId, book: metadata)
 #endif
                     } else {
-                        aiController.ask(bubbleText: text, book: metadata)
+                        aiController.ask(bubbleText: text, blockId: blockId, book: metadata)
                     }
                 },
                 onCopy: { text in
@@ -354,7 +354,10 @@ struct MangaReaderView: View {
                     }
                 },
                 onPageReady: { loadToken in onPageReady(loadToken: loadToken) },
-                tappableTopInset: mangaActionTopInset(for: geometry)
+                tappableTopInset: mangaActionTopInset(for: geometry),
+                // Suppress hardware-keyboard ← / → and trackpad two-finger page turns while the
+                // crop overlay or go-to-page dialog is up so they aren't disturbed by a stray input.
+                pageTurnEnabled: !screenshotCropMode && !showGoToPageDialog
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)

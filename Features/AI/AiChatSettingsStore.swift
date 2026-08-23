@@ -22,17 +22,24 @@ final class AiChatSettingsStore {
     static let shared = AiChatSettingsStore()
 
     private let defaults: UserDefaults
+    /// Observation revision for Keychain-only state. Without this, pasting a provider key saves it
+    /// successfully but views reading `isConfigured` do not know they need to refresh.
+    private var apiKeyRevision = 0
 
     /// API keys are stored per provider, each in its own Keychain slot — never in UserDefaults,
     /// never synced. The settings screen edits the key for the selected model's provider. OpenAI
     /// reuses its long-standing slot, so existing users keep their key.
     func apiKey(for provider: ChatProvider) -> String {
-        Keychain.get(provider.keychainKey) ?? ""
+        _ = apiKeyRevision
+        return Keychain.get(provider.keychainKey) ?? ""
     }
 
-    func setApiKey(_ value: String, for provider: ChatProvider) {
+    @discardableResult
+    func setApiKey(_ value: String, for provider: ChatProvider) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        Keychain.set(trimmed.isEmpty ? nil : value, for: provider.keychainKey)
+        let saved = Keychain.set(trimmed.isEmpty ? nil : trimmed, for: provider.keychainKey)
+        if saved { apiKeyRevision &+= 1 }
+        return saved
     }
 
     /// The provider that serves the currently-selected `model` (derived from the model id, so the
@@ -45,6 +52,9 @@ final class AiChatSettingsStore {
     private(set) var promptText: String
     /// Prompt text sent with a screenshot crop.
     private(set) var imagePromptText: String
+    /// Device-local presentation preference. When enabled, Markdown headings and inline code use
+    /// the same default text scale as paragraphs instead of Textual's size hierarchy.
+    private(set) var useUniformMarkdownTextSize: Bool
     /// RFC 3339 UTC timestamp of the most recent user-driven edit, or `nil` if never edited.
     private(set) var lastEditedAt: String?
 
@@ -56,10 +66,18 @@ final class AiChatSettingsStore {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedModel = defaults.string(forKey: Keys.model)
-        model = (storedModel?.isEmpty == false) ? storedModel! : AiChatDefaults.model
+        let originalModel = (storedModel?.isEmpty == false) ? storedModel! : AiChatDefaults.model
+        model = ChatModelCatalog.replacementModelId(for: originalModel)
         promptText = defaults.string(forKey: Keys.promptText) ?? AiChatDefaults.prompt
         imagePromptText = defaults.string(forKey: Keys.imagePromptText) ?? AiChatDefaults.imagePrompt
+        useUniformMarkdownTextSize = defaults.bool(forKey: Keys.useUniformMarkdownTextSize)
         lastEditedAt = defaults.string(forKey: Keys.lastEditedAt)
+        if model != originalModel {
+            defaults.set(model, forKey: Keys.model)
+            let stamp = Self.stampStrictlyNewerThan(lastEditedAt)
+            lastEditedAt = stamp
+            defaults.set(stamp, forKey: Keys.lastEditedAt)
+        }
     }
 
     // MARK: - User-driven edits
@@ -77,6 +95,14 @@ final class AiChatSettingsStore {
     /// User-driven update of `imagePromptText`. Auto-stamps `lastEditedAt` iff the value changed.
     func setImagePromptText(_ value: String) {
         update(model: model, promptText: promptText, imagePromptText: value)
+    }
+
+    /// Changes only local rendering. It deliberately does not update `lastEditedAt` or trigger
+    /// HTTP sync because this is a per-device accessibility preference, not AI request content.
+    func setUseUniformMarkdownTextSize(_ enabled: Bool) {
+        guard enabled != useUniformMarkdownTextSize else { return }
+        useUniformMarkdownTextSize = enabled
+        defaults.set(enabled, forKey: Keys.useUniformMarkdownTextSize)
     }
 
     /// User-driven update. Auto-stamps `lastEditedAt` iff the sync-relevant fields actually
@@ -153,6 +179,7 @@ final class AiChatSettingsStore {
         static let model = "aiChat.model"
         static let promptText = "aiChat.promptText"
         static let imagePromptText = "aiChat.imagePromptText"
+        static let useUniformMarkdownTextSize = "aiChat.useUniformMarkdownTextSize"
         static let lastEditedAt = "aiChat.lastEditedAt"
     }
 }

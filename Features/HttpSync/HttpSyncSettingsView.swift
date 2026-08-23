@@ -40,7 +40,7 @@ struct HttpSyncSettingsView: View {
             Section {
                 Toggle("Auto-sync while reading", isOn: $store.enabled)
             } footer: {
-                Text("When on, page turns and new ChatGPT replies are pushed to the server automatically. \"Sync now\" works either way.")
+                Text("When on, page turns and new translation replies are pushed to the server automatically. \"Sync now\" works either way.")
             }
 
             Section {

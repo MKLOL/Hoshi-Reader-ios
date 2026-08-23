@@ -22,6 +22,7 @@
 //  Per-key errors are collected so one corrupt book never kills the whole pass.
 //
 
+import EPUBKit
 import Foundation
 
 // MARK: - AI settings sync seam
@@ -86,6 +87,8 @@ struct HttpSyncResult: Sendable {
     var downloadedBookmarks = 0
     var downloadedChatEntries = 0
     var downloadedPayloads = 0
+    /// Books whose offline pre-translation blob was pulled this pass.
+    var downloadedPretranslations = 0
     var downloadedAppSettings = false
     var remoteOnlyBooks = 0
     var errors: [String] = []
@@ -97,11 +100,14 @@ struct HttpSyncResult: Sendable {
         if uploadedBookmarks > 0 { parts.append("\(uploadedBookmarks) bookmark\(plural(uploadedBookmarks)) up") }
         if uploadedChatEntries > 0 { parts.append("\(uploadedChatEntries) chat\(plural(uploadedChatEntries)) up") }
         if uploadedPayloads > 0 { parts.append("\(uploadedPayloads) book payload\(plural(uploadedPayloads)) up") }
-        if uploadedAppSettings { parts.append("ChatGPT settings up") }
+        if uploadedAppSettings { parts.append("translation settings up") }
         if downloadedBookmarks > 0 { parts.append("\(downloadedBookmarks) bookmark\(plural(downloadedBookmarks)) down") }
         if downloadedChatEntries > 0 { parts.append("\(downloadedChatEntries) chat\(plural(downloadedChatEntries)) down") }
         if downloadedPayloads > 0 { parts.append("\(downloadedPayloads) book payload\(plural(downloadedPayloads)) down") }
-        if downloadedAppSettings { parts.append("ChatGPT settings down") }
+        if downloadedPretranslations > 0 {
+            parts.append("\(downloadedPretranslations) offline translation set\(plural(downloadedPretranslations)) down")
+        }
+        if downloadedAppSettings { parts.append("translation settings down") }
         if remoteOnlyBooks > 0 { parts.append("\(remoteOnlyBooks) remote-only book\(plural(remoteOnlyBooks))") }
         if parts.isEmpty { parts.append("nothing to sync") }
         return parts.joined(separator: ", ")
@@ -148,7 +154,11 @@ struct HttpSyncReconciler {
             detail: "Connecting to the HTTP sync server."
         ))
         let inbound = await pullChangedKeys(sinceCursor: sinceCursor, into: &result, onProgress: onProgress)
-        await pushAllLocal(into: &result, onProgress: onProgress)
+        // A partial/failed listing is not a safe snapshot of the server. Do not push local state
+        // against it: that could overwrite remote changes the failed listing never revealed.
+        if inbound.listingSucceeded {
+            await pushAllLocal(into: &result, onProgress: onProgress)
+        }
 
         await onProgress(HttpSyncProgress(message: "Finishing sync", detail: "Saving the sync cursor."))
         result.newLastSyncedAt = safeNewCursor(currentCursor: sinceCursor, inbound: inbound)
@@ -161,6 +171,7 @@ struct HttpSyncReconciler {
     private struct InboundCursor {
         var maxHandled: String?
         var minUnhandled: String?
+        var listingSucceeded = true
     }
 
     // Plain loops, NOT compactMap/filter/reduce. Under the project's default-MainActor isolation
@@ -182,7 +193,12 @@ struct HttpSyncReconciler {
 
     // MARK: - Key parsing
 
-    private enum BookKeyKind { case bookmark, chat, metadata, payloadManifest, payloadZip }
+    private enum BookKeyKind {
+        case bookmark, chat, metadata, payloadManifest, payloadZip, pretranslations
+        /// EPUB-only keys. Separate from `payload*` so Android — whose parser skips unknown
+        /// suffixes without fetching them — never sees a novel. See SyncCore.epubZip.
+        case epubManifest, epubZip, sentences
+    }
     private struct ParsedBookKey { let syncId: String; let kind: BookKeyKind }
 
     /// Lowercase phase-detail label for a key kind (mirrors Android's `kind.name.lowercase()`).
@@ -193,6 +209,10 @@ struct HttpSyncReconciler {
         case .metadata: return "metadata"
         case .payloadManifest: return "payload manifest"
         case .payloadZip: return "payload zip"
+        case .pretranslations: return "offline translations"
+        case .epubManifest: return "book manifest"
+        case .epubZip: return "book payload"
+        case .sentences: return "sentence translations"
         }
     }
 
@@ -208,6 +228,10 @@ struct HttpSyncReconciler {
         case "metadata": kind = .metadata
         case "payload.manifest": kind = .payloadManifest
         case "payload.zip": kind = .payloadZip
+        case "pretranslations": kind = .pretranslations
+        case "epub.manifest": kind = .epubManifest
+        case "epub.zip": kind = .epubZip
+        case "sentences": kind = .sentences
         default:
             if suffix.hasPrefix("chat/") { kind = .chat } else { return nil }
         }
@@ -276,9 +300,26 @@ struct HttpSyncReconciler {
         onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void
     ) async -> InboundCursor {
         var cursor = InboundCursor()
+        var appliedKeys = HttpSyncAppliedKeyStore.load()
+        var unflushedAppliedKeyCount = 0
 
-        func markHandled(_ meta: HttpSyncKvKeyMeta) {
+        func flushAppliedKeys() {
+            guard unflushedAppliedKeyCount > 0 else { return }
+            HttpSyncAppliedKeyStore.save(appliedKeys)
+            unflushedAppliedKeyCount = 0
+        }
+
+        func markHandled(
+            _ meta: HttpSyncKvKeyMeta,
+            localArtifact: HttpSyncAppliedLocalArtifact? = nil
+        ) {
             cursor.maxHandled = maxRfc(cursor.maxHandled, meta.lastModified)
+            appliedKeys[meta.key] = HttpSyncAppliedKeyRecord(
+                meta: meta,
+                localArtifact: localArtifact
+            )
+            unflushedAppliedKeyCount += 1
+            if unflushedAppliedKeyCount >= 25 { flushAppliedKeys() }
         }
         func markUnhandled(_ meta: HttpSyncKvKeyMeta) {
             if compareRfc3339(meta.lastModified, sinceCursor) <= 0 { return }
@@ -305,11 +346,13 @@ struct HttpSyncReconciler {
         // turns the remote metadata into a tombstone instead. Mirrors Android's pendingTombstoneSyncIds.
         let pendingTombstoneSyncIds = Set(HttpSyncDeletedBookStore.all().keys)
 
-        // Pass 1: page through the entire listing and bucket keys by kind. We always do a full
-        // list (since=nil) on a manual sync — see the Android rationale: an incremental `since`
-        // can silently swallow new books under server clock skew. Per-key GETs are still
-        // short-circuited by the LWW checks below, so this is one list pass, not a re-download.
+        // Pass 1: always list the complete namespace. A timestamp cursor alone is unsafe when the
+        // server paginates, when equal timestamps straddle a page, or when an older client stored a
+        // bad cursor. The durable per-key identity ledger below gives retries their speed without
+        // sacrificing the complete remote snapshot needed for reconciliation.
         var payloadManifests: [HttpSyncKvKeyMeta] = []
+        /// EPUB manifests import through the same pass, but with the `epub.*` key pair.
+        var epubManifests: [HttpSyncKvKeyMeta] = []
         var metadataKeys: [(ParsedBookKey, HttpSyncKvKeyMeta)] = []
         var bookmarksAndChats: [(ParsedBookKey, HttpSyncKvKeyMeta)] = []
         var remoteSyncIds: Set<String> = []
@@ -327,19 +370,39 @@ struct HttpSyncReconciler {
                 remoteSyncIds.insert(parsed.syncId)
                 switch parsed.kind {
                 case .payloadManifest: payloadManifests.append(meta)
-                case .bookmark, .chat: bookmarksAndChats.append((parsed, meta))
-                case .payloadZip: markHandled(meta) // followed via the manifest
+                case .epubManifest: epubManifests.append(meta)
+                case .bookmark, .chat, .pretranslations, .sentences:
+                    if let root = rootsBySyncId[parsed.syncId],
+                       let applied = appliedKeys[meta.key],
+                       applied.matches(meta),
+                       localReadingArtifactIsPresent(
+                           root: root,
+                           parsed: parsed,
+                           key: meta.key,
+                           applied: applied
+                       ) {
+                        // This exact immutable remote value was already committed to local disk.
+                        // It is omitted from the pending counter, so a retry after item 478 resumes
+                        // at the first unfinished reading item instead of visibly starting at zero.
+                        markHandled(meta, localArtifact: applied.localArtifact)
+                    } else {
+                        bookmarksAndChats.append((parsed, meta))
+                    }
+                case .payloadZip, .epubZip: markHandled(meta) // followed via the manifest
                 case .metadata: metadataKeys.append((parsed, meta))
                 }
             }
         } catch {
             result.errors.append("list: \(errorText(error))")
+            cursor.listingSucceeded = false
+            flushAppliedKeys()
             return cursor
         }
 
         // Pass 2: apply metadata tombstones before payload import so a deleted remote book never
         // causes a fresh device to download a payload just to delete it.
         var shelfState = HttpSyncShelfStateStore.load()
+        var remoteFormatBySyncId: [String: ContentType] = [:]
         var deletedSyncIds: Set<String> = []
         var placementMetadataKeys: [(ParsedBookKey, HttpSyncKvKeyMeta)] = []
         for (parsed, meta) in metadataKeys {
@@ -347,6 +410,7 @@ struct HttpSyncReconciler {
                 guard let remote = try await fetchRemoteMetadata(key: meta.key) else {
                     throw HttpSyncError("Metadata at \(meta.key): missing.")
                 }
+                remoteFormatBySyncId[parsed.syncId] = remote.blob.contentType
                 if let remoteDeletedAt = remote.blob.deletedAt {
                     let localImportedAt = importedAtBySyncId[parsed.syncId] ?? nil
                     if localImportedAtOverridesRemoteDeletion(localImportedAt: localImportedAt, remoteDeletedAt: remoteDeletedAt) {
@@ -371,19 +435,68 @@ struct HttpSyncReconciler {
         }
 
         // Pass 3: import remote-only books by their payload manifests, BEFORE bookmarks/chats.
-        for (index, meta) in payloadManifests.enumerated() {
+        // A stale server can contain both key pairs for one syncId. Metadata is authoritative when
+        // present; without it, ambiguity is rejected instead of silently preferring mokuro because
+        // that list happened to be concatenated first.
+        var manifestsBySyncId: [String: (mokuro: HttpSyncKvKeyMeta?, epub: HttpSyncKvKeyMeta?)] = [:]
+        for meta in payloadManifests {
+            guard let parsed = parseBookKey(meta.key) else { continue }
+            var pair = manifestsBySyncId[parsed.syncId] ?? (nil, nil)
+            pair.mokuro = meta
+            manifestsBySyncId[parsed.syncId] = pair
+        }
+        for meta in epubManifests {
+            guard let parsed = parseBookKey(meta.key) else { continue }
+            var pair = manifestsBySyncId[parsed.syncId] ?? (nil, nil)
+            pair.epub = meta
+            manifestsBySyncId[parsed.syncId] = pair
+        }
+        var allManifests: [(HttpSyncKvKeyMeta, ContentType)] = []
+        for bookSyncId in manifestsBySyncId.keys.sorted() {
+            guard let pair = manifestsBySyncId[bookSyncId] else { continue }
+            if let mokuro = pair.mokuro, let epub = pair.epub {
+                switch remoteFormatBySyncId[bookSyncId] {
+                case .some(.mokuro):
+                    allManifests.append((mokuro, .mokuro))
+                    markHandled(epub)
+                case .some(.epub):
+                    allManifests.append((epub, .epub))
+                    markHandled(mokuro)
+                case .none:
+                    result.errors.append(
+                        "payload \(bookSyncId): both payload.manifest and epub.manifest exist without authoritative metadata."
+                    )
+                    markUnhandled(mokuro)
+                    markUnhandled(epub)
+                }
+            } else if let mokuro = pair.mokuro {
+                allManifests.append((mokuro, .mokuro))
+            } else if let epub = pair.epub {
+                allManifests.append((epub, .epub))
+            }
+        }
+        for (index, entry) in allManifests.enumerated() {
+            let (meta, format) = entry
             guard let parsed = parseBookKey(meta.key) else { continue }
             await onProgress(HttpSyncProgress(
                 message: "Checking remote book payloads",
-                detail: "Book \(index + 1) of \(payloadManifests.count): \(parsed.syncId)",
+                detail: "Book \(index + 1) of \(allManifests.count): \(parsed.syncId)",
                 completed: index,
-                total: payloadManifests.count
+                total: allManifests.count
             ))
             if deletedSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
             if rootsBySyncId[parsed.syncId] != nil { markHandled(meta); continue }
             if pendingTombstoneSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
+            if let declared = remoteFormatBySyncId[parsed.syncId], declared != format {
+                result.errors.append(
+                    "payload \(parsed.syncId): metadata declares \(declared.rawValue), "
+                    + "but only \(format.rawValue) manifest was selected."
+                )
+                markUnhandled(meta)
+                continue
+            }
             do {
-                if let imported = try await importRemoteOnlyBook(syncId: parsed.syncId) {
+                if let imported = try await importRemoteOnlyBook(syncId: parsed.syncId, format: format) {
                     rootsBySyncId[parsed.syncId] = imported
                     result.downloadedPayloads += 1
                     markHandled(meta)
@@ -445,9 +558,20 @@ struct HttpSyncReconciler {
                     if try await applyBookmarkFromRemote(root: root, meta: meta) { result.downloadedBookmarks += 1 }
                 case .chat:
                     if try await applyChatEntryFromRemote(root: root, meta: meta) { result.downloadedChatEntries += 1 }
+                case .pretranslations:
+                    if try await applyPretranslationsFromRemote(root: root, meta: meta) { result.downloadedPretranslations += 1 }
+                case .sentences:
+                    if try await applySentenceTranslationsFromRemote(
+                        root: root,
+                        syncId: parsed.syncId,
+                        meta: meta
+                    ) { result.downloadedPretranslations += 1 }
                 default: break
                 }
-                markHandled(meta)
+                markHandled(
+                    meta,
+                    localArtifact: localArtifactAfterApplying(root: root, kind: parsed.kind)
+                )
             } catch {
                 result.errors.append("\(parsed.syncId): \(errorText(error))")
                 markUnhandled(meta)
@@ -461,6 +585,7 @@ struct HttpSyncReconciler {
             remoteOnly += 1
         }
         result.remoteOnlyBooks = remoteOnly
+        flushAppliedKeys()
         return cursor
     }
 
@@ -469,6 +594,61 @@ struct HttpSyncReconciler {
         // runs off the main actor (this exact site crashed; see safeNewCursor).
         for book in books where book.syncId == syncId { return book.id }
         return nil
+    }
+
+    /// The applied-key ledger is only an optimization; it cannot stand in for the local data it
+    /// claims was committed. This check is deliberately specific to each reading-data kind.
+    private func localReadingArtifactIsPresent(
+        root: URL,
+        parsed: ParsedBookKey,
+        key: String,
+        applied: HttpSyncAppliedKeyRecord
+    ) -> Bool {
+        switch parsed.kind {
+        case .bookmark:
+            return BookStorage.loadBookmark(root: root) != nil
+        case .chat:
+            guard ContentType.detect(bookDir: root) == .mokuro else { return true }
+            for entry in loadChatLog(root: root).entries {
+                let suffix = chatEntryKeySuffix(
+                    timestampAppleSeconds: entry.timestampSeconds,
+                    bubbleText: entry.bubbleText,
+                    response: entry.response
+                )
+                if SyncKeys.chat(parsed.syncId, suffix: suffix) == key { return true }
+            }
+            return false
+        case .pretranslations:
+            guard ContentType.detect(bookDir: root) == .mokuro else { return true }
+            return applied.localArtifact?.matches(
+                root.appendingPathComponent(FileNames.pretranslations)
+            ) == true
+        case .sentences:
+            guard ContentType.detect(bookDir: root) == .epub else { return true }
+            return applied.localArtifact?.matches(
+                root.appendingPathComponent(FileNames.sentenceTranslations)
+            ) == true
+        default:
+            return false
+        }
+    }
+
+    private func localArtifactAfterApplying(
+        root: URL,
+        kind: BookKeyKind
+    ) -> HttpSyncAppliedLocalArtifact? {
+        switch kind {
+        case .pretranslations:
+            return HttpSyncAppliedLocalArtifact(
+                fileURL: root.appendingPathComponent(FileNames.pretranslations)
+            )
+        case .sentences:
+            return HttpSyncAppliedLocalArtifact(
+                fileURL: root.appendingPathComponent(FileNames.sentenceTranslations)
+            )
+        default:
+            return nil
+        }
     }
 
     private struct RemoteMetadata { let blob: HttpSyncMetadataBlob; let hasShelfName: Bool }
@@ -509,7 +689,7 @@ struct HttpSyncReconciler {
             characterCount: blob.characterCount,
             lastModified: Date(timeIntervalSinceReferenceDate: rfc3339ToAppleSeconds(blob.lastModified))
         )
-        try? BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
+        try BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
         HttpSyncRevisionStore.noteRemote(meta.key, rev: blob.rev, appliedLocally: true)
         return true
     }
@@ -527,7 +707,98 @@ struct HttpSyncReconciler {
         var log = loadChatLog(root: root)
         for existingEntry in log.entries where existingEntry.matchesEntry(incoming) { return false }
         log.entries.append(incoming)
-        saveChatLog(log, root: root)
+        try saveChatLog(log, root: root)
+        return true
+    }
+
+    /// Pulls a volume's offline pre-translation blob to `pretranslations.json` in the book dir.
+    ///
+    /// Download-only by design: these are produced by the desktop tool, never edited on device, so
+    /// there is no push side and no conflict resolution — the server copy always wins. Writing the
+    /// raw body avoids a decode/re-encode round-trip on a file that can hold thousands of entries;
+    /// it is validated by decoding into the blob type first so a truncated download can't replace
+    /// a good local cache.
+    private func applyPretranslationsFromRemote(root: URL, meta: HttpSyncKvKeyMeta) async throws -> Bool {
+        // Not a manga book: this key can never apply here, so returning false (→ markHandled) is
+        // correct and stops it being re-listed forever.
+        guard ContentType.detect(bookDir: root) == .mokuro else { return false }
+        let target = root.appendingPathComponent(FileNames.pretranslations)
+        // Identity is the listed ETag recorded in the applied-key ledger. Byte length is not an
+        // identity check: a replacement translation set can be different but exactly the same size.
+        // A 404 on a key the server JUST listed is anomalous — throw so the caller marks it
+        // UNHANDLED and retries next sync. Returning false here would write the key into the
+        // durable applied-key ledger, and because pretranslations are download-only with no push
+        // side, nothing would ever fetch it again.
+        guard let fetched = try await transport.get(key: meta.key) else {
+            throw HttpSyncError("Offline translations at \(meta.key): listed but missing.")
+        }
+        let blob: HttpSyncPretranslationsBlob
+        do {
+            blob = try jsonDecoder.decode(HttpSyncPretranslationsBlob.self, from: fetched.body)
+        } catch {
+            throw HttpSyncError("Offline translations at \(meta.key): malformed JSON.")
+        }
+        // Every field decodes leniently, so "valid JSON" alone is far too weak a check: an `{}`
+        // body, or a proxy error page returned with HTTP 200, would decode to an empty blob and
+        // overwrite a perfectly good local cache. Require the payload to actually carry entries
+        // and to be a version this build understands.
+        guard blob.version <= HttpSyncPretranslationsBlob.supportedVersion else {
+            throw HttpSyncError("Offline translations at \(meta.key): unsupported version \(blob.version).")
+        }
+        guard !blob.entries.isEmpty else {
+            throw HttpSyncError("Offline translations at \(meta.key): no entries.")
+        }
+        try fetched.body.write(to: target, options: .atomic)
+        PretranslationStore.invalidate(root: root)
+        return true
+    }
+
+    /// Pulls a novel's offline sentence-translation blob to `sentence_translations.json`.
+    ///
+    /// The EPUB counterpart of `applyPretranslationsFromRemote`, with one deliberate difference:
+    /// the validate-and-write happens on a detached task. A novel's blob is 1–5 MB against a manga
+    /// volume's few hundred KB, and this reconciler is `@MainActor` — decoding that inline would
+    /// visibly hitch the UI mid-"Sync now".
+    private func applySentenceTranslationsFromRemote(
+        root: URL,
+        syncId expectedSyncId: String,
+        meta: HttpSyncKvKeyMeta
+    ) async throws -> Bool {
+        guard ContentType.detect(bookDir: root) == .epub else { return false }
+        guard let localMetadata = BookStorage.loadMetadata(root: root),
+              syncId(for: localMetadata) == expectedSyncId else {
+            throw HttpSyncError(
+                "Sentence translations at \(meta.key): key syncId does not match the local book."
+            )
+        }
+        guard let document = try? BookStorage.loadEpub(root) else {
+            throw HttpSyncError(
+                "Sentence translations at \(meta.key): local EPUB cannot be parsed."
+            )
+        }
+        let expectedSpineCount = document.spine.items.count
+        let target = root.appendingPathComponent(FileNames.sentenceTranslations)
+        guard let fetched = try await transport.get(key: meta.key) else {
+            throw HttpSyncError("Sentence translations at \(meta.key): listed but missing.")
+        }
+        let body = fetched.body
+        let key = meta.key
+        try await Task.detached(priority: .utility) {
+            let blob: HttpSyncSentencesBlob
+            do {
+                blob = try JSONDecoder().decode(HttpSyncSentencesBlob.self, from: body)
+            } catch {
+                throw HttpSyncError("Sentence translations at \(key): malformed JSON.")
+            }
+            if let violation = blob.validationError(
+                expectedSyncId: expectedSyncId,
+                spineCount: expectedSpineCount
+            ) {
+                throw HttpSyncError("Sentence translations at \(key): \(violation).")
+            }
+            try body.write(to: target, options: .atomic)
+        }.value
+        EpubTranslationStore.invalidate(root: root)
         return true
     }
 
@@ -610,34 +881,70 @@ struct HttpSyncReconciler {
 
     // MARK: - Remote-only import
 
-    private func importRemoteOnlyBook(syncId: String) async throws -> URL? {
+    private func importRemoteOnlyBook(syncId: String, format: ContentType) async throws -> URL? {
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return nil }
+        let keys = HttpSyncPayloadKeys.forFormat(format, syncId: syncId)
         // Free-space preflight: refuse a multi-GB download we could never unpack. Without this, a
         // low-storage device downloads the whole payload, fails to unzip (disk full), deletes it,
         // and — because the cursor never advances past it — re-downloads the SAME GB on every sync,
         // forever. Throwing `skip: true` makes Pass 3 advance the cursor and surface an error instead.
-        if let manifest = try await payloadCodec.fetchManifest(transport: transport, syncId: syncId),
-           manifest.sizeBytes > 0 {
-            // 3× the (compressed) zip size: zip on disk during download + the unzipped copy (which can
-            // be larger than the zip for the text/JSON parts) + headroom. Erring high here keeps a
-            // book that won't fit out of the download→fail→delete→re-download loop the user hit.
-            let needed = Int64(Double(manifest.sizeBytes) * 3.0)
-            if let free = availableCapacityBytes(at: booksDir), free < needed {
-                let needGB = String(format: "%.1f", Double(needed) / 1_000_000_000)
-                let freeGB = String(format: "%.1f", Double(free) / 1_000_000_000)
-                throw HttpSyncError("Skipped \(syncId): need ~\(needGB) GB free to import, only \(freeGB) GB available.", skip: true)
+        if let manifest = try await payloadCodec.fetchManifest(transport: transport, keys: keys) {
+            guard manifest.format == format else {
+                throw HttpSyncError(
+                    "Payload manifest for \(syncId) declares \(manifest.format.rawValue), "
+                    + "but its key requires \(format.rawValue)."
+                )
+            }
+            if manifest.sizeBytes > 0 {
+                // 3× the compressed zip size: zip on disk during download + the unzipped copy
+                // (which can be larger for text/JSON) + headroom.
+                let needed = Int64(Double(manifest.sizeBytes) * 3.0)
+                if let free = availableCapacityBytes(at: booksDir), free < needed {
+                    let needGB = String(format: "%.1f", Double(needed) / 1_000_000_000)
+                    let freeGB = String(format: "%.1f", Double(free) / 1_000_000_000)
+                    throw HttpSyncError(
+                        "Skipped \(syncId): need ~\(needGB) GB free to import, "
+                        + "only \(freeGB) GB available.",
+                        skip: true
+                    )
+                }
             }
         }
         let targetRoot = booksDir.appendingPathComponent(syncId, isDirectory: true)
         // Avoid colliding with an existing directory; uniquify if needed.
         let root = uniqueDirectory(base: targetRoot)
         do {
-            let manifest = try await payloadCodec.downloadAndUnpack(transport: transport, syncId: syncId, targetDir: root)
+            let manifest = try await payloadCodec.downloadAndUnpack(
+                transport: transport,
+                syncId: syncId,
+                keys: keys,
+                expectedFormat: format,
+                targetDir: root
+            )
             let detected = ContentType.detect(bookDir: root)
+            guard detected == format else {
+                throw HttpSyncError(
+                    "Payload for \(syncId) unpacked as \(detected.rawValue), expected \(format.rawValue)."
+                )
+            }
             // Prefer a cover.jpg shipped in the payload; otherwise generate one from page 1 (mokuro)
             // so synced books show a cover like locally-imported ones do. Cross-platform / ッツ
             // payloads frequently omit cover.jpg, which is why synced book covers were blank.
+            // An EPUB is parsed once here and reused for both the cover and bookinfo below.
+            // `resolveImportedCoverPath` only knows how to find a literal `cover.jpg`, but a local
+            // EPUB import copies the cover under its manifest href's basename (e.g. `00023.jpeg`),
+            // so a synced novel arrived with a blank shelf tile until we ask the document itself.
+            let epubDocument: EPUBDocument?
+            if format == .epub {
+                guard let parsed = try? BookStorage.loadEpub(root) else {
+                    throw HttpSyncError("Payload for \(syncId) is not a parseable EPUB.")
+                }
+                epubDocument = parsed
+            } else {
+                epubDocument = nil
+            }
             let cover = resolveImportedCoverPath(root: root, folder: root.lastPathComponent)
+                ?? epubCoverPath(document: epubDocument, root: root)
                 ?? generateMokuroCoverIfMissing(root: root, contentType: detected)
             let metadata = BookMetadata(
                 id: UUID(),
@@ -649,7 +956,13 @@ struct HttpSyncReconciler {
                 importedAt: rfc3339Now(),
                 syncId: syncId
             )
-            try? BookStorage.save(metadata, inside: root, as: FileNames.metadata)
+            try BookStorage.save(metadata, inside: root, as: FileNames.metadata)
+            // Character counts for EPUB. Without `bookinfo.json` the book opens with
+            // `characterCount == 0`: no progress on the shelf, and `resolveCharacterPosition`
+            // cannot place an incoming bookmark from another device.
+            if detected == .epub, let document = epubDocument, BookStorage.loadBookInfo(root: root) == nil {
+                try? BookStorage.save(BookProcessor.process(document: document), inside: root, as: FileNames.bookinfo)
+            }
             // Page-based progress for mokuro so the shelf shows a progress bar before first open.
             if detected == .mokuro, BookStorage.loadBookInfo(root: root) == nil {
                 let pageCount = countImages(in: root.appendingPathComponent(FileNames.mokuroImages))
@@ -702,6 +1015,41 @@ struct HttpSyncReconciler {
         return nil
     }
 
+    /// Resolves (and materializes) a synced EPUB's cover the way a local import does.
+    ///
+    /// A local import copies the manifest's cover image to `Books/{folder}/{basename}` and stores
+    /// that relative path. The synced copy already contains the image somewhere inside the unpacked
+    /// book, so we copy it up to the same place rather than inventing a second convention.
+    private func epubCoverPath(document: EPUBDocument?, root: URL) -> String? {
+        guard let document, let coverPath = findEpubCoverInManifest(document: document) else { return nil }
+        let source = document.contentDirectory.appendingPathComponent(coverPath)
+        let name = URL(fileURLWithPath: coverPath).lastPathComponent
+        let destination = root.appendingPathComponent(name)
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
+            guard fileManager.fileExists(atPath: source.path(percentEncoded: false)),
+                  (try? fileManager.copyItem(at: source, to: destination)) != nil else { return nil }
+        }
+        return "Books/\(root.lastPathComponent)/\(name)"
+    }
+
+    /// Mirror of `BookshelfViewModel.findCoverInManifest` — EPUB3 `cover-image`, then the EPUB2
+    /// `meta name="cover"` id, then loose fallbacks for files that follow neither.
+    private func findEpubCoverInManifest(document: EPUBDocument) -> String? {
+        if let item = document.manifest.items.values.first(where: { $0.property?.contains("cover-image") == true }) {
+            return item.path
+        }
+        if let coverId = document.metadata.coverId, let item = document.manifest.items[coverId] {
+            return item.path
+        }
+        let imageTypes: [EPUBMediaType] = [.jpeg, .png, .gif, .svg]
+        if let item = document.manifest.items.values.first(where: { $0.id.lowercased().contains("cover") }),
+           imageTypes.contains(item.mediaType) {
+            return item.path
+        }
+        return document.manifest.items.values.first(where: { imageTypes.contains($0.mediaType) })?.path
+    }
+
     private func countImages(in dir: URL) -> Int {
         (try? FileManager.default.contentsOfDirectory(atPath: dir.path(percentEncoded: false)).count) ?? 0
     }
@@ -728,7 +1076,9 @@ struct HttpSyncReconciler {
         let snapshot = ShelfSnapshot.load()
         var shelfState = HttpSyncShelfStateStore.load()
         var payloadBookCount = 0
-        for b in localBooks where b.contentType == .mokuro { payloadBookCount += 1 }
+        // Both formats now upload a payload, so the progress denominator must count both — a
+        // mokuro-only count made the bar run past its total as soon as a novel was uploaded.
+        for _ in localBooks { payloadBookCount += 1 }
         var payloadBookIndex = 0
 
         // Pass 0: push pending deleted-book tombstones. For each staged delete, PUT a metadata
@@ -867,12 +1217,15 @@ struct HttpSyncReconciler {
                     shelfState.removeValue(forKey: book.syncId)
                 }
 
-                // Payload (mokuro only for v2.0) — upload once if the server lacks a manifest.
-                if book.contentType == .mokuro {
+                // Payload — upload once if the server lacks a manifest. Mokuro goes to
+                // `payload.*`, EPUB to `epub.*` (see HttpSyncPayloadKeys).
+                do {
                     let currentPayloadIndex = payloadBookIndex
                     payloadBookIndex += 1
                     await onProgress(HttpSyncProgress(
-                        message: "Checking manga payload upload",
+                        message: book.contentType == .mokuro
+                            ? "Checking manga payload upload"
+                            : "Checking book payload upload",
                         detail: "Book \(currentPayloadIndex + 1) of \(payloadBookCount): \(book.title)",
                         completed: currentPayloadIndex,
                         total: payloadBookCount
@@ -957,7 +1310,7 @@ struct HttpSyncReconciler {
                     characterCount: remoteBlob.characterCount,
                     lastModified: Date(timeIntervalSinceReferenceDate: rfc3339ToAppleSeconds(remoteBlob.lastModified))
                 )
-                try? BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
+                try BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
                 HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: true)
                 return false
             case .tie:
@@ -1012,6 +1365,7 @@ struct HttpSyncReconciler {
                     .keys.contains("imagePromptText") ?? false
             } else {
                 outcome.error = "ai_chat_settings decode: malformed JSON."
+                return outcome
             }
         }
 
@@ -1066,8 +1420,8 @@ struct HttpSyncReconciler {
         BookStorage.load(AiChatLog.self, from: chatLogURL(root: root)) ?? AiChatLog()
     }
 
-    private func saveChatLog(_ log: AiChatLog, root: URL) {
-        try? BookStorage.save(log, inside: root, as: FileNames.aiChatLog)
+    private func saveChatLog(_ log: AiChatLog, root: URL) throws {
+        try BookStorage.save(log, inside: root, as: FileNames.aiChatLog)
     }
 
     // MARK: - Book deletion
@@ -1101,6 +1455,77 @@ struct HttpSyncReconciler {
 
     private func errorText(_ error: Error) -> String {
         (error as? HttpSyncError)?.message ?? error.localizedDescription
+    }
+}
+
+// MARK: - Durable inbound per-key checkpoint
+
+/// Identity of a remote value that has been fully committed to local disk. ETag is preferred; the
+/// server timestamp is the compatibility fallback for servers that do not emit ETags.
+nonisolated struct HttpSyncAppliedKeyRecord: Codable, Equatable {
+    var etag: String?
+    var lastModified: String
+    /// Signature of a separately stored reading artifact. Old ledgers decode this as nil and do one
+    /// safe re-fetch; new ledgers can cheaply detect deletion/re-import without decoding a 5 MB blob.
+    var localArtifact: HttpSyncAppliedLocalArtifact?
+
+    init(meta: HttpSyncKvKeyMeta, localArtifact: HttpSyncAppliedLocalArtifact? = nil) {
+        let trimmedETag = meta.etag?.trimmingCharacters(in: .whitespacesAndNewlines)
+        etag = trimmedETag?.isEmpty == false ? trimmedETag : nil
+        lastModified = meta.lastModified
+        self.localArtifact = localArtifact
+    }
+
+    func matches(_ meta: HttpSyncKvKeyMeta) -> Bool {
+        let remoteETag = meta.etag?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let etag, !etag.isEmpty, let remoteETag, !remoteETag.isEmpty {
+            return etag == remoteETag
+        }
+        return !lastModified.isEmpty && lastModified == meta.lastModified
+    }
+}
+
+/// Cheap coherence marker for large download-only files. Atomic replacement changes both the file
+/// metadata and this ledger record; a missing or replaced artifact therefore defeats an ETag skip.
+nonisolated struct HttpSyncAppliedLocalArtifact: Codable, Equatable {
+    let size: Int64
+    let modificationTime: TimeInterval
+
+    init?(fileURL: URL) {
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: fileURL.path(percentEncoded: false)
+        ),
+        let size = attributes[.size] as? NSNumber,
+        size.int64Value > 0,
+        let modificationDate = attributes[.modificationDate] as? Date else { return nil }
+        self.size = size.int64Value
+        modificationTime = modificationDate.timeIntervalSinceReferenceDate
+    }
+
+    func matches(_ fileURL: URL) -> Bool {
+        guard let current = HttpSyncAppliedLocalArtifact(fileURL: fileURL) else { return false }
+        return current == self
+    }
+}
+
+/// Sidecar used only as a retry optimization. A failed write causes harmless reprocessing on the
+/// next sync; it can never make a remote value appear applied when its local write failed because
+/// callers record a key only after the critical local write succeeds.
+enum HttpSyncAppliedKeyStore {
+    private static let filename = ".http_sync_applied_keys.json"
+
+    private static func fileURL() -> URL? {
+        (try? BookStorage.getBooksDirectory())?.appendingPathComponent(filename)
+    }
+
+    static func load() -> [String: HttpSyncAppliedKeyRecord] {
+        guard let url = fileURL(), let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? JSONDecoder().decode([String: HttpSyncAppliedKeyRecord].self, from: data)) ?? [:]
+    }
+
+    static func save(_ state: [String: HttpSyncAppliedKeyRecord]) {
+        guard let url = fileURL(), let data = try? JSONEncoder().encode(state) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 }
 

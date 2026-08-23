@@ -107,13 +107,16 @@ extension RawMokuroPage {
             imagePath: imgPath,
             imageWidth: imgWidth,
             imageHeight: imgHeight,
-            textBoxes: blocks.compactMap { $0.toMokuroTextBox() }
+            // enumerated() so each box remembers its ORIGINAL mokuro block index; compactMap drops
+            // unusable blocks, which would otherwise silently renumber every later bubble and
+            // break the offline pre-translation addresses (`p{page}b{block}`).
+            textBoxes: blocks.enumerated().compactMap { $1.toMokuroTextBox(blockIndex: $0) }
         )
     }
 }
 
 extension RawMokuroBlock {
-    nonisolated func toMokuroTextBox() -> MokuroTextBox? {
+    nonisolated func toMokuroTextBox(blockIndex: Int = 0) -> MokuroTextBox? {
         guard box.count >= 4 else { return nil }
         // mokuro stores box as [xMin, yMin, xMax, yMax] in image-pixel coordinates. Corrupt files
         // can carry NaN / infinite / out-of-Int-range values, and Int(Double) traps on those, so
@@ -136,7 +139,8 @@ extension RawMokuroBlock {
                 linesCoords: linesCoords
             ),
             vertical: vertical,
-            lines: lines
+            lines: lines,
+            blockIndex: blockIndex
         )
     }
 }
