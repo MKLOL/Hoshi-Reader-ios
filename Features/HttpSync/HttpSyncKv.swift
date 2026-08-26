@@ -93,6 +93,9 @@ struct HttpSyncError: LocalizedError {
     init(_ message: String, skip: Bool = false) { self.message = message; self.skip = skip }
 }
 
+/// The old backend is healthy but does not have the map exchange route yet.
+nonisolated struct HttpSyncExchangeUnavailable: Error, Sendable {}
+
 // MARK: - Transport protocol
 
 /// The blob-store operations the sync code needs. A protocol so tests can fake the network with
@@ -201,6 +204,10 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         )
         request.httpBody = body
         let (data, response) = try await perform(request, uploadBody: body)
+        if let http = response as? HTTPURLResponse,
+           http.statusCode == 404 || http.statusCode == 405 {
+            throw HttpSyncExchangeUnavailable()
+        }
         try ensureSuccess(response: response, data: data)
         do {
             return try Self.jsonDecoder.decode(HttpSyncExchangeResponse.self, from: data)

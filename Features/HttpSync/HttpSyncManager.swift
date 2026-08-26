@@ -7,13 +7,12 @@
 //
 //  Top-level entry point for the v2 KV HTTP sync. Owns:
 //   - syncNow(): a full bidirectional reconcile (the "Sync now" button), advancing the cursor.
-//   - onPageTurnPersisted(book:): fire-and-forget single bookmark PUT after a page-turn save.
+//   - onPageTurnPersisted(book:): durable bookmark-map write batched within five seconds.
 //   - onChatEntryPersisted(book:entry:): fire-and-forget single chat PUT after a chat reply save.
 //
-//  The two push hooks mirror Android's HttpSyncPusher: one PUT each, no listing, no cursor. They
-//  are gated by HttpSyncSettingsStore.enabled and never throw to the caller — a 401 / offline /
-//  5xx must never affect the reader UI. syncNow() also never throws; failures land in
-//  HttpSyncResult.errors and lastError.
+//  Bookmark exchange and chat push are gated by HttpSyncSettingsStore.enabled and never throw
+//  to the caller — a 401 / offline / 5xx must never affect the reader UI. syncNow() also never
+//  throws; failures land in HttpSyncResult.errors and lastError.
 //
 
 import Foundation
@@ -152,6 +151,9 @@ final class HttpSyncManager {
         result.downloadedAppSettings = appSettingsOutcome.downloaded
         if let error = appSettingsOutcome.error { result.errors.append(error) }
         batchState.saveCache(await transport.cacheSnapshot())
+        batchState.resolveLegacyWrites(
+            await transport.legacyMutationsToResolve(fullSuccess: result.errors.isEmpty)
+        )
 
         if let newCursor = result.newLastSyncedAt {
             settings.lastSyncedAt = newCursor
@@ -209,10 +211,9 @@ final class HttpSyncManager {
     // MARK: - Fire-and-forget push hooks (reader-hot + metadata edits)
 
     /// Call after a bookmark has been persisted to disk for `book` (e.g. the page-turn debounce
-    /// fired, EPUB or manga). Bumps the bookmark key's edit-depth rev, then PUTs
-    /// `books/{syncId}/bookmark` unless the server copy out-revisions the local one (in which
-    /// case the remote bookmark is applied locally instead). No-ops silently when sync is
-    /// disabled / unconfigured / suppressed; never throws.
+    /// fired, EPUB or manga). Replaces that book's durable outbox entry; the map exchange sends
+    /// all dirty bookmarks together within five seconds. No-ops silently when sync is disabled
+    /// or unconfigured; never throws.
     func onPageTurnPersisted(book: BookMetadata) {
         // Persist first, then coalesce every dirty book into one exchange at most five
         // seconds later. The outbox survives process death and is cleared only by an
@@ -225,7 +226,7 @@ final class HttpSyncManager {
     /// this device gets a chance to keep reading from an old position.
     func syncInBackground() {
         guard settings.enabled, settings.isConfigured else { return }
-        Task { await syncNow() }
+        Task { await exchangeMapsOnly() }
     }
 
     /// Reader-close fast path: do not leave the final page waiting on the timer.
@@ -235,7 +236,7 @@ final class HttpSyncManager {
         guard settings.enabled, settings.isConfigured, batchState.hasPending else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.syncNow()
+            await self.exchangeMapsOnly()
             if self.batchState.hasPending { self.scheduleBookmarkSync() }
         }
     }
@@ -247,9 +248,28 @@ final class HttpSyncManager {
             repeat {
                 try? await Task.sleep(for: .seconds(5))
                 if Task.isCancelled { break }
-                await self.syncNow()
+                await self.exchangeMapsOnly()
             } while self.batchState.hasPending
             self.bookmarkSyncTask = nil
+        }
+    }
+
+    /// The reader-hot path: upload every queued bookmark and conditionally read
+    /// the two maps in one request. Only a changed books map launches the larger
+    /// binary/metadata reconcile, and that work remains in the background.
+    private func exchangeMapsOnly() async {
+        guard settings.enabled, settings.isConfigured else { return }
+        do {
+            let changes = try await batchState.exchange(config: settings.currentConfig())
+            notePushOutcome(success: true)
+            if changes.booksChanged { await syncNow() }
+        } catch is HttpSyncExchangeUnavailable {
+            // The full transport falls back to v1 and resolves only the exact
+            // outbox mutations captured before this rolling-deploy attempt.
+            await syncNow()
+        } catch {
+            notePushOutcome(success: false)
+            log.error("map exchange failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

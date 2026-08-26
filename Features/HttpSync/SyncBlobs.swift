@@ -84,7 +84,7 @@ nonisolated struct HttpSyncMetadataBlob: Codable, Equatable {
     }
 }
 
-nonisolated struct HttpSyncBookmarkBlob: Codable, Equatable {
+nonisolated struct HttpSyncBookmarkBlob: Codable, Equatable, Sendable {
     let chapterIndex: Int
     let progress: Double
     let characterCount: Int
@@ -405,7 +405,8 @@ nonisolated struct HttpSyncExchangeWrite: Codable, Sendable {
 }
 
 nonisolated struct HttpSyncExchangeRequest: Codable, Sendable {
-    let knownEtags: [String: String]
+    let booksHash: String?
+    let bookmarksHash: String?
     let writes: [HttpSyncExchangeWrite]
 }
 
@@ -426,7 +427,16 @@ nonisolated struct HttpSyncExchangeWriteAck: Codable, Sendable {
 }
 
 nonisolated struct HttpSyncExchangeResponse: Codable, Sendable {
-    let keys: [HttpSyncExchangeKey]
-    let removedKeys: [String]
+    let booksHash: String
+    let books: [String: String]?
+    let bookmarksHash: String
+    let bookmarks: [String: HttpSyncBookmarkMapEntry]?
+    let bookKeys: [HttpSyncExchangeKey]?
     let writeAcks: [HttpSyncExchangeWriteAck]
+}
+
+nonisolated struct HttpSyncBookmarkMapEntry: Codable, Sendable {
+    let etag: String
+    let lastModified: String
+    let value: HttpSyncBookmarkBlob?
 }
