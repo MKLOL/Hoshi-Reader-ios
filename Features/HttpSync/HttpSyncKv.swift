@@ -191,6 +191,24 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     // MARK: PUT
 
+    /// One-call key-index refresh plus conditional batched bookmark upload.
+    func exchange(_ exchange: HttpSyncExchangeRequest) async throws -> HttpSyncExchangeResponse {
+        let body = try Self.jsonEncoder.encode(exchange)
+        var request = makeRequest(
+            "POST",
+            path: "/v2/exchange",
+            contentType: "application/json; charset=utf-8"
+        )
+        request.httpBody = body
+        let (data, response) = try await perform(request, uploadBody: body)
+        try ensureSuccess(response: response, data: data)
+        do {
+            return try Self.jsonDecoder.decode(HttpSyncExchangeResponse.self, from: data)
+        } catch {
+            throw HttpSyncError("Sync server returned malformed JSON for the batch exchange.")
+        }
+    }
+
     func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
         var request = makeRequest("PUT", path: "/v1/kv/\(encodeKey(key))", contentType: contentType)
         request.httpBody = body

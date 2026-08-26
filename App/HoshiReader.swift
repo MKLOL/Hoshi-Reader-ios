@@ -56,6 +56,7 @@ struct HoshiReaderApp: App {
                 case .active:
                     LocalFileServer.shared.endBackgroundTask()
                     LocalFileServer.shared.setAudioServer(enabled: userConfig.enableLocalAudio)
+                    HttpSyncManager.shared.syncInBackground()
                 case .background:
                     LocalFileServer.shared.startBackgroundTask()
                 default:

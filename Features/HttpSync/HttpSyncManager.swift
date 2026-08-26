@@ -44,6 +44,7 @@ final class HttpSyncManager {
     private(set) var lastErrors: [String] = []
 
     private let settings: HttpSyncSettingsStore
+    private let batchState = HttpSyncBatchState.shared
     /// Agent C makes `AiChatSettingsStore` conform to `AiSettingsSyncing` in Phase 2 and assigns
     /// it here (or via the initializer). Until then this is nil and the AI-settings sync path is
     /// skipped — every other sync path is unaffected.
@@ -52,6 +53,7 @@ final class HttpSyncManager {
     /// Serializes manual reconciles against each other (a second "Sync now" tap while one is in
     /// flight just no-ops). Fire-and-forget pushes are independent.
     private var reconcileTask: Task<Void, Never>?
+    private var bookmarkSyncTask: Task<Void, Never>?
 
     init(settings: HttpSyncSettingsStore? = nil, aiSettings: AiSettingsSyncing? = nil) {
         self.settings = settings ?? HttpSyncSettingsStore.shared
@@ -78,6 +80,7 @@ final class HttpSyncManager {
         reconcileTask = task
         await task.value
         reconcileTask = nil
+        if batchState.hasPending { scheduleBookmarkSync() }
     }
 
     private func runReconcile() async {
@@ -108,7 +111,24 @@ final class HttpSyncManager {
         //
         // The reconciler streams phased progress through `onProgress`; we hop back onto the main
         // actor to update the @Observable `progress` so the settings screen's bar/label tracks it.
-        let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+        let transport = HttpSyncBatchKvTransport(
+            config: config,
+            request: batchState.exchangeRequest(),
+            cache: batchState.cacheSnapshot()
+        )
+        do {
+            try await transport.prepare()
+            if let exchange = await transport.exchangeResponse() {
+                batchState.applyExchange(exchange)
+                await transport.setPendingKeys(batchState.pendingKeys)
+            }
+        } catch {
+            let message = error.localizedDescription
+            lastErrors = [message]
+            lastError = message
+            log.error("batch exchange failed: \(message, privacy: .public)")
+            return
+        }
         // Sync the small model/prompt blob FIRST and independently. A corrupt book, a huge payload,
         // or a later rate-limit error must never prevent the user's prompt/model edit from reaching
         // the other device.
@@ -131,6 +151,7 @@ final class HttpSyncManager {
         result.uploadedAppSettings = appSettingsOutcome.uploaded
         result.downloadedAppSettings = appSettingsOutcome.downloaded
         if let error = appSettingsOutcome.error { result.errors.append(error) }
+        batchState.saveCache(await transport.cacheSnapshot())
 
         if let newCursor = result.newLastSyncedAt {
             settings.lastSyncedAt = newCursor
@@ -193,19 +214,42 @@ final class HttpSyncManager {
     /// case the remote bookmark is applied locally instead). No-ops silently when sync is
     /// disabled / unconfigured / suppressed; never throws.
     func onPageTurnPersisted(book: BookMetadata) {
-        guard let bookSyncId = syncId(for: book) else { return }
-        // Bump whenever a sync-participating install makes a deliberate edit — even while the
-        // breaker is suppressing pushes or auto-sync is disabled. Otherwise edits made while
-        // silent pushes are unavailable stay rev-invisible and can lose to an older remote
-        // position at the next manual sync.
-        let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.bookmark(bookSyncId))
-        guard let folder = book.folder, autoPushReady,
-              let booksDir = try? BookStorage.getBooksDirectory() else { return }
-        let config = settings.currentConfig()
-        let root = booksDir.appendingPathComponent(folder)
-        Task {
-            let ok = await Self.pushBookmark(config: config, syncId: bookSyncId, root: root, localRev: localRev)
-            self.notePushOutcome(success: ok)
+        // Persist first, then coalesce every dirty book into one exchange at most five
+        // seconds later. The outbox survives process death and is cleared only by an
+        // acknowledgement for the exact mutation id.
+        batchState.queueBookmark(book: book)
+        scheduleBookmarkSync()
+    }
+
+    /// Called on app activation so another device's latest bookmark is pulled before
+    /// this device gets a chance to keep reading from an old position.
+    func syncInBackground() {
+        guard settings.enabled, settings.isConfigured else { return }
+        Task { await syncNow() }
+    }
+
+    /// Reader-close fast path: do not leave the final page waiting on the timer.
+    func flushBookmarkSync() {
+        bookmarkSyncTask?.cancel()
+        bookmarkSyncTask = nil
+        guard settings.enabled, settings.isConfigured, batchState.hasPending else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.syncNow()
+            if self.batchState.hasPending { self.scheduleBookmarkSync() }
+        }
+    }
+
+    private func scheduleBookmarkSync() {
+        guard settings.enabled, settings.isConfigured, bookmarkSyncTask == nil else { return }
+        bookmarkSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            repeat {
+                try? await Task.sleep(for: .seconds(5))
+                if Task.isCancelled { break }
+                await self.syncNow()
+            } while self.batchState.hasPending
+            self.bookmarkSyncTask = nil
         }
     }
 

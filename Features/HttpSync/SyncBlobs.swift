@@ -379,6 +379,12 @@ nonisolated struct HttpSyncKvList: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey { case keys, truncated, nextCursor }
 
+    init(keys: [HttpSyncKvKeyMeta], truncated: Bool? = false, nextCursor: String? = nil) {
+        self.keys = keys
+        self.truncated = truncated
+        self.nextCursor = nextCursor
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         keys = try c.decodeIfPresent([HttpSyncKvKeyMeta].self, forKey: .keys) ?? []
@@ -389,3 +395,38 @@ nonisolated struct HttpSyncKvList: Codable, Equatable {
 
 /// Response of a `PUT /v1/kv/{key}` (or multipart complete).
 typealias HttpSyncKvWriteResponse = HttpSyncKvKeyMeta
+
+nonisolated struct HttpSyncExchangeWrite: Codable, Sendable {
+    let key: String
+    let baseEtag: String?
+    let mutationId: String
+    let contentType: String
+    let bodyBase64: String
+}
+
+nonisolated struct HttpSyncExchangeRequest: Codable, Sendable {
+    let knownEtags: [String: String]
+    let writes: [HttpSyncExchangeWrite]
+}
+
+nonisolated struct HttpSyncExchangeKey: Codable, Sendable {
+    let key: String
+    let lastModified: String
+    let etag: String
+    let size: Int
+    let contentType: String
+    let bodyBase64: String?
+}
+
+nonisolated struct HttpSyncExchangeWriteAck: Codable, Sendable {
+    let key: String
+    let mutationId: String
+    let accepted: Bool
+    let etag: String?
+}
+
+nonisolated struct HttpSyncExchangeResponse: Codable, Sendable {
+    let keys: [HttpSyncExchangeKey]
+    let removedKeys: [String]
+    let writeAcks: [HttpSyncExchangeWriteAck]
+}
