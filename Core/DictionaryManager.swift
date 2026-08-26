@@ -364,7 +364,7 @@ class DictionaryManager {
                     await MainActor.run {
                         self.loadDictionaries()
                         let old = dictionary.index.title
-                        let new = String(importResult.title)
+                        let new = cxxStringToSwift(importResult.title)
                         if old != new {
                             if let currentIndex = self.getDictionaryIndex(title: old, type: type) {
                                 let wasEnabled = self.isDictionaryEnabled(at: currentIndex, type: type)
