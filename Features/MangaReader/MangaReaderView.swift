@@ -187,6 +187,7 @@ struct MangaReaderView: View {
             }
         }
         .onAppear {
+            HttpSyncActiveBooks.open(syncId(for: metadata))
             // Push new ChatGPT replies to the HTTP KV sync server (no-op unless sync is enabled).
             aiController.onEntryPersisted = { book, entry in
                 HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry)
@@ -215,6 +216,15 @@ struct MangaReaderView: View {
             pageReadyTimeoutTask?.cancel()
             pageReadyTimeoutTask = nil
             aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
+            Task {
+                await HttpSyncManager.shared.flushBookmarkSync()
+                HttpSyncActiveBooks.close(syncId(for: metadata))
+                HttpSyncManager.shared.syncInBackground()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
+            guard note.userInfo?["syncId"] as? String == syncId(for: metadata) else { return }
+            model.reloadAfterHttpBookmark()
         }
     }
 

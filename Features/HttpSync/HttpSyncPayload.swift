@@ -49,13 +49,28 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "pretranslations.json",     // synced as …/pretranslations
     "sentence_translations.json", // synced as …/sentences
     httpSyncPayloadShaCacheFilename,
+    ".payload.sha256.cache",
+    ".payload.content.local_dirty",
+    httpSyncPayloadReplacementTargetFilename,
 ]
 
 /// Directories under a book root excluded from the payload, by name. Matches Android.
 nonisolated let httpSyncPayloadExcludedDirs: Set<String> = ["Sasayaki"]
 
 /// Sidecar caching the last-computed payload sha so an unchanged book isn't re-zipped/re-hashed.
-nonisolated let httpSyncPayloadShaCacheFilename = ".payload.sha256.cache"
+nonisolated let httpSyncPayloadShaCacheFilename = ".payload.content.sha256.cache"
+nonisolated private let httpSyncPayloadReplacementTargetFilename = ".payload.replacement.target"
+nonisolated private let httpSyncPayloadReplacementBackupPrefix = ".hoshi-sync-backup-"
+
+/// Excluded files that are genuinely mutable/per-device and survive a static replacement.
+/// `bookinfo.json` is derived from EPUB bytes and must be regenerated for changed content.
+nonisolated private let httpSyncReplacementPreservedFiles = httpSyncPayloadExcludedFiles
+    .subtracting([
+        "bookinfo.json",
+        httpSyncPayloadShaCacheFilename,
+        ".payload.sha256.cache",
+        httpSyncPayloadReplacementTargetFilename,
+    ])
 
 /// Which pair of KV keys a book's payload lives under.
 ///
@@ -86,6 +101,152 @@ nonisolated struct HttpSyncPayloadCodec {
     private static let jsonEncoder = JSONEncoder()
     private static let jsonDecoder = JSONDecoder()
 
+    func cachedPayloadSha(bookRoot: URL) -> String? {
+        let cache = bookRoot.appendingPathComponent(httpSyncPayloadShaCacheFilename)
+        guard let raw = try? String(contentsOf: cache, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              raw.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return raw
+    }
+
+    /// Establishes the baseline for an upgraded client that already has this book offline.
+    func rememberPayloadSha(bookRoot: URL, sha: String) throws {
+        guard sha.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw HttpSyncError("Invalid payload sha256: \(sha)")
+        }
+        Self.writeCachedSha(bookRoot: bookRoot, sha: sha)
+    }
+
+    /// Computes the cross-platform static-content hash once for a pre-map import/download.
+    func ensurePayloadContentSha(bookRoot: URL) async throws -> String {
+        if let cached = cachedPayloadSha(bookRoot: bookRoot) { return cached }
+        let hash = try await Task.detached(priority: .utility) {
+            try Self.contentSha(bookRoot: bookRoot)
+        }.value
+        Self.writeCachedSha(bookRoot: bookRoot, sha: hash)
+        return hash
+    }
+
+    func markPayloadContentDirty(bookRoot: URL) {
+        try? Data("1".utf8).write(
+            to: bookRoot.appendingPathComponent(".payload.content.local_dirty"),
+            options: .atomic
+        )
+    }
+
+    func hasPayloadContentDirty(bookRoot: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: bookRoot.appendingPathComponent(".payload.content.local_dirty")
+                .path(percentEncoded: false)
+        )
+    }
+
+    /// Installs verified static bytes while retaining mutable/per-device sidecars and rollback.
+    func installReplacement(bookRoot: URL, stagingRoot: URL, sha: String) throws {
+        let fileManager = FileManager.default
+        let parent = bookRoot.deletingLastPathComponent()
+        recoverInterruptedReplacements(booksDirectory: parent)
+        let backup = parent.appendingPathComponent(
+            "\(httpSyncPayloadReplacementBackupPrefix)\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try Data(bookRoot.lastPathComponent.utf8).write(
+            to: bookRoot.appendingPathComponent(httpSyncPayloadReplacementTargetFilename),
+            options: .atomic
+        )
+        do {
+            try fileManager.moveItem(at: bookRoot, to: backup)
+        } catch {
+            try? fileManager.removeItem(
+                at: bookRoot.appendingPathComponent(httpSyncPayloadReplacementTargetFilename)
+            )
+            throw error
+        }
+        var movedSidecars: [String] = []
+        do {
+            try fileManager.moveItem(at: stagingRoot, to: bookRoot)
+            for child in try replacementSidecars(root: backup) {
+                let name = child.lastPathComponent
+                let isDirectory = (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                let destination = bookRoot.appendingPathComponent(name, isDirectory: isDirectory)
+                if fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
+                    try fileManager.removeItem(at: destination)
+                }
+                try fileManager.moveItem(at: child, to: destination)
+                movedSidecars.append(name)
+            }
+            try rememberPayloadSha(bookRoot: bookRoot, sha: sha)
+            try? fileManager.removeItem(at: backup)
+        } catch {
+            for name in movedSidecars.reversed() {
+                let source = bookRoot.appendingPathComponent(name)
+                let destination = backup.appendingPathComponent(name)
+                if fileManager.fileExists(atPath: source.path(percentEncoded: false)) {
+                    try? fileManager.moveItem(at: source, to: destination)
+                }
+            }
+            try? fileManager.removeItem(at: bookRoot)
+            try? fileManager.moveItem(at: backup, to: bookRoot)
+            try? fileManager.removeItem(
+                at: bookRoot.appendingPathComponent(httpSyncPayloadReplacementTargetFilename)
+            )
+            throw HttpSyncError("Could not install changed payload: \(error.localizedDescription)")
+        }
+    }
+
+    /// Repairs a process death at any point in the directory swap before books are listed.
+    func recoverInterruptedReplacements(booksDirectory: URL) {
+        let fileManager = FileManager.default
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: booksDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ) else { return }
+        for backup in children where backup.lastPathComponent.hasPrefix(httpSyncPayloadReplacementBackupPrefix) {
+            let marker = backup.appendingPathComponent(httpSyncPayloadReplacementTargetFilename)
+            guard let targetName = try? String(contentsOf: marker, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !targetName.isEmpty,
+                  !targetName.hasPrefix("."),
+                  (targetName as NSString).lastPathComponent == targetName else { continue }
+            let target = booksDirectory.appendingPathComponent(targetName, isDirectory: true)
+            do {
+                if fileManager.fileExists(atPath: target.path(percentEncoded: false)) {
+                    for sidecar in try replacementSidecars(root: backup) {
+                        let destination = target.appendingPathComponent(sidecar.lastPathComponent)
+                        // A sidecar created after relaunch is newer than the rollback copy.
+                        guard !fileManager.fileExists(atPath: destination.path(percentEncoded: false)) else {
+                            continue
+                        }
+                        try fileManager.moveItem(at: sidecar, to: destination)
+                    }
+                    try fileManager.removeItem(at: backup)
+                } else {
+                    try fileManager.moveItem(at: backup, to: target)
+                    try? fileManager.removeItem(
+                        at: target.appendingPathComponent(httpSyncPayloadReplacementTargetFilename)
+                    )
+                }
+            } catch {
+                // Leave the marked backup in place; the next startup retries recovery.
+                continue
+            }
+        }
+    }
+
+    private func replacementSidecars(root: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey]
+        ).filter { child in
+            let name = child.lastPathComponent
+            let isDirectory = (try? child.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            return (isDirectory && httpSyncPayloadExcludedDirs.contains(name)) ||
+                (!isDirectory && httpSyncReplacementPreservedFiles.contains(name))
+        }
+    }
+
     /// Outbound. Returns `true` if a zip+manifest was uploaded, `false` if the server already had
     /// a manifest (no-op fast path). Throws on network / IO failure.
     func uploadIfChanged(
@@ -96,9 +257,17 @@ nonisolated struct HttpSyncPayloadCodec {
         format: ContentType
     ) async throws -> Bool {
         let keys = HttpSyncPayloadKeys.forFormat(format, syncId: syncId)
-        if try await fetchManifest(transport: transport, keys: keys) != nil {
+        if let remoteManifest = try await fetchManifest(transport: transport, keys: keys) {
             // Server already has this book — refuse to re-upload regardless of local mtime drift.
-            return false
+            let contentSha = try await ensurePayloadContentSha(bookRoot: bookRoot)
+            let forceReplacement = hasPayloadContentDirty(bookRoot: bookRoot) &&
+                remoteManifest.contentSha256 != contentSha
+            if hasPayloadContentDirty(bookRoot: bookRoot), remoteManifest.contentSha256 == contentSha {
+                try? FileManager.default.removeItem(
+                    at: bookRoot.appendingPathComponent(".payload.content.local_dirty")
+                )
+            }
+            if !forceReplacement { return false }
         }
 
         let fileManager = FileManager.default
@@ -112,7 +281,10 @@ nonisolated struct HttpSyncPayloadCodec {
         }.value
         let attrs = try? fileManager.attributesOfItem(atPath: zipURL.path(percentEncoded: false))
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
-        Self.writeCachedSha(bookRoot: bookRoot, sha: sha)
+        let contentSha = try await Task.detached(priority: .utility) {
+            try Self.contentSha(bookRoot: bookRoot)
+        }.value
+        Self.writeCachedSha(bookRoot: bookRoot, sha: contentSha)
 
         // PUT zip first so the manifest never points at a missing or stale blob.
         _ = try await transport.putFile(key: keys.zip, contentType: "application/zip", fileURL: zipURL)
@@ -120,7 +292,8 @@ nonisolated struct HttpSyncPayloadCodec {
             sha256: sha,
             sizeBytes: size,
             originalName: originalName,
-            format: format
+            format: format,
+            contentSha256: contentSha
         )
         let body = try Self.jsonEncoder.encode(manifest)
         _ = try await transport.put(
@@ -128,6 +301,7 @@ nonisolated struct HttpSyncPayloadCodec {
             contentType: "application/json; charset=utf-8",
             body: body
         )
+        try? fileManager.removeItem(at: bookRoot.appendingPathComponent(".payload.content.local_dirty"))
         return true
     }
 
@@ -172,7 +346,22 @@ nonisolated struct HttpSyncPayloadCodec {
                 throw HttpSyncError("Failed to unpack payload zip for \(syncId): \(error.localizedDescription)")
             }
         }.value
-        return manifest
+        let contentSha = try await Task.detached(priority: .utility) {
+            try Self.contentSha(bookRoot: targetDir)
+        }.value
+        if let declared = manifest.contentSha256, declared != contentSha {
+            throw HttpSyncError(
+                "Payload content for \(syncId) failed sha256 check (expected \(declared), got \(contentSha))."
+            )
+        }
+        Self.writeCachedSha(bookRoot: targetDir, sha: contentSha)
+        return HttpSyncPayloadManifest(
+            sha256: manifest.sha256,
+            sizeBytes: manifest.sizeBytes,
+            originalName: manifest.originalName,
+            format: manifest.format,
+            contentSha256: contentSha
+        )
     }
 
     /// Fetches just the remote manifest (no payload). `nil` if the server has none. Throws on
@@ -187,6 +376,22 @@ nonisolated struct HttpSyncPayloadCodec {
         } catch {
             throw HttpSyncError("Manifest at \(keys.manifest): malformed JSON.")
         }
+    }
+
+    /// Publish a content hash only after it was computed from the verified remote ZIP.
+    func publishVerifiedContentSha(
+        transport: HttpSyncKvTransport,
+        keys: HttpSyncPayloadKeys,
+        manifest: HttpSyncPayloadManifest
+    ) async throws {
+        guard manifest.contentSha256 != nil else {
+            throw HttpSyncError("Cannot publish an unverified payload content hash.")
+        }
+        _ = try await transport.put(
+            key: keys.manifest,
+            contentType: "application/json; charset=utf-8",
+            body: try Self.jsonEncoder.encode(manifest)
+        )
     }
 
     // MARK: - Zip helpers
@@ -252,5 +457,49 @@ nonisolated struct HttpSyncPayloadCodec {
         }
         let digest = hasher.finalize()
         return "sha256:" + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Hashes sorted relative path + length + bytes; identical content hashes the same on iOS
+    /// and Android even though their ZIP encoders produce different binary archives.
+    static func contentSha(bookRoot: URL) throws -> String {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: bookRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: []
+        ) else { throw HttpSyncError("Could not enumerate book payload.") }
+        var files: [(String, URL)] = []
+        while let url = enumerator.nextObject() as? URL {
+            let relative = String(url.path(percentEncoded: false).dropFirst(
+                bookRoot.path(percentEncoded: false).count + 1
+            )).precomposedStringWithCanonicalMapping
+            let components = relative.split(separator: "/").map(String.init)
+            if components.dropLast().contains(where: { httpSyncPayloadExcludedDirs.contains($0) }) {
+                continue
+            }
+            if httpSyncPayloadExcludedFiles.contains(url.lastPathComponent) { continue }
+            if (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+                files.append((relative, url))
+            }
+        }
+        files.sort { $0.0 < $1.0 }
+        var hasher = SHA256()
+        for (path, url) in files {
+            let pathData = Data(path.utf8)
+            var pathLength = UInt32(pathData.count).bigEndian
+            withUnsafeBytes(of: &pathLength) { hasher.update(data: Data($0)) }
+            hasher.update(data: pathData)
+            let attributes = try fileManager.attributesOfItem(atPath: url.path(percentEncoded: false))
+            var size = UInt64((attributes[.size] as? NSNumber)?.uint64Value ?? 0).bigEndian
+            withUnsafeBytes(of: &size) { hasher.update(data: Data($0)) }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            while true {
+                let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
+                if chunk.isEmpty { break }
+                hasher.update(data: chunk)
+            }
+        }
+        return "sha256:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

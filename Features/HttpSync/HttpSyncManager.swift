@@ -52,7 +52,12 @@ final class HttpSyncManager {
     /// Serializes manual reconciles against each other (a second "Sync now" tap while one is in
     /// flight just no-ops). Fire-and-forget pushes are independent.
     private var reconcileTask: Task<Void, Never>?
+    private var reconcileTaskId: UUID?
     private var bookmarkSyncTask: Task<Void, Never>?
+    private var mapExchangeTask: Task<HttpSyncMapChanges?, Never>?
+    private var mapExchangeTaskId: UUID?
+    private var fullRetryDeferredForReader = false
+    private var fullRetryAfter: Date?
 
     init(settings: HttpSyncSettingsStore? = nil, aiSettings: AiSettingsSyncing? = nil) {
         self.settings = settings ?? HttpSyncSettingsStore.shared
@@ -66,30 +71,45 @@ final class HttpSyncManager {
     /// Runs one full reconcile pass. Safe to call repeatedly; a concurrent call awaits the
     /// in-flight one. Never throws.
     func syncNow() async {
-        if let reconcileTask {
-            await reconcileTask.value
-            return
+        if let mapExchangeTask {
+            _ = await mapExchangeTask.value
         }
+        await beginReconcile(preflight: nil).value
+    }
+
+    @discardableResult
+    private func beginReconcile(preflight: HttpSyncMapChanges?) -> Task<Void, Never> {
+        if let reconcileTask { return reconcileTask }
         // `@MainActor in` is load-bearing: without it this Task runs on the cooperative pool, so the
         // whole reconcile (which the author intends to be MainActor-isolated for race-free file IO)
         // executes off the main actor. Every @MainActor closure it then hands to a stdlib generic
         // trips a dynamic executor check and traps the app (EXC_BREAKPOINT). Pinning the task to the
         // main actor keeps the reconcile on main, matching its design and removing that crash class.
-        let task = Task { @MainActor in await runReconcile() }
+        let taskId = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runReconcile(preflight: preflight)
+        }
+        reconcileTaskId = taskId
         reconcileTask = task
-        await task.value
-        reconcileTask = nil
-        if batchState.hasPending { scheduleBookmarkSync() }
+        Task { @MainActor [weak self] in
+            await task.value
+            guard let self, self.reconcileTaskId == taskId else { return }
+            self.reconcileTask = nil
+            self.reconcileTaskId = nil
+            if self.batchState.hasPending { self.scheduleBookmarkSync() }
+        }
+        return task
     }
 
-    private func runReconcile() async {
+    private func runReconcile(preflight: HttpSyncMapChanges?) async {
         guard settings.isConfigured else {
             lastError = "HTTP sync is not configured. Add a base URL and token first."
             log.error("syncNow aborted: not configured")
             return
         }
         let config = settings.currentConfig()
-        let cursor = settings.lastSyncedAt
+        var cursor = settings.lastSyncedAt
 
         log.info("syncNow starting (cursor=\(cursor ?? "nil", privacy: .public))")
         isSyncing = true
@@ -110,22 +130,34 @@ final class HttpSyncManager {
         //
         // The reconciler streams phased progress through `onProgress`; we hop back onto the main
         // actor to update the @Observable `progress` so the settings screen's bar/label tracks it.
-        let transport = HttpSyncBatchKvTransport(
-            config: config,
-            request: batchState.exchangeRequest(),
-            cache: batchState.cacheSnapshot()
+        let transport = HttpSyncWriteTrackingTransport(
+            base: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         )
-        do {
-            try await transport.prepare()
-            if let exchange = await transport.exchangeResponse() {
-                batchState.applyExchange(exchange)
-                await transport.setPendingKeys(batchState.pendingKeys)
+        let mapChanges: HttpSyncMapChanges
+        if let preflight {
+            mapChanges = preflight
+        } else {
+            do {
+                mapChanges = try await batchState.syncMaps(transport: transport)
+            } catch {
+                let message = error.localizedDescription
+                lastErrors = [message]
+                lastError = message
+                noteFullReconcileOutcome(errors: [message])
+                log.error("map preflight failed: \(message, privacy: .public)")
+                return
             }
-        } catch {
-            let message = error.localizedDescription
-            lastErrors = [message]
-            lastError = message
-            log.error("batch exchange failed: \(message, privacy: .public)")
+        }
+        if mapChanges.needsBootstrap || mapChanges.booksChanged { cursor = nil }
+        if !mapChanges.needsBootstrap && !mapChanges.booksChanged && !mapChanges.otherChanged {
+            var result = HttpSyncResult()
+            result.uploadedBookmarks = mapChanges.uploadedBookmarks
+            result.downloadedBookmarks = mapChanges.downloadedBookmarks
+            lastErrors = []
+            lastStatus = result.summary()
+            notePushOutcome(success: true)
+            noteFullReconcileOutcome(errors: [])
+            log.info("syncNow done from maps: \(result.summary(), privacy: .public)")
             return
         }
         // Sync the small model/prompt blob FIRST and independently. A corrupt book, a huge payload,
@@ -149,17 +181,30 @@ final class HttpSyncManager {
         }
         result.uploadedAppSettings = appSettingsOutcome.uploaded
         result.downloadedAppSettings = appSettingsOutcome.downloaded
+        result.uploadedBookmarks += mapChanges.uploadedBookmarks
+        result.downloadedBookmarks += mapChanges.downloadedBookmarks
         if let error = appSettingsOutcome.error { result.errors.append(error) }
-        batchState.saveCache(await transport.cacheSnapshot())
-        batchState.resolveLegacyWrites(
-            await transport.legacyMutationsToResolve(fullSuccess: result.errors.isEmpty)
-        )
+        if result.errors.isEmpty {
+            do {
+                let after = try await batchState.observeLegacyEtags(transport: transport)
+                if let expected = transport.expectedLegacyEtags(
+                    after: mapChanges.observedLegacyEtags
+                ), after == expected {
+                    _ = try await batchState.publishMaps(
+                        transport: transport,
+                        acknowledgedLegacyEtags: expected
+                    )
+                }
+            }
+            catch { result.errors.append(error.localizedDescription) }
+        }
 
         if let newCursor = result.newLastSyncedAt {
             settings.lastSyncedAt = newCursor
         }
         lastErrors = result.errors
         lastStatus = result.summary()
+        noteFullReconcileOutcome(errors: result.errors)
         if result.errors.isEmpty {
             // A successful reconcile proves the server is reachable — reopen the breaker.
             notePushOutcome(success: true)
@@ -169,6 +214,19 @@ final class HttpSyncManager {
             log.error("syncNow finished with \(result.errors.count) error(s): \(result.summary(), privacy: .public)")
             for err in result.errors { log.error("syncNow error: \(err, privacy: .public)") }
         }
+    }
+
+    private func noteFullReconcileOutcome(errors: [String]) {
+        guard !errors.isEmpty else {
+            fullRetryDeferredForReader = false
+            fullRetryAfter = nil
+            return
+        }
+        let deferredDeletion = errors.contains {
+            $0.localizedCaseInsensitiveContains("deletion deferred while this book is open")
+        } && HttpSyncActiveBooks.hasAny
+        fullRetryDeferredForReader = deferredDeletion
+        fullRetryAfter = deferredDeletion ? nil : Date().addingTimeInterval(60)
     }
 
     // MARK: - Fire-and-forget circuit breaker
@@ -226,50 +284,90 @@ final class HttpSyncManager {
     /// this device gets a chance to keep reading from an old position.
     func syncInBackground() {
         guard settings.enabled, settings.isConfigured else { return }
-        Task { await exchangeMapsOnly() }
+        scheduleBookmarkSync()
     }
 
-    /// Reader-close fast path: do not leave the final page waiting on the timer.
-    func flushBookmarkSync() {
-        bookmarkSyncTask?.cancel()
-        bookmarkSyncTask = nil
-        guard settings.enabled, settings.isConfigured, batchState.hasPending else { return }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.exchangeMapsOnly()
-            if self.batchState.hasPending { self.scheduleBookmarkSync() }
+    /// Reader-open gate: finish the cheap bookmark-map pull before either reader loads its
+    /// sidecar, so an upgraded/still-running client cannot re-save a stale in-memory position.
+    func syncBookmarksBeforeReading(book: BookMetadata) async {
+        guard settings.enabled, settings.isConfigured else { return }
+        let changes = await exchangeMapsOnly()
+        guard changes?.needsBootstrap == true else { return }
+        do {
+            _ = try await batchState.syncLegacyBookmark(book: book, config: settings.currentConfig())
+        } catch {
+            log.error("legacy bookmark bootstrap failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
+    /// Reader-close fast path: do not leave the final page waiting on the timer.
+    func flushBookmarkSync() async {
+        guard settings.enabled, settings.isConfigured, batchState.hasPending else { return }
+        let before = batchState.pendingGeneration
+        let joinedExistingFlight = mapExchangeTask != nil
+        _ = await exchangeMapsOnly()
+        let after = batchState.pendingGeneration
+        // A joined flight may have captured its outbox before the final page turn. One more
+        // exchange delivers that exact generation while the active-book lease is still held.
+        if after != nil, joinedExistingFlight || after != before {
+            _ = await exchangeMapsOnly()
+        }
+    }
+
+    /// One cheap list every five seconds while configured; local turns share one shard PUT.
     private func scheduleBookmarkSync() {
         guard settings.enabled, settings.isConfigured, bookmarkSyncTask == nil else { return }
         bookmarkSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            repeat {
+            while !Task.isCancelled {
+                _ = await self.exchangeMapsOnly()
                 try? await Task.sleep(for: .seconds(5))
-                if Task.isCancelled { break }
-                await self.exchangeMapsOnly()
-            } while self.batchState.hasPending
+            }
             self.bookmarkSyncTask = nil
         }
     }
 
     /// The reader-hot path: upload every queued bookmark and conditionally read
-    /// the two maps in one request. Only a changed books map launches the larger
-    /// binary/metadata reconcile, and that work remains in the background.
-    private func exchangeMapsOnly() async {
-        guard settings.enabled, settings.isConfigured else { return }
+    /// the logical maps in one metadata request. A changed book or non-map ETag launches the
+    /// larger binary/metadata reconcile, and that work remains in the background.
+    private func exchangeMapsOnly() async -> HttpSyncMapChanges? {
+        if let mapExchangeTask {
+            return await mapExchangeTask.value
+        }
+        let taskId = UUID()
+        let task: Task<HttpSyncMapChanges?, Never> = Task { @MainActor [weak self] in
+            guard let self else { return nil }
+            return await self.performMapExchange()
+        }
+        mapExchangeTaskId = taskId
+        mapExchangeTask = task
+        let result = await task.value
+        if mapExchangeTaskId == taskId {
+            mapExchangeTask = nil
+            mapExchangeTaskId = nil
+        }
+        return result
+    }
+
+    private func performMapExchange() async -> HttpSyncMapChanges? {
+        guard settings.enabled, settings.isConfigured else { return nil }
         do {
-            let changes = try await batchState.exchange(config: settings.currentConfig())
+            let changes = try await batchState.syncMaps(config: settings.currentConfig())
             notePushOutcome(success: true)
-            if changes.booksChanged { await syncNow() }
-        } catch is HttpSyncExchangeUnavailable {
-            // The full transport falls back to v1 and resolves only the exact
-            // outbox mutations captured before this rolling-deploy attempt.
-            await syncNow()
+            if changes.needsBootstrap || changes.booksChanged || changes.otherChanged {
+                if fullRetryDeferredForReader, HttpSyncActiveBooks.hasAny { return changes }
+                if fullRetryDeferredForReader { fullRetryDeferredForReader = false }
+                if let fullRetryAfter, Date() < fullRetryAfter { return changes }
+                beginReconcile(preflight: changes)
+            } else {
+                fullRetryDeferredForReader = false
+                fullRetryAfter = nil
+            }
+            return changes
         } catch {
             notePushOutcome(success: false)
             log.error("map exchange failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
     }
 
@@ -301,6 +399,18 @@ final class HttpSyncManager {
     func onBookImported(book: BookMetadata) {
         guard let bookSyncId = syncId(for: book) else { return }
         let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.metadata(bookSyncId))
+        if let folder = book.folder, let books = try? BookStorage.getBooksDirectory() {
+            let root = books.appendingPathComponent(folder)
+            Task {
+                let codec = HttpSyncPayloadCodec()
+                if (try? await codec.ensurePayloadContentSha(bookRoot: root)) != nil {
+                    codec.markPayloadContentDirty(bookRoot: root)
+                }
+                self.syncInBackground()
+            }
+        } else {
+            syncInBackground()
+        }
         guard autoPushReady else { return }
         let config = settings.currentConfig()
         let upload = MetadataUpload(
@@ -318,6 +428,7 @@ final class HttpSyncManager {
     /// tombstone immediately (the staged record stays as the retry path for manual sync).
     func onBookDeleted(syncId bookSyncId: String, title: String, contentType: ContentType, deletedAt: String) {
         let localRev = HttpSyncRevisionStore.bumpForLocalEdit(SyncKeys.metadata(bookSyncId))
+        syncInBackground()
         guard autoPushReady else { return }
         let config = settings.currentConfig()
         let upload = MetadataUpload(
@@ -383,8 +494,8 @@ final class HttpSyncManager {
         let encoder = JSONEncoder()
         do {
             guard let local = BookStorage.loadBookmark(root: root) else { return true }
-            // Overwrite protection: fetch the remote bookmark; if it out-revisions the local
-            // edit (deeper edit chain; timestamps only break rev ties), pull it locally and
+            // Overwrite protection: fetch the remote bookmark; if its reading event is newer,
+            // pull it locally and
             // skip the push. Mirrors Android HttpSyncPusher.pushBookmark.
             if let remote = try await transport.get(key: key),
                let remoteBlob = try? decoder.decode(HttpSyncBookmarkBlob.self, from: remote.body) {
@@ -438,7 +549,7 @@ final class HttpSyncManager {
                                          localStamp: upload.shelfUpdatedAt ?? upload.deletedAt,
                                          remoteStamp: remoteBlob.shelfUpdatedAt ?? remoteBlob.deletedAt) {
                 case .remoteWins:
-                    // Deeper remote edit chain: do not clobber. The next manual sync applies it.
+                    // Newer remote edit: do not clobber. The next manual sync applies it.
                     HttpSyncRevisionStore.noteRemote(key, rev: remoteBlob.rev, appliedLocally: false)
                     return true
                 case .localWins, .tie:

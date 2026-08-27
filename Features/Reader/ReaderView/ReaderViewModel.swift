@@ -42,6 +42,8 @@ private struct Position {
 class ReaderLoaderViewModel {
     var document: EPUBDocument?
     let book: BookMetadata
+    private(set) var reservedSyncId: String?
+    private var didAttemptLoad = false
     
     var rootURL: URL? {
         guard let booksFolder = try? BookStorage.getBooksDirectory(),
@@ -53,10 +55,16 @@ class ReaderLoaderViewModel {
     
     init(book: BookMetadata) {
         self.book = book
-        loadBook()
     }
     
-    func loadBook() {
+    func loadBook() async {
+        guard !didAttemptLoad else { return }
+        didAttemptLoad = true
+        reservedSyncId = syncId(for: book)
+        HttpSyncActiveBooks.open(reservedSyncId)
+        // Keep the loading view non-interactive until map/legacy bookmark migration has applied.
+        // ReaderViewModel must never capture a stale sidecar and then timestamp it as a new turn.
+        await HttpSyncManager.shared.syncBookmarksBeforeReading(book: book)
         guard let root = rootURL else {
             return
         }
@@ -280,6 +288,8 @@ class ReaderViewModel {
     }
     
     func syncAfterForeground() async {
+        await HttpSyncManager.shared.syncBookmarksBeforeReading(book: book)
+        reloadAfterHttpBookmark()
         guard autoSyncEnabled, !isSyncing else { return }
         isSyncing = true
         defer { isSyncing = false }
@@ -303,7 +313,7 @@ class ReaderViewModel {
     func flushAutoSync() async {
         debounceTask?.cancel()
         debounceTask = nil
-        HttpSyncManager.shared.flushBookmarkSync()
+        await HttpSyncManager.shared.flushBookmarkSync()
         await runAutoExport(direction: .exportToTtu)
     }
     
@@ -598,6 +608,14 @@ class ReaderViewModel {
         if syncAudioBook {
             sasayakiPlayer.reloadPlayback()
         }
+    }
+
+    func reloadAfterHttpBookmark() {
+        guard let bookmark = BookStorage.loadBookmark(root: rootURL) else { return }
+        index = bookmark.chapterIndex
+        currentProgress = bookmark.progress
+        loadCurrentChapter()
+        resetTrackingBaseline()
     }
     
     private func scheduleAutoExport() {

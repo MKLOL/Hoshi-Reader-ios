@@ -240,26 +240,21 @@ nonisolated enum SyncComparison {
     case tie
 }
 
-/// Compares two revisioned blob states: edit-depth (`rev`, a per-key Lamport counter) first,
-/// RFC 3339 timestamps as the tiebreaker. `nil` revs (legacy blobs) count as 0, which preserves
-/// the old pure-timestamp LWW ordering until both sides have written a revisioned blob.
-///
-/// This is the rule that stops a stale device from clobbering: a device that last synced a month
-/// ago carries low revs for every key it did NOT touch (so it can never overwrite fresher remote
-/// state), while the one key it deliberately edited gets `max(localRev, lastSeenRemoteRev) + 1`
-/// and wins exactly that key.
+/// Compares by the user's event timestamp first; revision is only a deterministic tie-breaker.
+/// This protects upgraded clients whose existing bookmark has no revision sidecar: an older
+/// high-revision server value must never move a later local reading position backward.
 nonisolated func compareRevisioned(
     localRev: Int?,
     remoteRev: Int?,
     localStamp: String?,
     remoteStamp: String?
 ) -> SyncComparison {
-    let lr = localRev ?? 0
-    let rr = remoteRev ?? 0
-    if lr != rr { return lr > rr ? .localWins : .remoteWins }
     let cmp = compareRfc3339(localStamp, remoteStamp)
     if cmp > 0 { return .localWins }
     if cmp < 0 { return .remoteWins }
+    let lr = localRev ?? 0
+    let rr = remoteRev ?? 0
+    if lr != rr { return lr > rr ? .localWins : .remoteWins }
     return .tie
 }
 

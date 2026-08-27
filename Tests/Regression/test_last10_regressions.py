@@ -57,7 +57,7 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertNotIn("let syncId = deriveSyncId(title)", method_body(reconciler, "private func loadLocalBooks()"))
         self.assertIn("let bookSyncId = syncId(for: book)", bookshelf)
         self.assertIn("let bookSyncId = syncId(for: book)", manager)
-        self.assertIn("pushBookmark(config: config, syncId: bookSyncId", manager)
+        self.assertIn("batchState.queueBookmark(book: book)", manager)
         self.assertNotIn("pushBookmark(config: config, title:", manager)
 
     def test_offline_translation_fails_closed_without_downloaded_model(self):
@@ -149,12 +149,14 @@ class LastTenRegressionTests(unittest.TestCase):
     def test_epub_translation_buttons_have_scroll_reader_css(self):
         paginated = read("Features/Reader/ReaderWebView/ReaderWebView.swift")
         continuous = read("Features/Reader/ScrollReaderWebView/ScrollReaderWebView.swift")
+        shared_css = read("Features/Reader/ReaderWebView/SentenceButtonCss.swift")
 
         for selector in (".hoshi-tl {", ".hoshi-tl::before {", ".hoshi-tl::after {"):
-            self.assertIn(selector, paginated)
-            self.assertIn(selector, continuous)
-        self.assertIn("left: -0.7em;", continuous)
-        self.assertIn("bottom: -0.7em;", continuous)
+            self.assertIn(selector, shared_css)
+        self.assertIn("\\(sentenceButtonCss)", paginated)
+        self.assertIn("\\(sentenceButtonCss)", continuous)
+        self.assertIn("left: -0.7em;", shared_css)
+        self.assertIn("bottom: -0.7em;", shared_css)
 
     def test_translation_sync_uses_etag_ledger_not_equal_byte_size(self):
         reconciler = read("Features/HttpSync/HttpSyncReconciler.swift")
@@ -279,7 +281,10 @@ class LastTenRegressionTests(unittest.TestCase):
 
     def test_translation_settings_sync_before_books_and_ignores_book_breaker(self):
         manager = read("Features/HttpSync/HttpSyncManager.swift")
-        reconcile = method_body(manager, "private func runReconcile() async")
+        reconcile = method_body(
+            manager,
+            "private func runReconcile(preflight: HttpSyncMapChanges?) async",
+        )
         settings_push = method_body(manager, "func onAiSettingsChanged()")
 
         self.assertLess(

@@ -93,9 +93,6 @@ struct HttpSyncError: LocalizedError {
     init(_ message: String, skip: Bool = false) { self.message = message; self.skip = skip }
 }
 
-/// The old backend is healthy but does not have the map exchange route yet.
-nonisolated struct HttpSyncExchangeUnavailable: Error, Sendable {}
-
 // MARK: - Transport protocol
 
 /// The blob-store operations the sync code needs. A protocol so tests can fake the network with
@@ -138,6 +135,81 @@ nonisolated extension HttpSyncKvTransport {
             cursor = page.nextCursor
             if page.truncated != true { break }
         } while cursor != nil
+    }
+}
+
+/// Records the exact ETags produced by one full reconcile. Comparing the post-reconcile list to
+/// this expected fingerprint distinguishes our own writes from a concurrent device write, so map
+/// publication is safe without forcing an otherwise identical second full scan.
+nonisolated final class HttpSyncWriteTrackingTransport: HttpSyncKvTransport, @unchecked Sendable {
+    private enum Mutation {
+        case put(key: String, etag: String?)
+        case delete(key: String)
+    }
+
+    private let base: HttpSyncKvTransport
+    private let lock = NSLock()
+    private var mutations: [Mutation] = []
+
+    init(base: HttpSyncKvTransport) {
+        self.base = base
+    }
+
+    func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
+        let response = try await base.put(key: key, contentType: contentType, body: body)
+        record(.put(key: key, etag: response.etag))
+        return response
+    }
+
+    func putFile(key: String, contentType: String, fileURL: URL) async throws -> HttpSyncKvWriteResponse {
+        let response = try await base.putFile(key: key, contentType: contentType, fileURL: fileURL)
+        record(.put(key: key, etag: response.etag))
+        return response
+    }
+
+    func get(key: String) async throws -> HttpSyncKvFetched? {
+        try await base.get(key: key)
+    }
+
+    func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? {
+        try await base.downloadToFile(key: key, targetURL: targetURL)
+    }
+
+    func list(
+        prefix: String?,
+        since: String?,
+        cursor: String?,
+        limit: Int?
+    ) async throws -> HttpSyncKvList {
+        try await base.list(prefix: prefix, since: since, cursor: cursor, limit: limit)
+    }
+
+    func delete(key: String) async throws {
+        try await base.delete(key: key)
+        record(.delete(key: key))
+    }
+
+    /// Nil means a successful PUT omitted its ETag, so an exact safety comparison is impossible.
+    func expectedLegacyEtags(after baseline: [String: String]) -> [String: String]? {
+        lock.withLock {
+            var expected = baseline
+            for mutation in mutations {
+                switch mutation {
+                case let .put(key, etag):
+                    guard !key.hasPrefix(httpSyncMapPrefix) else { continue }
+                    guard let etag, !etag.isEmpty else { return nil }
+                    expected[key] = etag
+                case let .delete(key):
+                    guard !key.hasPrefix(httpSyncMapPrefix) else { continue }
+                    expected.removeValue(forKey: key)
+                }
+            }
+            return expected
+        }
+    }
+
+    private func record(_ mutation: Mutation) {
+        lock.withLock { mutations.append(mutation) }
     }
 }
 
@@ -193,28 +265,6 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     // MARK: PUT
-
-    /// One-call key-index refresh plus conditional batched bookmark upload.
-    func exchange(_ exchange: HttpSyncExchangeRequest) async throws -> HttpSyncExchangeResponse {
-        let body = try Self.jsonEncoder.encode(exchange)
-        var request = makeRequest(
-            "POST",
-            path: "/v2/exchange",
-            contentType: "application/json; charset=utf-8"
-        )
-        request.httpBody = body
-        let (data, response) = try await perform(request, uploadBody: body)
-        if let http = response as? HTTPURLResponse,
-           http.statusCode == 404 || http.statusCode == 405 {
-            throw HttpSyncExchangeUnavailable()
-        }
-        try ensureSuccess(response: response, data: data)
-        do {
-            return try Self.jsonDecoder.decode(HttpSyncExchangeResponse.self, from: data)
-        } catch {
-            throw HttpSyncError("Sync server returned malformed JSON for the batch exchange.")
-        }
-    }
 
     func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
         var request = makeRequest("PUT", path: "/v1/kv/\(encodeKey(key))", contentType: contentType)

@@ -414,6 +414,7 @@ class BookshelfViewModel {
         )
         
         try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
+        HttpSyncManager.shared.onPageTurnPersisted(book: book)
         loadBookProgress()
     }
     

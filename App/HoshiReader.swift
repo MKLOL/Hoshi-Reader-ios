@@ -24,6 +24,9 @@ struct HoshiReaderApp: App {
     init() {
         TokenStorage.clearOldKeys()
         BookStorage.migrateFromDocuments()
+        if let books = try? BookStorage.getBooksDirectory() {
+            HttpSyncPayloadCodec().recoverInterruptedReplacements(booksDirectory: books)
+        }
         WebViewPreloader.shared.warmup()
         _ = DictionaryManager.shared
         configureTabBarAppearance()

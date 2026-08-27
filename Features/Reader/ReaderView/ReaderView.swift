@@ -30,32 +30,50 @@ struct ReaderLoader: View {
     private let isMokuro: Bool
 
     init(book: BookMetadata) {
-        _viewModel = State(initialValue: ReaderLoaderViewModel(book: book))
         // Detect the on-disk content type (mokuro.json sidecar) as the source of truth, falling
         // back to the stored metadata hint for books whose directory can't be resolved yet.
+        let detectedIsMokuro: Bool
         if let booksFolder = try? BookStorage.getBooksDirectory(), let folder = book.folder {
-            self.isMokuro = ContentType.detect(bookDir: booksFolder.appendingPathComponent(folder)) == .mokuro
+            detectedIsMokuro = ContentType.detect(
+                bookDir: booksFolder.appendingPathComponent(folder)
+            ) == .mokuro
         } else {
-            self.isMokuro = book.resolvedContentType == .mokuro
+            detectedIsMokuro = book.resolvedContentType == .mokuro
         }
+        self.isMokuro = detectedIsMokuro
+        _viewModel = State(initialValue: ReaderLoaderViewModel(book: book))
     }
 
     var body: some View {
-        if isMokuro {
-            MangaReaderView(metadata: viewModel.book)
-        } else if let doc = viewModel.document, let root = viewModel.rootURL {
-            ReaderView(
-                book: viewModel.book,
-                document: doc,
-                rootURL: root,
-                enableStatistics: userConfig.enableStatistics,
-                autostartStatistics: userConfig.statisticsAutostartMode == .on,
-                autoSyncEnabled: userConfig.enableSync && userConfig.enableAutoSync,
-                syncStats: userConfig.enableSync && userConfig.statisticsEnableSync,
-                statsSyncMode: userConfig.statisticsSyncMode,
-                syncAudioBook: userConfig.enableSasayaki && userConfig.sasayakiEnableSync,
-                showSentenceTranslations: userConfig.readerShowSentenceTranslations
-            )
+        Group {
+            if isMokuro {
+                MangaReaderView(metadata: viewModel.book)
+            } else if let doc = viewModel.document, let root = viewModel.rootURL {
+                ReaderView(
+                    book: viewModel.book,
+                    document: doc,
+                    rootURL: root,
+                    enableStatistics: userConfig.enableStatistics,
+                    autostartStatistics: userConfig.statisticsAutostartMode == .on,
+                    autoSyncEnabled: userConfig.enableSync && userConfig.enableAutoSync,
+                    syncStats: userConfig.enableSync && userConfig.statisticsEnableSync,
+                    statsSyncMode: userConfig.statisticsSyncMode,
+                    syncAudioBook: userConfig.enableSasayaki && userConfig.sasayakiEnableSync,
+                    showSentenceTranslations: userConfig.readerShowSentenceTranslations
+                )
+            } else {
+                ProgressView()
+            }
+        }
+        .task {
+            if !isMokuro { await viewModel.loadBook() }
+        }
+        .onDisappear {
+            // A parse failure never creates ReaderView, so release its reservation here. A
+            // successful EPUB is released by ReaderView after its final bookmark flush.
+            if !isMokuro, viewModel.document == nil {
+                HttpSyncActiveBooks.close(viewModel.reservedSyncId)
+            }
         }
     }
 }
@@ -681,12 +699,18 @@ struct ReaderView: View {
             }
             viewModel.isPaused = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
+            guard note.userInfo?["syncId"] as? String == syncId(for: viewModel.book) else { return }
+            viewModel.reloadAfterHttpBookmark()
+        }
         .onDisappear {
             // Cancel any in-flight request when leaving the reader, as the manga reader does.
             aiController.dismiss()
             viewModel.sasayakiPlayer.teardown()
             Task {
                 await viewModel.flushAutoSync()
+                HttpSyncActiveBooks.close(syncId(for: viewModel.book))
+                HttpSyncManager.shared.syncInBackground()
             }
         }
         .ignoresSafeArea(edges: .top)

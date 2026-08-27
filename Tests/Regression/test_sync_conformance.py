@@ -8,8 +8,8 @@
 # the two suites breaks.
 #
 # Spec (SyncCore.swift `compareRevisioned` / HttpSyncBlobs.kt):
-#   - rev (edit depth, Lamport counter) first; nil == 0
-#   - RFC 3339 timestamps break rev ties
+#   - RFC 3339 event timestamp first
+#   - rev (edit depth, Lamport counter) breaks timestamp ties; nil == 0
 #   - equal rev + equal stamp -> tie
 
 import re
@@ -31,15 +31,15 @@ def compare_rfc3339(a, b):
 
 
 def compare_revisioned(local_rev, remote_rev, local_stamp, remote_stamp):
-    lr = local_rev or 0
-    rr = remote_rev or 0
-    if lr != rr:
-        return "local" if lr > rr else "remote"
     cmp = compare_rfc3339(local_stamp, remote_stamp)
     if cmp > 0:
         return "local"
     if cmp < 0:
         return "remote"
+    lr = local_rev or 0
+    rr = remote_rev or 0
+    if lr != rr:
+        return "local" if lr > rr else "remote"
     return "tie"
 
 
@@ -63,13 +63,13 @@ COMPARE_VECTORS = [
     ((0, 0, NEW, OLD), "local"),
     ((0, None, NEW, OLD), "local"),
     ((None, 0, OLD, NEW), "remote"),
-    ((2, 1, OLD, NEW), "local"),         # deeper local chain beats newer remote stamp
-    ((1, 2, NEW, OLD), "remote"),        # deeper remote chain beats newer local stamp
+    ((2, 1, OLD, NEW), "remote"),        # newer remote event beats deeper local rev
+    ((1, 2, NEW, OLD), "local"),         # newer local event beats deeper remote rev
     ((3, 3, NEW, OLD), "local"),         # rev tie -> stamps
     ((3, 3, OLD, NEW), "remote"),
     ((3, 3, NEW, NEW), "tie"),
-    ((None, 3, NEW, OLD), "remote"),     # nil == 0 loses to any real depth
-    ((3, None, OLD, NEW), "local"),
+    ((None, 3, NEW, OLD), "local"),
+    ((3, None, OLD, NEW), "remote"),
 ]
 
 # (remoteShelfUpdatedAt, localShelvesUpdatedAt) -> apply remote?
@@ -93,12 +93,13 @@ class SyncConformanceTests(unittest.TestCase):
 
     def test_swift_implementation_matches_spec(self):
         core = read("Features/HttpSync/SyncCore.swift")
-        # rev-first, nil==0
+        # timestamp-first, revision tie-breaker
+        self.assertIn("let cmp = compareRfc3339(localStamp, remoteStamp)", core)
         self.assertIn("let lr = localRev ?? 0", core)
         self.assertIn("let rr = remoteRev ?? 0", core)
         self.assertIn("if lr != rr { return lr > rr ? .localWins : .remoteWins }", core)
-        # stamps break ties
-        self.assertIn("let cmp = compareRfc3339(localStamp, remoteStamp)", core)
+        self.assertLess(core.index("let cmp = compareRfc3339(localStamp, remoteStamp)"),
+                        core.index("let lr = localRev ?? 0"))
         # shelf LWW: ties go to remote
         self.assertIn("compareRfc3339(remoteShelfUpdatedAt, localShelvesUpdatedAt) >= 0", core)
 
@@ -121,8 +122,10 @@ class SyncConformanceTests(unittest.TestCase):
             manager.index("func onPageTurnPersisted(book: BookMetadata)"):
             manager.index("/// Call after the user moves", manager.index("func onPageTurnPersisted(book: BookMetadata)"))
         ]
-        self.assertLess(body.index("bumpForLocalEdit"), body.index("autoPushReady"))
-        self.assertNotIn("settings.enabled, settings.isConfigured", body)
+        self.assertIn("batchState.queueBookmark(book: book)", body)
+        batch = read("Features/HttpSync/HttpSyncBatchExchange.swift")
+        queue = batch[batch.index("func queueBookmark(book:"):batch.index("var hasPending")]
+        self.assertIn("bumpForLocalEdit", queue)
 
     def test_epub_sync_push_flushes_on_reader_exit(self):
         view_model = read("Features/Reader/ReaderView/ReaderViewModel.swift")
@@ -130,8 +133,7 @@ class SyncConformanceTests(unittest.TestCase):
             view_model.index("func flushAutoSync() async"):
             view_model.index("func updateProgress", view_model.index("func flushAutoSync() async"))
         ]
-        self.assertIn("flushSyncPush()", flush_body)
-        self.assertIn("private var pendingSyncPush = false", view_model)
+        self.assertIn("HttpSyncManager.shared.flushBookmarkSync()", flush_body)
 
 
 if __name__ == "__main__":

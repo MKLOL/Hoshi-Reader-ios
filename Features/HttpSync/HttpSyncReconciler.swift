@@ -418,6 +418,9 @@ struct HttpSyncReconciler {
                         // tombstone unhandled so the cursor doesn't advance past it until the
                         // outbound push re-publishes metadata with deletedAt = nil.
                         markUnhandled(meta)
+                    } else if HttpSyncActiveBooks.contains(parsed.syncId) {
+                        result.errors.append("metadata \(parsed.syncId): deletion deferred while this book is open")
+                        markUnhandled(meta)
                     } else {
                         if let root = rootsBySyncId[parsed.syncId] { deleteBook(root: root, bookId: localBookId(localBooks, parsed.syncId)) }
                         rootsBySyncId.removeValue(forKey: parsed.syncId)
@@ -485,7 +488,6 @@ struct HttpSyncReconciler {
                 total: allManifests.count
             ))
             if deletedSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
-            if rootsBySyncId[parsed.syncId] != nil { markHandled(meta); continue }
             if pendingTombstoneSyncIds.contains(parsed.syncId) { markHandled(meta); continue }
             if let declared = remoteFormatBySyncId[parsed.syncId], declared != format {
                 result.errors.append(
@@ -493,6 +495,22 @@ struct HttpSyncReconciler {
                     + "but only \(format.rawValue) manifest was selected."
                 )
                 markUnhandled(meta)
+                continue
+            }
+            if let existingRoot = rootsBySyncId[parsed.syncId] {
+                do {
+                    if try await refreshExistingBookPayload(
+                        syncId: parsed.syncId,
+                        format: format,
+                        root: existingRoot
+                    ) {
+                        result.downloadedPayloads += 1
+                    }
+                    markHandled(meta)
+                } catch {
+                    result.errors.append("payload \(parsed.syncId): \(errorText(error))")
+                    markUnhandled(meta)
+                }
                 continue
             }
             do {
@@ -691,6 +709,13 @@ struct HttpSyncReconciler {
         )
         try BookStorage.save(bookmark, inside: root, as: FileNames.bookmark)
         HttpSyncRevisionStore.noteRemote(meta.key, rev: blob.rev, appliedLocally: true)
+        if let parsed = parseBookKey(meta.key), case .bookmark = parsed.kind {
+            NotificationCenter.default.post(
+                name: .httpSyncBookmarkApplied,
+                object: nil,
+                userInfo: ["syncId": parsed.syncId]
+            )
+        }
         return true
     }
 
@@ -978,6 +1003,79 @@ struct HttpSyncReconciler {
         }
     }
 
+    /// Replaces an existing book only when its one-time local content hash differs from a
+    /// current-format remote manifest. Pre-map books compute that baseline once on upgrade.
+    private func refreshExistingBookPayload(syncId: String, format: ContentType, root: URL) async throws -> Bool {
+        // Reader persistence does not share the reconciler's directory-swap lock. Defer until
+        // onDisappear closes the registry and immediately schedules another cheap preflight.
+        if HttpSyncActiveBooks.contains(syncId) { return false }
+        let keys = HttpSyncPayloadKeys.forFormat(format, syncId: syncId)
+        guard let remote = try await payloadCodec.fetchManifest(transport: transport, keys: keys) else {
+            return false
+        }
+        if payloadCodec.hasPayloadContentDirty(bookRoot: root) { return false }
+        let localSha: String
+        if let cached = payloadCodec.cachedPayloadSha(bookRoot: root) {
+            localSha = cached
+        } else {
+            localSha = try await payloadCodec.ensurePayloadContentSha(bookRoot: root)
+        }
+        if let remoteContentSha = remote.contentSha256, localSha == remoteContentSha { return false }
+        guard let booksDir = try? BookStorage.getBooksDirectory() else { return false }
+        let staging = uniqueDirectory(
+            base: booksDir.appendingPathComponent(".hoshi-sync-update-\(UUID().uuidString)", isDirectory: true)
+        )
+        do {
+            let manifest = try await payloadCodec.downloadAndUnpack(
+                transport: transport,
+                syncId: syncId,
+                keys: keys,
+                expectedFormat: format,
+                targetDir: staging
+            )
+            let detected = ContentType.detect(bookDir: staging)
+            guard detected == manifest.format else {
+                throw HttpSyncError(
+                    "Payload for \(syncId) unpacked as \(detected.rawValue), expected \(manifest.format.rawValue)."
+                )
+            }
+            var replacementBookInfo: BookInfo?
+            if format == .epub {
+                guard let document = try? BookStorage.loadEpub(staging) else {
+                    throw HttpSyncError("Payload for \(syncId) is not a parseable EPUB.")
+                }
+                replacementBookInfo = BookProcessor.process(document: document)
+            }
+            guard let verifiedRemoteSha = manifest.contentSha256 else {
+                throw HttpSyncError("Downloaded payload did not produce a verified content hash.")
+            }
+            if remote.contentSha256 == nil {
+                try await payloadCodec.publishVerifiedContentSha(
+                    transport: transport, keys: keys, manifest: manifest
+                )
+            }
+            if localSha == verifiedRemoteSha {
+                try? FileManager.default.removeItem(at: staging)
+                return false
+            }
+            if let replacementBookInfo {
+                // Derived state belongs to the staged generation so directory swap + crash
+                // recovery publish it atomically with the EPUB bytes.
+                try BookStorage.save(replacementBookInfo, inside: staging, as: FileNames.bookinfo)
+            }
+            // The reader may have opened while the replacement archive downloaded.
+            if HttpSyncActiveBooks.contains(syncId) {
+                try? FileManager.default.removeItem(at: staging)
+                return false
+            }
+            try payloadCodec.installReplacement(bookRoot: root, stagingRoot: staging, sha: verifiedRemoteSha)
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            throw error
+        }
+    }
+
     /// Generates `cover.jpg` from the first mokuro page when the synced payload didn't ship one, so
     /// synced manga show a cover instead of a blank placeholder. Returns the relative cover path, or
     /// nil (non-mokuro / no pages / generation failed — the shelf tolerates a nil cover).
@@ -1153,6 +1251,10 @@ struct HttpSyncReconciler {
                     localImportedAtOverridesRemoteDeletion(localImportedAt: book.importedAt, remoteDeletedAt: remoteDeletedAt)
                 if remoteDeletedAt != nil && !tombstoneOverridden {
                     // Server says deleted and we didn't re-import after the tombstone: honour it.
+                    if HttpSyncActiveBooks.contains(book.syncId) {
+                        result.errors.append("\(book.title): deletion deferred while this book is open")
+                        continue
+                    }
                     deleteBook(root: book.root, bookId: book.id)
                     shelfState.removeValue(forKey: book.syncId)
                     continue
@@ -1300,7 +1402,7 @@ struct HttpSyncReconciler {
            let remoteBlob = try? jsonDecoder.decode(HttpSyncBookmarkBlob.self, from: remote.body) {
             var localStamp: String? = nil
             if let lm = local.lastModified { localStamp = rfc3339(from: lm) }
-            // Edit depth first; timestamps only break rev ties (legacy blobs are rev 0).
+            // The actual edit timestamp wins; revision only makes equal-time decisions stable.
             switch compareRevisioned(localRev: localRev, remoteRev: remoteBlob.rev,
                                      localStamp: localStamp, remoteStamp: remoteBlob.lastModified) {
             case .remoteWins:

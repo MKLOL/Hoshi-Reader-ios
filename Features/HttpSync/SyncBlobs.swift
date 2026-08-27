@@ -35,8 +35,8 @@ nonisolated struct HttpSyncMetadataBlob: Codable, Equatable {
     /// RFC 3339 UTC — set when the user deletes the book; other devices honour it (tombstone).
     var deletedAt: String?
     /// Edit-depth revision (Lamport counter). Each deliberate local edit sets
-    /// `rev = max(localRev, lastSeenRemoteRev) + 1`; the deeper edit chain wins regardless of
-    /// wall clocks. `nil` (legacy blobs) is treated as 0; timestamps remain the tiebreaker.
+    /// `rev = max(localRev, lastSeenRemoteRev) + 1`; event timestamp chooses the winner and
+    /// revision makes equal-time decisions deterministic. `nil` (legacy blobs) is treated as 0.
     var rev: Int?
 
     init(title: String, contentType: ContentType, shelfName: String? = nil,
@@ -337,6 +337,21 @@ nonisolated struct HttpSyncPayloadManifest: Codable, Equatable {
     let sizeBytes: Int64
     let originalName: String
     let format: ContentType
+    let contentSha256: String?
+
+    init(
+        sha256: String,
+        sizeBytes: Int64,
+        originalName: String,
+        format: ContentType,
+        contentSha256: String? = nil
+    ) {
+        self.sha256 = sha256
+        self.sizeBytes = sizeBytes
+        self.originalName = originalName
+        self.format = format
+        self.contentSha256 = contentSha256
+    }
 }
 
 // MARK: - KV server wire records (content-blind store)
@@ -396,46 +411,7 @@ nonisolated struct HttpSyncKvList: Codable, Equatable {
 /// Response of a `PUT /v1/kv/{key}` (or multipart complete).
 typealias HttpSyncKvWriteResponse = HttpSyncKvKeyMeta
 
-nonisolated struct HttpSyncExchangeWrite: Codable, Sendable {
-    let key: String
-    let baseEtag: String?
-    let mutationId: String
-    let contentType: String
-    let bodyBase64: String
-}
-
-nonisolated struct HttpSyncExchangeRequest: Codable, Sendable {
-    let booksHash: String?
-    let bookmarksHash: String?
-    let writes: [HttpSyncExchangeWrite]
-}
-
-nonisolated struct HttpSyncExchangeKey: Codable, Sendable {
-    let key: String
-    let lastModified: String
-    let etag: String
-    let size: Int
-    let contentType: String
-    let bodyBase64: String?
-}
-
-nonisolated struct HttpSyncExchangeWriteAck: Codable, Sendable {
-    let key: String
-    let mutationId: String
-    let accepted: Bool
-    let etag: String?
-}
-
-nonisolated struct HttpSyncExchangeResponse: Codable, Sendable {
-    let booksHash: String
-    let books: [String: String]?
-    let bookmarksHash: String
-    let bookmarks: [String: HttpSyncBookmarkMapEntry]?
-    let bookKeys: [HttpSyncExchangeKey]?
-    let writeAcks: [HttpSyncExchangeWriteAck]
-}
-
-nonisolated struct HttpSyncBookmarkMapEntry: Codable, Sendable {
+nonisolated struct HttpSyncBookmarkMapEntry: Codable, Sendable, Equatable {
     let etag: String
     let lastModified: String
     let value: HttpSyncBookmarkBlob?

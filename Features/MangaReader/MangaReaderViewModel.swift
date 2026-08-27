@@ -74,6 +74,7 @@ final class MangaReaderViewModel {
 
     func load(controller: MangaWebViewController, userConfig: UserConfig) async {
         guard !isReady, errorMessage == nil else { return }
+        await HttpSyncManager.shared.syncBookmarksBeforeReading(book: metadata)
         guard let booksDir = try? BookStorage.getBooksDirectory(), let folder = metadata.folder else {
             errorMessage = "Could not locate the manga book."
             return
@@ -395,6 +396,15 @@ final class MangaReaderViewModel {
             writeBookmark(page: page)
             pendingBookmarkPage = nil
         }
+    }
+
+    func reloadAfterHttpBookmark() {
+        guard let bookRoot, let book else { return }
+        bookmarkSaveTask?.cancel()
+        bookmarkSaveTask = nil
+        pendingBookmarkPage = nil
+        guard let restored = BookStorage.loadBookmark(root: bookRoot)?.chapterIndex else { return }
+        pageIndex = max(0, min(restored, max(0, book.pages.count - 1)))
     }
 
     private func writeBookmark(page: Int) {
