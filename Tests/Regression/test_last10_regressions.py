@@ -404,12 +404,25 @@ precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
         self.assertIn("StructuredText(markdown: visible)", popup)
         self.assertIn("HoshiMarkdownStyle(useUniformTextSize:", popup)
         self.assertIn("private struct HoshiMarkdownStyle: StructuredText.Style", popup)
-        self.assertGreaterEqual(popup.count(".foregroundColor(.white)"), 5)
-        self.assertGreaterEqual(popup.count(".foregroundStyle(.white)"), 3)
+        # The reply sits on an opaque system-background card and uses primary-coloured text in
+        # every Markdown node, so it stays legible over a white manga page in either colour
+        # scheme (white-on-ultraThinMaterial was unreadable).
+        self.assertIn(".background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 20))", popup)
+        self.assertNotIn(".ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20)", popup)
+        self.assertGreaterEqual(popup.count(".foregroundColor(.primary)"), 4)
+        self.assertGreaterEqual(popup.count(".foregroundStyle(.primary)"), 3)
+        self.assertNotIn(".foregroundColor(.white)", popup)
+        self.assertNotIn(".foregroundStyle(.white)", popup)
         self.assertIn(".textual.highlighterTheme(.init(", popup)
-        self.assertIn("foregroundColor: DynamicColor(.white)", popup)
+        self.assertIn("foregroundColor: DynamicColor(.primary)", popup)
         self.assertNotIn("tokenProperties:", popup)
-        self.assertIn(".textual.textSelection(.enabled)", popup)
+        # Text selection in the reply stays off: Textual's selection bridge traps with "Index
+        # out of range" under UIKit's edit menu on iOS (gonzalezreal/textual#87), which crashed
+        # the app on a long-press in the reply. A header button copies the reply instead.
+        self.assertNotIn("textSelection(.enabled)", popup)
+        self.assertIn("gonzalezreal/textual#87", popup)
+        self.assertIn('.accessibilityLabel("Copy reply")', popup)
+        self.assertIn("UIPasteboard.general.string = AiThinkingTextSanitizer.strip(entry.response)", popup)
         self.assertNotIn("responseBlocks", popup)
         self.assertNotIn("markdownHeading", popup)
         self.assertNotIn("parseTableRow", popup)

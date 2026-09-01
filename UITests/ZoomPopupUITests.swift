@@ -233,6 +233,49 @@ final class ZoomPopupUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// Regression: long-pressing a word in the AI reply (the natural "select / look this up"
+    /// gesture) must not crash the app. Textual's own selection bridge trapped with "Index out
+    /// of range" under UIKit's edit menu (gonzalezreal/textual#87), so selection is off and the
+    /// header offers "Copy reply" instead.
+    func testLongPressOnTranslationWordDoesNotCrash() throws {
+        let app = try launchZoomFixture(aiStub: true)
+
+        try askAboutBubble(app: app, textContains: "日本語")
+        let answer = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch
+        XCTAssertTrue(answer.waitForExistence(timeout: 3))
+
+        // Long-press inside the first paragraph of the reply.
+        answer.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)).press(forDuration: 1.5)
+        sleep(2)
+        XCTAssertEqual(app.state, .runningForeground, "app crashed after long-pressing the reply paragraph")
+
+        // And inside a table cell (a different Textual block).
+        let cell = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Japanese")).firstMatch
+        XCTAssertTrue(cell.waitForExistence(timeout: 3))
+        cell.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5)).press(forDuration: 1.5)
+        sleep(2)
+        XCTAssertEqual(app.state, .runningForeground, "app crashed after long-pressing a table cell")
+
+        // The popup is still up with its reply and offers "Copy reply" in place of selection.
+        // (The pasteboard itself isn't read back here: doing so from the runner trips iOS's
+        // paste-permission prompt and stalls the run.)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.exists)
+        let copy = app.buttons["Copy reply"].firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 3))
+        XCTAssertTrue(copy.isHittable)
+        copy.tap()
+        XCTAssertEqual(app.state, .runningForeground)
+        saveScreenshot(app, name: "ai-popup-after-long-press")
+    }
+
+    /// Attaches a full-screen screenshot to the test result (kept even when the test passes).
+    private func saveScreenshot(_ app: XCUIApplication, name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func launchZoomFixture(aiStub: Bool = false) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
@@ -345,7 +388,7 @@ final class ZoomPopupUITests: XCTestCase {
     }
 
     private func dismissAiPopup(_ app: XCUIApplication) {
-        let close = app.buttons["Close ChatGPT"].firstMatch
+        let close = app.buttons["Close translation"].firstMatch
         if close.waitForExistence(timeout: 1) {
             close.tap()
             XCTAssertTrue(close.waitForNonExistence(timeout: 3))

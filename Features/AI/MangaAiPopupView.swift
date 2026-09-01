@@ -9,6 +9,10 @@
 //  Markdown by Textual), loading + error states, an optional screenshot thumbnail, and a per-book
 //  history browser.
 //
+//  The card is an opaque system-background surface with primary-colored text (matching Android's
+//  `surface`/`onSurface` popup). A translucent material over a mostly-white manga page washed the
+//  reply out to near-invisible, whichever colour scheme was active.
+//
 //  Ported from Android features/ai/AiChatPopup.kt (AiChatPopupView + AiChatHistoryView). The
 //  caller presents this as a full-screen overlay above the manga page.
 //
@@ -44,7 +48,7 @@ struct MangaAiPopupView: View {
 
             ZStack {
                 // Dim + tap-to-dismiss backdrop.
-                Color.black.opacity(0.35)
+                Color.black.opacity(0.45)
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture { dismiss() }
@@ -88,8 +92,9 @@ struct MangaAiPopupView: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.15), lineWidth: 1))
+        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.12), lineWidth: 1))
+        .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
         // Swallow taps so they don't fall through to the dismiss backdrop.
         .contentShape(Rectangle())
         .onTapGesture { }
@@ -100,6 +105,16 @@ struct MangaAiPopupView: View {
             Text(headerTitle)
                 .font(.headline)
             Spacer()
+            // Selection in the reply is off (see `responseText`), so offer a one-tap copy.
+            if !showHistory, case .result(let entry) = controller.state {
+                Button {
+                    UIPasteboard.general.string = AiThinkingTextSanitizer.strip(entry.response)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .help("Copy reply")
+                .accessibilityLabel("Copy reply")
+            }
             Button {
                 settings.setUseUniformMarkdownTextSize(!settings.useUniformMarkdownTextSize)
             } label: {
@@ -163,7 +178,6 @@ struct MangaAiPopupView: View {
                         .font(.subheadline)
                 }
                 .buttonStyle(.bordered)
-                .tint(.white)
                 .padding(.top, 4)
             }
         case .error(let message):
@@ -291,11 +305,17 @@ struct MangaAiPopupView: View {
                 HoshiMarkdownStyle(useUniformTextSize: settings.useUniformMarkdownTextSize)
             )
             .textual.highlighterTheme(.init(
-                foregroundColor: DynamicColor(.white),
-                backgroundColor: DynamicColor(Color.white.opacity(0.08))
+                foregroundColor: DynamicColor(.primary),
+                backgroundColor: DynamicColor(Color.primary.opacity(0.06))
             ))
-            .textual.textSelection(.enabled)
-            .foregroundStyle(.white)
+            // Text selection is deliberately off. Textual's own `textual.textSelection` bridge
+            // traps on iOS: UIKit's edit menu replays a boxed text position into a rebuilt layout
+            // collection and the library hits "Index out of range" (gonzalezreal/textual#87,
+            // unfixed as of 0.5.0) — that was the crash on long-pressing a word in the reply.
+            // SwiftUI's native selection can't stand in: Textual covers every fragment with its
+            // link-tap overlay, so the `Text` never sees the long press. The header's
+            // "Copy reply" button covers getting the text out.
+            .foregroundStyle(.primary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -318,8 +338,9 @@ struct MangaAiPopupView: View {
 
 }
 
-/// Textual library theme for high-contrast AI replies. This styles Textual's parsed nodes; it does
-/// not parse or rewrite Markdown.
+/// Textual library theme for AI replies on the opaque card: primary text in every node so it
+/// stays legible in both colour schemes. This styles Textual's parsed nodes; it does not parse or
+/// rewrite Markdown.
 private struct HoshiMarkdownStyle: StructuredText.Style {
     let useUniformTextSize: Bool
 
@@ -329,13 +350,13 @@ private struct HoshiMarkdownStyle: StructuredText.Style {
             .code(
                 .monospaced,
                 .fontScale(codeScale),
-                .foregroundColor(.white),
-                .backgroundColor(Color.white.opacity(0.10))
+                .foregroundColor(.primary),
+                .backgroundColor(Color.primary.opacity(0.08))
             )
-            .emphasis(.italic, .foregroundColor(.white))
-            .link(.foregroundColor(.white))
-            .strong(.fontWeight(.semibold), .foregroundColor(.white))
-            .strikethrough(.strikethroughStyle(.single), .foregroundColor(.white))
+            .emphasis(.italic, .foregroundColor(.primary))
+            .link(.foregroundColor(.accentColor))
+            .strong(.fontWeight(.semibold), .foregroundColor(.primary))
+            .strikethrough(.strikethroughStyle(.single), .foregroundColor(.primary))
     }
 
     var headingStyle: HoshiMarkdownHeadingStyle {
@@ -362,7 +383,7 @@ private struct HoshiMarkdownHeadingStyle: StructuredText.HeadingStyle {
         let level = min(max(configuration.headingLevel, 1), 6)
         let scale = useUniformTextSize ? 1 : Self.markdownScales[level - 1]
         configuration.label
-            .foregroundStyle(.white)
+            .foregroundStyle(.primary)
             .textual.fontScale(scale)
             .fontWeight(.semibold)
             .textual.blockSpacing(.fontScaled(top: 1.2, bottom: 0.5))
@@ -373,10 +394,10 @@ private struct HoshiMarkdownBlockQuoteStyle: StructuredText.BlockQuoteStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 3)
-                .fill(Color.white.opacity(0.45))
+                .fill(Color.primary.opacity(0.35))
                 .textual.frame(width: .fontScaled(0.2))
             configuration.label
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
                 .textual.padding(.horizontal, .fontScaled(1))
         }
     }
