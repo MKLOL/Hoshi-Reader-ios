@@ -465,6 +465,44 @@ precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
         self.assertIn('Image(systemName: "textformat.size")', popup)
         self.assertIn("let scale = useUniformTextSize ? 1 :", popup)
 
+    def test_sync_timestamp_clamps_instead_of_trapping(self):
+        core = read("Features/HttpSync/SyncCore.swift")
+        self.assertIn("rawMillis.isNaN", core)
+        self.assertIn("253_402_300_799_999", core)
+        self.assertNotIn("let unixMillis = Int64((appleSeconds + appleReferenceEpoch) * 1000.0)", core)
+        swift = shutil.which("swift")
+        if swift is not None:
+            assertions = r"""
+
+let poisoned = chatEntryKeySuffix(timestampAppleSeconds: 1e300, bubbleText: "b", response: "r")
+precondition(!poisoned.isEmpty)
+let negative = chatEntryKeySuffix(timestampAppleSeconds: -1e300, bubbleText: "b", response: "r")
+precondition(!negative.isEmpty)
+let nan = chatEntryKeySuffix(timestampAppleSeconds: Double.nan, bubbleText: "b", response: "r")
+precondition(!nan.isEmpty)
+let sane = appleSecondsToRfc3339(800_000_000.0)
+precondition(sane.hasPrefix("2026-"), sane)
+"""
+            # SyncCore's only non-stdlib dependency is BookMetadata (three fields used).
+            stub = "struct BookMetadata { var title: String?; var folder: String?; var syncId: String? }\n"
+            with tempfile.TemporaryDirectory() as tmp:
+                script = Path(tmp) / "main.swift"
+                script.write_text(stub + core + assertions, encoding="utf-8")
+                subprocess.run([swift, str(script)], check=True, capture_output=True, text=True)
+
+    def test_ai_history_screenshots_use_downsampled_cached_thumbnails(self):
+        popup = read("Features/AI/MangaAiPopupView.swift")
+        self.assertIn("private struct ScreenshotThumbnail", popup)
+        self.assertIn("NSCache<NSString, UIImage>", popup)
+        self.assertIn("CGImageSourceCreateThumbnailAtIndex", popup)
+        self.assertIn("kCGImageSourceThumbnailMaxPixelSize", popup)
+        self.assertIn("Task.detached(priority: .utility)", popup)
+        # Full-resolution decode happens only on tap-to-zoom, never in the list rows.
+        self.assertNotIn("decodeImage(image)", popup)
+        entry_view = method_body(popup, "private func entryView")
+        self.assertNotIn("UIImage(data:", entry_view)
+        self.assertIn("ScreenshotThumbnail(image: image, cacheKey: entry.id)", entry_view)
+
     def test_thinking_sanitizer_preserves_valid_wait_translations(self):
         sanitizer = read("Features/AI/AiThinkingTextSanitizer.swift")
         swift = shutil.which("swift")

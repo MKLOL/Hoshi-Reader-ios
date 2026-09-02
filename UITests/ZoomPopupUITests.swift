@@ -268,6 +268,36 @@ final class ZoomPopupUITests: XCTestCase {
         saveScreenshot(app, name: "ai-popup-after-long-press")
     }
 
+    /// Regression: browsing a large chat history (many screenshot entries, plus one entry with a
+    /// corrupt out-of-range timestamp as a hostile sync writer could produce) must neither trap in
+    /// `AiChatEntry.id` (Int64 conversion, SyncCore) nor balloon memory by decoding every
+    /// screenshot at full resolution. Requires the stress log:
+    /// `python3 tools/seed_zoom_fixture.py <container> --stress-chat-log --poison-timestamp`.
+    func testHistoryWithManyScreenshotsAndPoisonedTimestampSurvives() throws {
+        let app = try launchZoomFixture(aiStub: true)
+
+        app.buttons["manga-options-menu"].firstMatch.tap()
+        let historyItem = app.buttons["Chat history"].firstMatch
+        XCTAssertTrue(historyItem.waitForExistence(timeout: 3))
+        historyItem.tap()
+
+        let marker = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "STRESS_LOG")).firstMatch
+        guard marker.waitForExistence(timeout: 5) else {
+            XCTAssertEqual(app.state, .runningForeground, "app crashed opening chat history")
+            throw ProbeError("Requires the stress chat log — seed with tools/seed_zoom_fixture.py --stress-chat-log --poison-timestamp")
+        }
+
+        // Scroll through the list so many screenshot rows come on screen, then linger so the
+        // driving script can sample the app's memory footprint.
+        let card = app.scrollViews.firstMatch
+        for _ in 0..<6 {
+            card.swipeUp()
+        }
+        sleep(6)
+        XCTAssertEqual(app.state, .runningForeground, "app crashed while browsing screenshot-heavy history")
+        saveScreenshot(app, name: "ai-history-stress")
+    }
+
     /// Attaches a full-screen screenshot to the test result (kept even when the test passes).
     private func saveScreenshot(_ app: XCUIApplication, name: String) {
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())

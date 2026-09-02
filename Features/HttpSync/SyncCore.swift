@@ -141,7 +141,15 @@ nonisolated(unsafe) private let rfc3339FractionalFormatter: ISO8601DateFormatter
 /// Android always produces millisecond precision (built from `epochMilli`), so this exactly
 /// reproduces its output — which matters because the value feeds both chat keys and LWW compares.
 nonisolated func appleSecondsToRfc3339(_ appleSeconds: Double) -> String {
-    let unixMillis = Int64((appleSeconds + appleReferenceEpoch) * 1000.0)
+    let rawMillis = (appleSeconds + appleReferenceEpoch) * 1000.0
+    // `Int64(Double)` traps on NaN/±inf/out-of-range input, and this runs from `AiChatEntry.id`
+    // inside SwiftUI's ForEach: one corrupt or hostile synced `timestampSeconds` (e.g. 1e300)
+    // would crash chat history forever and every sync push of that entry. Clamp to years 1–9999,
+    // where RFC 3339 (and Android's `Instant.toString()`) is well-defined; every legitimate
+    // value either client produces is far inside that range, so cross-device keys are unchanged.
+    let minUnixMillis = -62_135_596_800_000.0 // 0001-01-01T00:00:00Z
+    let maxUnixMillis = 253_402_300_799_999.0 // 9999-12-31T23:59:59.999Z
+    let unixMillis = Int64(rawMillis.isNaN ? 0 : min(max(rawMillis, minUnixMillis), maxUnixMillis))
     var secs = unixMillis / 1000
     var millis = unixMillis % 1000
     if millis < 0 { millis += 1000; secs -= 1 } // floor split, matching Java epochMilli semantics

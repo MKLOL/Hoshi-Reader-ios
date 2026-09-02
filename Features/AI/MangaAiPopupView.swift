@@ -17,6 +17,7 @@
 //  caller presents this as a full-screen overlay above the manga page.
 //
 
+import ImageIO
 import SwiftUI
 import UIKit
 import Textual
@@ -79,7 +80,9 @@ struct MangaAiPopupView: View {
             header
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                // Lazy so a long history instantiates (and decodes thumbnails for) only the rows
+                // actually scrolled into view, instead of all entries at once.
+                LazyVStack(alignment: .leading, spacing: 12) {
                     if showHistory || controller.state == .browsingHistory {
                         historyBody
                     } else {
@@ -222,22 +225,8 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private func entryView(_ entry: AiChatEntry) -> some View {
-        if let image = entry.screenshotImage, let uiImage = decodeImage(image) {
-            Image(uiImage: uiImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxHeight: 160)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.caption2)
-                        .padding(5)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .padding(6)
-                }
-                .contentShape(Rectangle())
-                // Tap to open fullscreen with pinch-zoom + pan (parity ask from Android).
-                .onTapGesture { zoomedScreenshot = uiImage }
+        if let image = entry.screenshotImage {
+            ScreenshotThumbnail(image: image, cacheKey: entry.id) { zoomedScreenshot = $0 }
         }
         if !entry.bubbleText.isEmpty {
             bubbleHeader(entry.bubbleText)
@@ -331,11 +320,99 @@ struct MangaAiPopupView: View {
         controller.dismiss()
     }
 
-    private func decodeImage(_ image: AiChatImage) -> UIImage? {
-        guard let data = Data(base64Encoded: image.base64Data) else { return nil }
-        return UIImage(data: data)
+}
+
+/// A history row's screenshot. These rows used to decode every screenshot at full resolution
+/// (base64 → `UIImage`, ~12 MB of bitmap per full page) on the main thread on every render pass —
+/// a screenshot-heavy history was a jetsam/watchdog kill on device. This decodes a downsampled
+/// thumbnail once, off the main thread, through a small shared cache; the full-resolution image
+/// is decoded only when the user taps to zoom.
+private struct ScreenshotThumbnail: View {
+    let image: AiChatImage
+    let cacheKey: String
+    let onOpenFull: (UIImage) -> Void
+
+    @State private var thumbnail: UIImage?
+    @State private var isOpeningFull = false
+
+    private static let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 48 // ~48 × ≤1 MB thumbnails; NSCache also evicts under pressure.
+        return cache
+    }()
+
+    var body: some View {
+        Group {
+            if let thumbnail {
+                Image(uiImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.primary.opacity(0.05))
+                    .overlay(ProgressView())
+            }
+        }
+        .frame(maxHeight: 160)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(alignment: .bottomTrailing) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.caption2)
+                .padding(5)
+                .background(.ultraThinMaterial, in: Circle())
+                .padding(6)
+        }
+        .contentShape(Rectangle())
+        // Tap to open fullscreen with pinch-zoom + pan (parity ask from Android).
+        .onTapGesture { openFull() }
+        .task(id: cacheKey) { await loadThumbnail() }
     }
 
+    private func loadThumbnail() async {
+        let key = "thumb:\(cacheKey)" as NSString
+        if let cached = Self.cache.object(forKey: key) {
+            thumbnail = cached
+            return
+        }
+        let base64 = image.base64Data
+        // 160 pt tall at 3x ≈ 480 px; 640 stays sharp on any screen at a few hundred KB decoded.
+        let decoded = await Task.detached(priority: .utility) {
+            decodeDownsampledScreenshot(base64: base64, maxPixelSize: 640)
+        }.value
+        guard let decoded else { return }
+        Self.cache.setObject(decoded, forKey: key)
+        thumbnail = decoded
+    }
+
+    private func openFull() {
+        guard !isOpeningFull else { return }
+        isOpeningFull = true
+        let base64 = image.base64Data
+        Task {
+            let full = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+                guard let data = Data(base64Encoded: base64) else { return nil }
+                return UIImage(data: data)
+            }.value
+            isOpeningFull = false
+            if let full { onOpenFull(full) }
+        }
+    }
+}
+
+/// ImageIO downsampling: decodes straight to `maxPixelSize` without ever materialising the
+/// full-resolution bitmap.
+private nonisolated func decodeDownsampledScreenshot(base64: String, maxPixelSize: Int) -> UIImage? {
+    guard let data = Data(base64Encoded: base64) else { return nil }
+    let options: [CFString: Any] = [
+        kCGImageSourceCreateThumbnailFromImageAlways: true,
+        kCGImageSourceCreateThumbnailWithTransform: true,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+    ]
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+        return nil
+    }
+    return UIImage(cgImage: cgImage)
 }
 
 /// Textual library theme for AI replies on the opaque card: primary text in every node so it

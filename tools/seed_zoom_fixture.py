@@ -14,6 +14,7 @@ Usage:
 `xcodebuild test` can rotate the container UUID, so re-query the path if the shelf comes up empty.
 No third-party modules: the PNGs are written with zlib.
 """
+import json, os, struct, sys, uuid, zlib, datetime, time
 
 container = sys.argv[1]
 title = "IDB Zoom Fixture"
@@ -64,3 +65,33 @@ with open(os.path.join(root, "metadata.json"), "w") as f:
 with open(os.path.join(root, "bookmark.json"), "w") as f:
     json.dump({"chapterIndex": 0, "progress": 0, "characterCount": 0}, f)
 print("seeded", root)
+
+# --- Optional stress chat log (--stress-chat-log [--poison-timestamp]) ----------------------
+# Writes ai_chat_log.json for the fixture with 40 entries, each holding a full-page screenshot
+# (flat PNG: tiny on disk, ~12 MB decoded), to exercise the history view's memory behaviour.
+# --poison-timestamp appends one entry whose timestampSeconds is 1e300: a corrupt/hostile synced
+# value that must render (clamped), not trap, when history is opened.
+if "--stress-chat-log" in sys.argv:
+    import base64
+    shot = base64.b64encode(png(W, H, [(0, 0, W, 200, (150, 90, 200))])).decode()
+    entries = []
+    for i in range(40):
+        entries.append({
+            "bubbleText": f"STRESS_LOG entry {i}",
+            "prompt": "stress", "model": "stress-test",
+            "response": f"Stress reply {i}",
+            "timestampSeconds": 800000000.0 + i,
+            "screenshotImage": {"mimeType": "image/png", "base64Data": shot},
+        })
+    if "--poison-timestamp" in sys.argv:
+        entries.append({
+            "bubbleText": "STRESS_LOG poisoned timestamp",
+            "prompt": "stress", "model": "stress-test",
+            "response": "This entry's timestamp is 1e300 and must not crash history.",
+            "timestampSeconds": 1e300,
+        })
+    with open(os.path.join(root, "ai_chat_log.json"), "w") as f:
+        json.dump({"entries": entries}, f)
+    print("stress chat log:", len(entries), "entries",
+          "(poisoned)" if "--poison-timestamp" in sys.argv else "")
+
