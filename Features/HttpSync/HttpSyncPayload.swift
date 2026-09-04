@@ -48,6 +48,7 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "highlights.json",          // per-device
     "pretranslations.json",     // synced as …/pretranslations
     "sentence_translations.json", // synced as …/sentences
+    FileNames.generatedCover,     // receiver-generated cover; origin payloads never contain it
     httpSyncPayloadShaCacheFilename,
     ".payload.sha256.cache",
     ".payload.content.local_dirty",
@@ -122,6 +123,17 @@ nonisolated struct HttpSyncPayloadCodec {
     /// Computes the cross-platform static-content hash once for a pre-map import/download.
     func ensurePayloadContentSha(bookRoot: URL) async throws -> String {
         if let cached = cachedPayloadSha(bookRoot: bookRoot) { return cached }
+        let hash = try await Task.detached(priority: .utility) {
+            try Self.contentSha(bookRoot: bookRoot)
+        }.value
+        Self.writeCachedSha(bookRoot: bookRoot, sha: hash)
+        return hash
+    }
+
+    /// Recomputes the content hash from disk, ignoring the cache sidecar, and rewrites it.
+    /// Callers use it before replacing a book whose *cached* hash disagrees with the server: a
+    /// stale or mis-derived sidecar must never cost a download that installs identical bytes.
+    func refreshPayloadContentSha(bookRoot: URL) async throws -> String {
         let hash = try await Task.detached(priority: .utility) {
             try Self.contentSha(bookRoot: bookRoot)
         }.value
@@ -349,19 +361,23 @@ nonisolated struct HttpSyncPayloadCodec {
         let contentSha = try await Task.detached(priority: .utility) {
             try Self.contentSha(bookRoot: targetDir)
         }.value
-        if let declared = manifest.contentSha256, declared != contentSha {
-            throw HttpSyncError(
-                "Payload content for \(syncId) failed sha256 check (expected \(declared), got \(contentSha))."
-            )
-        }
         Self.writeCachedSha(bookRoot: targetDir, sha: contentSha)
-        return HttpSyncPayloadManifest(
+        let verified = HttpSyncPayloadManifest(
             sha256: manifest.sha256,
             sizeBytes: manifest.sizeBytes,
             originalName: manifest.originalName,
             format: manifest.format,
             contentSha256: contentSha
         )
+        // The zip sha256 above is the integrity check. The content hash is only the
+        // cross-platform change detector, derived from those same verified bytes, so a manifest
+        // that declares a different (or no) content hash was published by a client whose
+        // derivation was wrong (this app through 0.11.3). Correct it in place instead of failing
+        // every download of a perfectly good archive; a failed repair just repeats next sync.
+        if manifest.contentSha256 != contentSha {
+            try? await publishVerifiedContentSha(transport: transport, keys: keys, manifest: verified)
+        }
+        return verified
     }
 
     /// Fetches just the remote manifest (no payload). `nil` if the server has none. Throws on
@@ -446,6 +462,32 @@ nonisolated struct HttpSyncPayloadCodec {
         try? Data(sha.utf8).write(to: cacheURL, options: .atomic)
     }
 
+    /// Pre-`.generated_cover.jpg` builds materialized a receiver-side cover straight into the
+    /// book root (mokuro: literal `cover.jpg`; EPUB: the manifest cover's basename), where it
+    /// poisons the content hash against the origin's manifest forever. If ignoring exactly one
+    /// such candidate root file makes the hash match the manifest, the file cannot have come from
+    /// the payload: rename it to the excluded name and cache the now-matching sha instead of
+    /// re-downloading the entire archive. The caller repoints the book's metadata cover path
+    /// (metadata IO is main-actor-isolated; this codec is not).
+    func migrateLegacyGeneratedCover(bookRoot: URL, expectedSha: String, candidateNames: [String]) -> Bool {
+        let fileManager = FileManager.default
+        for name in candidateNames {
+            guard !name.isEmpty, name != FileNames.generatedCover, !name.contains("/") else { continue }
+            let legacy = bookRoot.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: legacy.path(percentEncoded: false)) else { continue }
+            guard let shaWithoutCover = try? Self.contentSha(
+                // The hash compares NFC-precomposed relative paths; normalize the candidate too.
+                bookRoot: bookRoot, excludingRootFiles: [name.precomposedStringWithCanonicalMapping]
+            ), shaWithoutCover == expectedSha else { continue }
+            let target = bookRoot.appendingPathComponent(FileNames.generatedCover)
+            try? fileManager.removeItem(at: target)
+            do { try fileManager.moveItem(at: legacy, to: target) } catch { return false }
+            Self.writeCachedSha(bookRoot: bookRoot, sha: expectedSha)
+            return true
+        }
+        return false
+    }
+
     private static func sha256OfFile(_ url: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -461,23 +503,32 @@ nonisolated struct HttpSyncPayloadCodec {
 
     /// Hashes sorted relative path + length + bytes; identical content hashes the same on iOS
     /// and Android even though their ZIP encoders produce different binary archives.
-    static func contentSha(bookRoot: URL) throws -> String {
+    static func contentSha(bookRoot: URL, excludingRootFiles: Set<String> = []) throws -> String {
         let fileManager = FileManager.default
+        // `.producesRelativePathURLs` makes `relativePath` exactly the path under the root.
+        // Deriving it by character count from `path()` was wrong twice over: the enumerator
+        // returns symlink-resolved paths (`/private/var/…` for the `/var/…` app container, i.e.
+        // every iOS Documents directory) and `path()` keeps a trailing slash on directory URLs.
+        // Both left garbage from the parent directory's name on every relative path, so the
+        // hash never matched Android, and a staging directory's random UUID poisoned every
+        // manifest this app published in 0.11.3. The root's own symlinks are resolved up front
+        // because the enumerator does not follow a symlinked root and would yield nothing.
+        let root = bookRoot.resolvingSymlinksInPath()
         guard let enumerator = fileManager.enumerator(
-            at: bookRoot,
+            at: root,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: []
+            options: [.producesRelativePathURLs]
         ) else { throw HttpSyncError("Could not enumerate book payload.") }
         var files: [(String, URL)] = []
         while let url = enumerator.nextObject() as? URL {
-            let relative = String(url.path(percentEncoded: false).dropFirst(
-                bookRoot.path(percentEncoded: false).count + 1
-            )).precomposedStringWithCanonicalMapping
+            let relative = url.relativePath.precomposedStringWithCanonicalMapping
             let components = relative.split(separator: "/").map(String.init)
             if components.dropLast().contains(where: { httpSyncPayloadExcludedDirs.contains($0) }) {
                 continue
             }
             if httpSyncPayloadExcludedFiles.contains(url.lastPathComponent) { continue }
+            // Root-level only: `relative` has no "/" for files directly under the book root.
+            if excludingRootFiles.contains(relative) { continue }
             if (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
                 files.append((relative, url))
             }

@@ -31,7 +31,7 @@ class BookshelfViewModel {
     func loadBooks() {
         do {
             books = try BookStorage.loadAllBooks()
-            backfillMissingMokuroCovers()
+            backfillMissingCovers()
             loadBookProgress()
             loadShelves()
         } catch {
@@ -39,28 +39,58 @@ class BookshelfViewModel {
         }
     }
 
-    /// Synced mokuro books often arrive without a cover.jpg (cross-platform / ッツ payloads omit it),
-    /// so the shelf shows them blank. Generate a cover from page 1 the first time we encounter such a
-    /// book, then persist it so this runs at most once per book. Tolerant of any per-book failure.
-    private func backfillMissingMokuroCovers() {
+    /// Synced books often arrive without a usable cover (cross-platform / ッツ payloads omit it),
+    /// so the shelf shows them blank. Generate one the first time we encounter such a book —
+    /// mokuro: a page-1 thumbnail; EPUB: a copy of the manifest cover from inside the book — then
+    /// persist it so this runs at most once per book. Also heals a metadata cover whose file no
+    /// longer exists (a payload replacement may have wiped a receiver-generated cover).
+    /// Writes the hash-excluded `FileNames.generatedCover`, never a payload-visible name — a
+    /// receiver-generated file inside the content hash would make this payload mismatch the
+    /// origin's forever. Tolerant of any per-book failure.
+    private func backfillMissingCovers() {
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return }
-        for i in books.indices where books[i].cover == nil {
+        for i in books.indices {
             guard let folder = books[i].folder else { continue }
             let root = booksDir.appendingPathComponent(folder)
-            guard ContentType.detect(bookDir: root) == .mokuro else { continue }
+            if let cover = books[i].cover {
+                let coverName = (cover as NSString).lastPathComponent
+                let coverURL = root.appendingPathComponent(coverName)
+                if FileManager.default.fileExists(atPath: coverURL.path(percentEncoded: false)) {
+                    continue
+                }
+            }
+            guard let generated = generateCover(root: root) else { continue }
+            books[i].cover = "Books/\(folder)/\(generated)"
+            try? BookStorage.save(books[i], inside: root, as: FileNames.metadata)
+        }
+    }
+
+    /// Writes `FileNames.generatedCover` into `root` for either format. Returns the filename on
+    /// success (an already-present generated cover counts), nil when no cover could be produced.
+    private func generateCover(root: URL) -> String? {
+        let target = root.appendingPathComponent(FileNames.generatedCover)
+        if FileManager.default.fileExists(atPath: target.path(percentEncoded: false)) {
+            return FileNames.generatedCover
+        }
+        switch ContentType.detect(bookDir: root) {
+        case .mokuro:
             let imagesDir = root.appendingPathComponent(FileNames.mokuroImages)
-            guard let names = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path(percentEncoded: false)) else { continue }
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path(percentEncoded: false)) else { return nil }
             var firstName: String? = nil
             for name in names.sorted() where !name.hasPrefix(".") { firstName = name; break }
-            guard let firstName else { continue }
-            do {
-                try MokuroCover.generateThumbnail(
-                    from: imagesDir.appendingPathComponent(firstName),
-                    to: root.appendingPathComponent("cover.jpg")
-                )
-                books[i].cover = "Books/\(folder)/cover.jpg"
-                try? BookStorage.save(books[i], inside: root, as: FileNames.metadata)
-            } catch { continue }
+            guard let firstName else { return nil }
+            guard (try? MokuroCover.generateThumbnail(
+                from: imagesDir.appendingPathComponent(firstName),
+                to: target
+            )) != nil else { return nil }
+            return FileNames.generatedCover
+        case .epub:
+            guard let document = try? BookStorage.loadEpub(root),
+                  let coverPath = findCoverInManifest(document: document) else { return nil }
+            let source = document.contentDirectory.appendingPathComponent(coverPath)
+            guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)),
+                  (try? FileManager.default.copyItem(at: source, to: target)) != nil else { return nil }
+            return FileNames.generatedCover
         }
     }
     

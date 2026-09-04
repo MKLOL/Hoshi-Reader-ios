@@ -1014,13 +1014,37 @@ struct HttpSyncReconciler {
             return false
         }
         if payloadCodec.hasPayloadContentDirty(bookRoot: root) { return false }
-        let localSha: String
+        let cachedSha: String
         if let cached = payloadCodec.cachedPayloadSha(bookRoot: root) {
-            localSha = cached
+            cachedSha = cached
         } else {
-            localSha = try await payloadCodec.ensurePayloadContentSha(bookRoot: root)
+            cachedSha = try await payloadCodec.ensurePayloadContentSha(bookRoot: root)
         }
+        if let remoteContentSha = remote.contentSha256, cachedSha == remoteContentSha { return false }
+        // The cached baseline disagrees with the server. Re-derive it from the bytes on disk
+        // before paying for a download: a stale or mis-derived sidecar (every one written by
+        // builds through 0.11.3) is far cheaper to fix locally than a replacement that installs
+        // identical content.
+        let localSha = try await payloadCodec.refreshPayloadContentSha(bookRoot: root)
         if let remoteContentSha = remote.contentSha256, localSha == remoteContentSha { return false }
+        if let remoteContentSha = remote.contentSha256 {
+            // Candidate receiver-materialized covers: the mokuro convention plus whatever file
+            // this book's metadata actually points at (EPUB covers use the manifest basename).
+            var candidates = ["cover.jpg"]
+            if let cover = BookStorage.loadMetadata(root: root)?.cover {
+                let name = URL(fileURLWithPath: cover).lastPathComponent
+                if !candidates.contains(name) { candidates.append(name) }
+            }
+            if payloadCodec.migrateLegacyGeneratedCover(
+                bookRoot: root, expectedSha: remoteContentSha, candidateNames: candidates
+            ) {
+                if var metadata = BookStorage.loadMetadata(root: root) {
+                    metadata.cover = "Books/\(root.lastPathComponent)/\(FileNames.generatedCover)"
+                    try? BookStorage.save(metadata, inside: root, as: FileNames.metadata)
+                }
+                return false
+            }
+        }
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return false }
         let staging = uniqueDirectory(
             base: booksDir.appendingPathComponent(".hoshi-sync-update-\(UUID().uuidString)", isDirectory: true)
@@ -1046,13 +1070,10 @@ struct HttpSyncReconciler {
                 }
                 replacementBookInfo = BookProcessor.process(document: document)
             }
+            // downloadAndUnpack already republished the manifest if its declared hash was
+            // missing or wrong, so the remote note now matches this verified value.
             guard let verifiedRemoteSha = manifest.contentSha256 else {
                 throw HttpSyncError("Downloaded payload did not produce a verified content hash.")
-            }
-            if remote.contentSha256 == nil {
-                try await payloadCodec.publishVerifiedContentSha(
-                    transport: transport, keys: keys, manifest: manifest
-                )
             }
             if localSha == verifiedRemoteSha {
                 try? FileManager.default.removeItem(at: staging)
@@ -1076,11 +1097,17 @@ struct HttpSyncReconciler {
         }
     }
 
-    /// Generates `cover.jpg` from the first mokuro page when the synced payload didn't ship one, so
-    /// synced manga show a cover instead of a blank placeholder. Returns the relative cover path, or
-    /// nil (non-mokuro / no pages / generation failed — the shelf tolerates a nil cover).
+    /// Generates a cover from the first mokuro page when the synced payload didn't ship one, so
+    /// synced manga show a cover instead of a blank placeholder. Writes the hash-excluded
+    /// `FileNames.generatedCover` (never `cover.jpg`) so the local payload keeps matching the
+    /// origin's manifest. Returns the relative cover path, or nil (non-mokuro / no pages /
+    /// generation failed — the shelf tolerates a nil cover).
     private func generateMokuroCoverIfMissing(root: URL, contentType: ContentType) -> String? {
         guard contentType == .mokuro else { return nil }
+        let target = root.appendingPathComponent(FileNames.generatedCover)
+        if FileManager.default.fileExists(atPath: target.path(percentEncoded: false)) {
+            return "Books/\(root.lastPathComponent)/\(FileNames.generatedCover)"
+        }
         let imagesDir = root.appendingPathComponent(FileNames.mokuroImages)
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path(percentEncoded: false)) else { return nil }
         // First image by sorted filename ≈ page 1 (manga pages are zero-padded). Plain loop, no
@@ -1091,9 +1118,9 @@ struct HttpSyncReconciler {
         do {
             try MokuroCover.generateThumbnail(
                 from: imagesDir.appendingPathComponent(firstName),
-                to: root.appendingPathComponent("cover.jpg")
+                to: target
             )
-            return "Books/\(root.lastPathComponent)/cover.jpg"
+            return "Books/\(root.lastPathComponent)/\(FileNames.generatedCover)"
         } catch {
             return nil
         }
@@ -1122,13 +1149,21 @@ struct HttpSyncReconciler {
         guard let document, let coverPath = findEpubCoverInManifest(document: document) else { return nil }
         let source = document.contentDirectory.appendingPathComponent(coverPath)
         let name = URL(fileURLWithPath: coverPath).lastPathComponent
-        let destination = root.appendingPathComponent(name)
+        let shipped = root.appendingPathComponent(name)
         let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: destination.path(percentEncoded: false)) {
-            guard fileManager.fileExists(atPath: source.path(percentEncoded: false)),
-                  (try? fileManager.copyItem(at: source, to: destination)) != nil else { return nil }
+        // A root-level copy that arrived inside the payload is origin content — keep using it.
+        if fileManager.fileExists(atPath: shipped.path(percentEncoded: false)) {
+            return "Books/\(root.lastPathComponent)/\(name)"
         }
-        return "Books/\(root.lastPathComponent)/\(name)"
+        // Materialize receiver-side under the hash-excluded name so the local payload keeps
+        // matching the origin's manifest (same rule as generated mokuro covers). The extension
+        // mismatch is fine — image loading sniffs content, not the filename.
+        let generated = root.appendingPathComponent(FileNames.generatedCover)
+        if !fileManager.fileExists(atPath: generated.path(percentEncoded: false)) {
+            guard fileManager.fileExists(atPath: source.path(percentEncoded: false)),
+                  (try? fileManager.copyItem(at: source, to: generated)) != nil else { return nil }
+        }
+        return "Books/\(root.lastPathComponent)/\(FileNames.generatedCover)"
     }
 
     /// Mirror of `BookshelfViewModel.findCoverInManifest` — EPUB3 `cover-image`, then the EPUB2

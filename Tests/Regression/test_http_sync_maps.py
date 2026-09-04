@@ -72,9 +72,20 @@ class HttpSyncMapRegressionTests(unittest.TestCase):
     def test_payload_hash_is_verified_from_downloaded_content(self):
         payload = self.source("Features/HttpSync/HttpSyncPayload.swift")
         reconciler = self.source("Features/HttpSync/HttpSyncReconciler.swift")
-        self.assertIn("declared != contentSha", payload)
+        # The zip sha256 is the integrity check; the content hash is derived from the verified,
+        # unpacked bytes and a manifest that disagrees is repaired, never treated as corruption
+        # (the 0.11.3 hash bug made every manifest disagree and every download fail).
+        self.assertIn("try Self.contentSha(bookRoot: targetDir)", payload)
+        self.assertIn("if manifest.contentSha256 != contentSha {", payload)
+        self.assertNotIn("declared != contentSha", payload)
         self.assertIn("publishVerifiedContentSha", payload)
         self.assertIn("hasPayloadContentDirty(bookRoot: root)", reconciler)
+        # A cached local hash that disagrees with the server is re-derived from disk before any
+        # replacement download.
+        self.assertIn("refreshPayloadContentSha(bookRoot: root)", reconciler)
+        # The relative path comes from the enumerator, never from character counts of `path()`.
+        self.assertIn(".producesRelativePathURLs", payload)
+        self.assertNotIn("bookRoot.path(percentEncoded: false).count + 1", payload)
 
     def test_active_epub_and_manga_readers_reload_remote_bookmarks(self):
         epub = self.source("Features/Reader/ReaderView/ReaderView.swift")

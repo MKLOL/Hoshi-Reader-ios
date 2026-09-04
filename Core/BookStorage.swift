@@ -21,6 +21,10 @@ nonisolated enum FileNames: Sendable {
     static let sasayakiMatch = "sasayaki_match.json"
     static let sasayakiPlayback = "sasayaki_playback.json"
     static let highlights = "highlights.json"
+    /// Cover thumbnail generated locally for a synced book whose payload shipped none. Distinct
+    /// from the import-time `cover.jpg` so it can be excluded from the payload content hash —
+    /// a receiver-generated file must never make local content look different from the origin's.
+    static let generatedCover = ".generated_cover.jpg"
     /// Mokuro manga sidecar (raw mokuro tool output, copied verbatim into the book dir). Its
     /// presence marks a book directory as a manga volume.
     static let mokuro = "mokuro.json"
