@@ -33,9 +33,8 @@ import ZipArchive
 /// own key path. Must match Android `PAYLOAD_EXCLUDED_FILES`. iOS-specific additions
 /// (`bookinfo.json`, `highlights.json`) are per-device-derived state that should not churn the sha.
 ///
-/// Literals (not `FileNames.*`) on purpose: this global is `nonisolated` so the off-main payload
-/// codec can read it, and `FileNames` is a main-actor-isolated type in Core/. The names are stable
-/// on-disk filenames, so duplicating them here is safe and keeps the codec actor-independent.
+/// Literal on-disk names, plus `FileNames.generatedCover` so the one name the shelf writes for a
+/// receiver-generated cover can never drift from the name this list excludes.
 nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "bookmark.json",            // synced as …/bookmark
     "ai_chat_log.json",         // synced as …/chat/…
@@ -50,6 +49,7 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "sentence_translations.json", // synced as …/sentences
     FileNames.generatedCover,     // receiver-generated cover; origin payloads never contain it
     httpSyncPayloadShaCacheFilename,
+    httpSyncPayloadZipShaCacheFilename,
     ".payload.sha256.cache",
     ".payload.content.local_dirty",
     httpSyncPayloadReplacementTargetFilename,
@@ -60,6 +60,10 @@ nonisolated let httpSyncPayloadExcludedDirs: Set<String> = ["Sasayaki"]
 
 /// Sidecar caching the last-computed payload sha so an unchanged book isn't re-zipped/re-hashed.
 nonisolated let httpSyncPayloadShaCacheFilename = ".payload.content.sha256.cache"
+/// sha256 of the archive this install last uploaded or installed. While the server's manifest
+/// still points at that exact archive, a content-hash disagreement can only be a derivation
+/// difference between clients, never new content, so no download is owed.
+nonisolated let httpSyncPayloadZipShaCacheFilename = ".payload.zip.sha256.cache"
 nonisolated private let httpSyncPayloadReplacementTargetFilename = ".payload.replacement.target"
 nonisolated private let httpSyncPayloadReplacementBackupPrefix = ".hoshi-sync-backup-"
 
@@ -69,6 +73,7 @@ nonisolated private let httpSyncReplacementPreservedFiles = httpSyncPayloadExclu
     .subtracting([
         "bookinfo.json",
         httpSyncPayloadShaCacheFilename,
+        httpSyncPayloadZipShaCacheFilename,
         ".payload.sha256.cache",
         httpSyncPayloadReplacementTargetFilename,
     ])
@@ -110,6 +115,23 @@ nonisolated struct HttpSyncPayloadCodec {
             return nil
         }
         return raw
+    }
+
+    /// sha256 of the archive this install last uploaded or installed for the book, if known.
+    func cachedZipSha(bookRoot: URL) -> String? {
+        let cache = bookRoot.appendingPathComponent(httpSyncPayloadZipShaCacheFilename)
+        guard let raw = try? String(contentsOf: cache, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              raw.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return raw
+    }
+
+    private static func writeZipSha(bookRoot: URL, sha: String) {
+        try? Data(sha.utf8).write(
+            to: bookRoot.appendingPathComponent(httpSyncPayloadZipShaCacheFilename), options: .atomic
+        )
     }
 
     /// Establishes the baseline for an upgraded client that already has this book offline.
@@ -313,6 +335,7 @@ nonisolated struct HttpSyncPayloadCodec {
             contentType: "application/json; charset=utf-8",
             body: body
         )
+        Self.writeZipSha(bookRoot: bookRoot, sha: sha)
         try? fileManager.removeItem(at: bookRoot.appendingPathComponent(".payload.content.local_dirty"))
         return true
     }
@@ -369,15 +392,36 @@ nonisolated struct HttpSyncPayloadCodec {
             format: manifest.format,
             contentSha256: contentSha
         )
-        // The zip sha256 above is the integrity check. The content hash is only the
-        // cross-platform change detector, derived from those same verified bytes, so a manifest
-        // that declares a different (or no) content hash was published by a client whose
-        // derivation was wrong (this app through 0.11.3). Correct it in place instead of failing
-        // every download of a perfectly good archive; a failed repair just repeats next sync.
+        // The archive sha256 above is the integrity check; the content hash is a change detector
+        // derived from those verified bytes. A manifest that disagrees was written by a client
+        // whose derivation differed (this app through 0.11.3), so it is corrected rather than
+        // treated as corruption.
         if manifest.contentSha256 != contentSha {
-            try? await publishVerifiedContentSha(transport: transport, keys: keys, manifest: verified)
+            try await repairManifest(transport: transport, keys: keys, verifiedAgainst: manifest, verified: verified)
         }
+        Self.writeZipSha(bookRoot: targetDir, sha: manifest.sha256)
         return verified
+    }
+
+    /// Republishes `verified` only while the server still holds exactly `verifiedAgainst`, the
+    /// manifest the archive was checked against. Another device may have published a new archive
+    /// during this download; overwriting its manifest with the old sha256 and size would break the
+    /// book for every device until that publisher syncs again. A failed repair just repeats on the
+    /// next sync; cancellation still propagates.
+    private func repairManifest(
+        transport: HttpSyncKvTransport,
+        keys: HttpSyncPayloadKeys,
+        verifiedAgainst: HttpSyncPayloadManifest,
+        verified: HttpSyncPayloadManifest
+    ) async throws {
+        do {
+            guard try await fetchManifest(transport: transport, keys: keys) == verifiedAgainst else { return }
+            try await publishVerifiedContentSha(transport: transport, keys: keys, manifest: verified)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // The archive is verified and unpacked; only the server-side note is stale.
+        }
     }
 
     /// Fetches just the remote manifest (no payload). `nil` if the server has none. Throws on
@@ -465,9 +509,9 @@ nonisolated struct HttpSyncPayloadCodec {
     /// Pre-`.generated_cover.jpg` builds materialized a receiver-side cover straight into the
     /// book root (mokuro: literal `cover.jpg`; EPUB: the manifest cover's basename), where it
     /// poisons the content hash against the origin's manifest forever. If ignoring exactly one
-    /// such candidate root file makes the hash match the manifest, the file cannot have come from
-    /// the payload: rename it to the excluded name and cache the now-matching sha instead of
-    /// re-downloading the entire archive. The caller repoints the book's metadata cover path
+    /// such candidate root file makes the hash match the manifest, the local content then provably
+    /// equals the origin's: rename that file to the excluded name and cache the now-matching sha
+    /// instead of re-downloading the entire archive. The caller repoints the book's metadata cover path
     /// (metadata IO is main-actor-isolated; this codec is not).
     func migrateLegacyGeneratedCover(bookRoot: URL, expectedSha: String, candidateNames: [String]) -> Bool {
         let fileManager = FileManager.default
@@ -480,8 +524,13 @@ nonisolated struct HttpSyncPayloadCodec {
                 bookRoot: bookRoot, excludingRootFiles: [name.precomposedStringWithCanonicalMapping]
             ), shaWithoutCover == expectedSha else { continue }
             let target = bookRoot.appendingPathComponent(FileNames.generatedCover)
-            try? fileManager.removeItem(at: target)
-            do { try fileManager.moveItem(at: legacy, to: target) } catch { return false }
+            do {
+                if fileManager.fileExists(atPath: target.path(percentEncoded: false)) {
+                    _ = try fileManager.replaceItemAt(target, withItemAt: legacy)
+                } else {
+                    try fileManager.moveItem(at: legacy, to: target)
+                }
+            } catch { return false }
             Self.writeCachedSha(bookRoot: bookRoot, sha: expectedSha)
             return true
         }
@@ -533,7 +582,10 @@ nonisolated struct HttpSyncPayloadCodec {
                 files.append((relative, url))
             }
         }
-        files.sort { $0.0 < $1.0 }
+        // Order by the UTF-8 bytes of the NFC path — Swift's String order is code-point order,
+        // which is byte order; Android sorts the same bytes explicitly because Kotlin's String
+        // order is UTF-16 code units and disagrees outside the BMP.
+        files.sort { Array($0.0.utf8).lexicographicallyPrecedes(Array($1.0.utf8)) }
         var hasher = SHA256()
         for (path, url) in files {
             let pathData = Data(path.utf8)

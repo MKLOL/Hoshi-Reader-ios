@@ -55,6 +55,13 @@ GOLDEN_VECTORS = [
         },
         "sha256:d87d77783cc9317975bcb60eec51c6bbba63f1457ee004aa95fd56e90fd07131",
     ),
+    (
+        # U+FF5C sorts after U+20000 in UTF-16 code units (Kotlin's default String order) but
+        # before it in UTF-8 bytes / Swift code-point order. Both platforms order by UTF-8 bytes.
+        "non-bmp-paths-order-by-utf8-bytes",
+        {"\uff5c.txt": b"a", "\U00020000.txt": b"b"},
+        "sha256:1bdde4f0c05aede5c689f0d21f6524bbc4479a795416930c129a33a10733ce8f",
+    ),
 ]
 
 

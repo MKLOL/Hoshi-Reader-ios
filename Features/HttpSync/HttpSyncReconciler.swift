@@ -1021,6 +1021,12 @@ struct HttpSyncReconciler {
             cachedSha = try await payloadCodec.ensurePayloadContentSha(bookRoot: root)
         }
         if let remoteContentSha = remote.contentSha256, cachedSha == remoteContentSha { return false }
+        // The server still points at the exact archive this install uploaded or installed, so the
+        // content-hash disagreement is a derivation difference between clients, never new content.
+        // Chasing it with a download would have two clients that hash differently trade the same
+        // archive back and forth forever. (A manifest with no content hash at all is still
+        // downloaded once so the verified hash gets published.)
+        if remote.contentSha256 != nil, remote.sha256 == payloadCodec.cachedZipSha(bookRoot: root) { return false }
         // The cached baseline disagrees with the server. Re-derive it from the bytes on disk
         // before paying for a download: a stale or mis-derived sidecar (every one written by
         // builds through 0.11.3) is far cheaper to fix locally than a replacement that installs

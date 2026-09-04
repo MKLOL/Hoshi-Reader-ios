@@ -43,14 +43,15 @@ class BookshelfViewModel {
     /// so the shelf shows them blank. Generate one the first time we encounter such a book —
     /// mokuro: a page-1 thumbnail; EPUB: a copy of the manifest cover from inside the book — then
     /// persist it so this runs at most once per book. Also heals a metadata cover whose file no
-    /// longer exists (a payload replacement may have wiped a receiver-generated cover).
+    /// longer exists (deleted by hand, or lost to a failed cover migration). A book that yields
+    /// no cover is remembered for the life of the process so the shelf never re-parses it.
     /// Writes the hash-excluded `FileNames.generatedCover`, never a payload-visible name — a
     /// receiver-generated file inside the content hash would make this payload mismatch the
     /// origin's forever. Tolerant of any per-book failure.
     private func backfillMissingCovers() {
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return }
         for i in books.indices {
-            guard let folder = books[i].folder else { continue }
+            guard let folder = books[i].folder, !coverBackfillFailed.contains(folder) else { continue }
             let root = booksDir.appendingPathComponent(folder)
             if let cover = books[i].cover {
                 let coverName = (cover as NSString).lastPathComponent
@@ -59,11 +60,18 @@ class BookshelfViewModel {
                     continue
                 }
             }
-            guard let generated = generateCover(root: root) else { continue }
+            guard let generated = generateCover(root: root) else {
+                coverBackfillFailed.insert(folder)
+                continue
+            }
             books[i].cover = "Books/\(folder)/\(generated)"
             try? BookStorage.save(books[i], inside: root, as: FileNames.metadata)
         }
     }
+
+    /// Books whose cover generation already failed this process; an EPUB parse per shelf
+    /// appearance on the main actor is far too expensive to repeat for the same answer.
+    private var coverBackfillFailed: Set<String> = []
 
     /// Writes `FileNames.generatedCover` into `root` for either format. Returns the filename on
     /// success (an already-present generated cover counts), nil when no cover could be produced.
