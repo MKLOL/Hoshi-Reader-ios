@@ -134,6 +134,15 @@ nonisolated struct HttpSyncPayloadCodec {
         )
     }
 
+    /// Records the archive `bookRoot`'s content is known to equal. Uploads and installs write it
+    /// beside the unpacked book; callers that prove an already-held book matches the server's
+    /// archive without installing anything (a verify-only download, or a local re-hash that agrees
+    /// with the manifest) must record it too, or a book that predates this sidecar never gains the
+    /// baseline that stops cross-platform hash disagreements from re-downloading it.
+    func rememberZipSha(bookRoot: URL, sha: String) {
+        Self.writeZipSha(bookRoot: bookRoot, sha: sha)
+    }
+
     /// Establishes the baseline for an upgraded client that already has this book offline.
     func rememberPayloadSha(bookRoot: URL, sha: String) throws {
         guard sha.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
@@ -350,9 +359,10 @@ nonisolated struct HttpSyncPayloadCodec {
         expectedFormat: ContentType,
         targetDir: URL
     ) async throws -> HttpSyncPayloadManifest {
-        guard let manifest = try await fetchManifest(transport: transport, keys: keys) else {
+        guard let fetchedManifest = try await transport.get(key: keys.manifest) else {
             throw HttpSyncError("No payload manifest for \(syncId).")
         }
+        let manifest = try Self.decodeManifest(fetchedManifest, keys: keys)
         guard manifest.format == expectedFormat else {
             throw HttpSyncError(
                 "Payload manifest for \(syncId) declares \(manifest.format.rawValue), "
@@ -397,25 +407,28 @@ nonisolated struct HttpSyncPayloadCodec {
         // whose derivation differed (this app through 0.11.3), so it is corrected rather than
         // treated as corruption.
         if manifest.contentSha256 != contentSha {
-            try await repairManifest(transport: transport, keys: keys, verifiedAgainst: manifest, verified: verified)
+            try await repairManifest(transport: transport, keys: keys, verifiedAgainst: fetchedManifest.body, verified: verified)
         }
         Self.writeZipSha(bookRoot: targetDir, sha: manifest.sha256)
         return verified
     }
 
-    /// Republishes `verified` only while the server still holds exactly `verifiedAgainst`, the
-    /// manifest the archive was checked against. Another device may have published a new archive
-    /// during this download; overwriting its manifest with the old sha256 and size would break the
-    /// book for every device until that publisher syncs again. A failed repair just repeats on the
+    /// Republishes `verified` only while the server still serves byte-for-byte the manifest the
+    /// archive was checked against (`verifiedAgainst`, its raw body). Another device may have
+    /// published a new archive during this download; overwriting its manifest with the old sha256
+    /// and size would break the book for every device until that publisher syncs again. The raw
+    /// bytes are compared rather than decoded fields so a rewrite this client cannot represent (an
+    /// unknown field, a different note) is never clobbered either. The KV API has no conditional
+    /// PUT, so this re-fetch is the narrowest window available. A failed repair just repeats on the
     /// next sync; cancellation still propagates.
     private func repairManifest(
         transport: HttpSyncKvTransport,
         keys: HttpSyncPayloadKeys,
-        verifiedAgainst: HttpSyncPayloadManifest,
+        verifiedAgainst: Data,
         verified: HttpSyncPayloadManifest
     ) async throws {
         do {
-            guard try await fetchManifest(transport: transport, keys: keys) == verifiedAgainst else { return }
+            guard let current = try await transport.get(key: keys.manifest), current.body == verifiedAgainst else { return }
             try await publishVerifiedContentSha(transport: transport, keys: keys, manifest: verified)
         } catch is CancellationError {
             throw CancellationError()
@@ -431,8 +444,12 @@ nonisolated struct HttpSyncPayloadCodec {
         keys: HttpSyncPayloadKeys
     ) async throws -> HttpSyncPayloadManifest? {
         guard let fetched = try await transport.get(key: keys.manifest) else { return nil }
+        return try Self.decodeManifest(fetched, keys: keys)
+    }
+
+    private static func decodeManifest(_ fetched: HttpSyncKvFetched, keys: HttpSyncPayloadKeys) throws -> HttpSyncPayloadManifest {
         do {
-            return try Self.jsonDecoder.decode(HttpSyncPayloadManifest.self, from: fetched.body)
+            return try jsonDecoder.decode(HttpSyncPayloadManifest.self, from: fetched.body)
         } catch {
             throw HttpSyncError("Manifest at \(keys.manifest): malformed JSON.")
         }

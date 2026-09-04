@@ -1032,7 +1032,12 @@ struct HttpSyncReconciler {
         // builds through 0.11.3) is far cheaper to fix locally than a replacement that installs
         // identical content.
         let localSha = try await payloadCodec.refreshPayloadContentSha(bookRoot: root)
-        if let remoteContentSha = remote.contentSha256, localSha == remoteContentSha { return false }
+        if let remoteContentSha = remote.contentSha256, localSha == remoteContentSha {
+            // The bytes on disk are the archive the manifest describes, so a book that predates
+            // the archive sidecar gains the baseline the guard above needs.
+            payloadCodec.rememberZipSha(bookRoot: root, sha: remote.sha256)
+            return false
+        }
         if let remoteContentSha = remote.contentSha256 {
             // Candidate receiver-materialized covers: the mokuro convention plus whatever file
             // this book's metadata actually points at (EPUB covers use the manifest basename).
@@ -1082,6 +1087,9 @@ struct HttpSyncReconciler {
                 throw HttpSyncError("Downloaded payload did not produce a verified content hash.")
             }
             if localSha == verifiedRemoteSha {
+                // Staging is discarded here; the real book root holds this exact archive, so
+                // remember it there or the next foreign hash costs this download again.
+                payloadCodec.rememberZipSha(bookRoot: root, sha: manifest.sha256)
                 try? FileManager.default.removeItem(at: staging)
                 return false
             }

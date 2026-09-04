@@ -41,7 +41,16 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
     @MainActor
     func testFreshInstallSyncsEverythingAndroidPublished() async throws {
         try await prepare()
+        // Android's hashes, read from the fixture BEFORE syncing: the import path corrects a
+        // manifest it disagrees with, so a manifest fetched afterwards would only echo this
+        // client's own derivation.
+        let androidManga = try fixtureManifest(SyncKeys.payloadManifest(Self.mangaSyncId))
+        let androidNovel = try fixtureManifest(SyncKeys.epubManifest(Self.novelSyncId))
+        try await clearServerRequests()
         await syncNow()
+
+        let manifestWrites = try await serverRequests().filter { $0.method == "PUT" && $0.path.hasSuffix(".manifest") }
+        XCTAssertEqual(manifestWrites.count, 0, "the first sync must accept Android's manifests as-is: \(manifestWrites)")
 
         let books = try BookStorage.loadAllBooks()
         XCTAssertEqual(Set(books.compactMap(\.syncId)), [Self.mangaSyncId, Self.novelSyncId])
@@ -56,7 +65,7 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertEqual(AiChatHistoryStore.shared.load(folder: manga.root.lastPathComponent).entries.map(\.response), ["Hello"])
         XCTAssertTrue(exists(manga.root, FileNames.pretranslations), "offline bubble translations landed")
         XCTAssertNotNil(manga.metadata.cover, "shelf cover resolved")
-        try await assertContentHashMatchesAndroid(root: manga.root, manifestKey: SyncKeys.payloadManifest(Self.mangaSyncId))
+        try await assertContentHashMatchesAndroid(root: manga.root, android: androidManga, manifestKey: SyncKeys.payloadManifest(Self.mangaSyncId))
 
         let novel = try book(Self.novelSyncId)
         XCTAssertEqual(ContentType.detect(bookDir: novel.root), .epub)
@@ -65,7 +74,7 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertTrue(exists(novel.root, FileNames.sentenceTranslations), "sentence translations landed")
         XCTAssertGreaterThan(BookStorage.loadBookInfo(root: novel.root)?.characterCount ?? 0, 0, "progress derivable before first open")
         XCTAssertNotNil(novel.metadata.cover)
-        try await assertContentHashMatchesAndroid(root: novel.root, manifestKey: SyncKeys.epubManifest(Self.novelSyncId))
+        try await assertContentHashMatchesAndroid(root: novel.root, android: androidNovel, manifestKey: SyncKeys.epubManifest(Self.novelSyncId))
     }
 
     @MainActor
@@ -197,13 +206,30 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertEqual(manager.lastErrors, [], "sync errors", file: file, line: line)
     }
 
+    /// `android` is the manifest the fixture holds, i.e. what the Android client published; the
+    /// server's copy after a sync would already carry whatever this client wrote back.
     @MainActor
-    private func assertContentHashMatchesAndroid(root: URL, manifestKey: String, file: StaticString = #filePath, line: UInt = #line) async throws {
-        let remote = try await manifest(manifestKey)
+    private func assertContentHashMatchesAndroid(root: URL, android: HttpSyncPayloadManifest, manifestKey: String, file: StaticString = #filePath, line: UInt = #line) async throws {
+        XCTAssertNotNil(android.contentSha256, "the fixture manifest carries Android's content hash", file: file, line: line)
         let recomputed = try HttpSyncPayloadCodec.contentSha(bookRoot: root)
-        XCTAssertEqual(recomputed, remote.contentSha256, "iOS hash of the unpacked book must equal Android's manifest hash", file: file, line: line)
-        XCTAssertEqual(HttpSyncPayloadCodec().cachedPayloadSha(bookRoot: root), remote.contentSha256, "cached baseline", file: file, line: line)
+        XCTAssertEqual(recomputed, android.contentSha256, "iOS hash of the unpacked book must equal Android's manifest hash", file: file, line: line)
+        XCTAssertEqual(HttpSyncPayloadCodec().cachedPayloadSha(bookRoot: root), android.contentSha256, "cached baseline", file: file, line: line)
+        XCTAssertEqual(HttpSyncPayloadCodec().cachedZipSha(bookRoot: root), android.sha256, "archive baseline", file: file, line: line)
+        let remote = try await manifest(manifestKey)
+        XCTAssertEqual(remote, android, "the server still holds exactly what Android published", file: file, line: line)
     }
+
+    /// A manifest exactly as the fixture (the Android-published server snapshot) stores it.
+    private func fixtureManifest(_ key: String) throws -> HttpSyncPayloadManifest {
+        let snapshot = try JSONDecoder().decode(FixtureSnapshot.self, from: corpus)
+        guard let entry = snapshot.entries.first(where: { $0.key == key }), let body = Data(base64Encoded: entry.body) else {
+            throw NSError(domain: "SyncIntegrationTests", code: 3, userInfo: [NSLocalizedDescriptionKey: "\(key) missing from the fixture"])
+        }
+        return try JSONDecoder().decode(HttpSyncPayloadManifest.self, from: body)
+    }
+
+    private struct FixtureEntry: Decodable { let key: String; let body: String }
+    private struct FixtureSnapshot: Decodable { let entries: [FixtureEntry] }
 
     // MARK: - Server access (production client for the API, plain URLSession for test hooks)
 
