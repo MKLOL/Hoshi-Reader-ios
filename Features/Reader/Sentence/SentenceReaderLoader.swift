@@ -64,15 +64,17 @@ nonisolated enum SentenceReaderLoader {
             return SentenceChapterSource(
                 spineIndex: index,
                 url: readable ? document.contentDirectory.appendingPathComponent(path) : nil,
-                tocTitle: titles[path]
+                tocTitle: tocTitle(for: path, in: titles)
             )
         }
     }
 
-    /// Reads and segments every readable chapter. Safe to call off the main actor.
+    /// Reads and segments every readable chapter. Safe to call off the main actor. Stops early
+    /// once the surrounding task is cancelled; the caller discards the partial book.
     static func segment(sources: [SentenceChapterSource]) -> SentenceBook {
         SentenceBook(chapters: sources.map { source in
-            guard let url = source.url,
+            guard !Task.isCancelled,
+                  let url = source.url,
                   let html = try? String(contentsOf: url, encoding: .utf8) else {
                 return SentenceChapter(chapterIndex: source.spineIndex, title: source.tocTitle, sentences: [])
             }
@@ -86,17 +88,24 @@ nonisolated enum SentenceReaderLoader {
         })
     }
 
-    /// Flattened `href -> label`, first label wins — the same convention `ChapterListViewModel`
-    /// uses to map a TOC entry onto a spine item.
-    private static func tocTitles(_ items: [EPUBTableOfContents]) -> [String: String] {
-        var out: [String: String] = [:]
+    /// Flattened `(href, label)` in document order, first label wins.
+    private static func tocTitles(_ items: [EPUBTableOfContents]) -> [(href: String, label: String)] {
+        var out: [(href: String, label: String)] = []
+        var seen: Set<String> = []
         func walk(_ item: EPUBTableOfContents) {
-            if let href = item.item?.components(separatedBy: "#").first, out[href] == nil {
-                out[href] = item.label
+            if let href = item.item?.components(separatedBy: "#").first, seen.insert(href).inserted {
+                out.append((href, item.label))
             }
             for child in item.subTable ?? [] { walk(child) }
         }
         for item in items { walk(item) }
         return out
+    }
+
+    /// The Chapters sheet's rule (`ChapterListViewModel.findSpineIndex`): an exact match first,
+    /// otherwise the TOC path and the manifest path may differ by a leading folder.
+    private static func tocTitle(for path: String, in titles: [(href: String, label: String)]) -> String? {
+        if let exact = titles.first(where: { $0.href == path }) { return exact.label }
+        return titles.first(where: { path.hasSuffix($0.href) || $0.href.hasSuffix(path) })?.label
     }
 }

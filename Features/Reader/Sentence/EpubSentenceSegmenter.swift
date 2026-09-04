@@ -82,6 +82,8 @@ nonisolated enum EpubSentenceSegmenter {
     /// gate instead, so that `<svg><title>` inside the body still counts.
     private static let skipTags: Set<String> = ["rt", "rp", "script", "style"]
     private static let furiganaTags: Set<String> = ["rt", "rp"]
+    /// `html.parser`'s CDATA_CONTENT_ELEMENTS: their content is raw text until the end tag.
+    private static let rawTextTags: Set<String> = ["script", "style"]
     private static let headingTags: Set<String> = ["h1", "h2", "h3", "h4", "h5", "h6"]
 
     // MARK: - Entry points
@@ -153,7 +155,11 @@ nonisolated enum EpubSentenceSegmenter {
     /// hands the tool, and it matters: a terminator only swallows the trailing brackets that sit in
     /// its own run, so `<p>「あ！<em>」</em></p>` is two sentences on both sides.
     ///
-    /// Tolerant of the markup real books ship: unclosed tags, stray `<`, mismatched furigana.
+    /// It follows `html.parser` where it matters for offsets: `script`/`style` content is raw text
+    /// (a `<` inside it is not a tag), a `<` that starts no markup is text of its own, comments,
+    /// declarations and `<![CDATA[…]]>` sections are skipped whole, and every text run is decoded
+    /// like `html.unescape`. Tolerant of the markup real books ship: unclosed tags, mismatched
+    /// furigana.
     static func extractParts(_ html: String) -> Extraction {
         var parts: [String?] = []
         var heading = ""
@@ -165,11 +171,16 @@ nonisolated enum EpubSentenceSegmenter {
         // may be handed a chapter that was already unwrapped.
         var inBody = html.range(of: "<body", options: [.caseInsensitive, .literal]) == nil
 
+        // The tool's handle_data: text only counts inside <body> and outside skipped subtrees.
+        func emit(_ data: String) {
+            guard skipStack.isEmpty, inBody else { return }
+            parts.append(data)
+            if headingDepth > 0 { headingChunks += data }
+        }
+
         func flushText() {
             guard !pending.isEmpty else { return }
-            let decoded = decodeEntities(String(pending))
-            parts.append(decoded)
-            if headingDepth > 0 { headingChunks += decoded }
+            emit(decodeEntities(String(pending)))
             pending = String.UnicodeScalarView()
         }
 
@@ -180,36 +191,38 @@ nonisolated enum EpubSentenceSegmenter {
 
         let scalars = Array(html.unicodeScalars)
         let count = scalars.count
+
+        func skipPast(_ marker: String, from: Int) -> Int {
+            find(scalars, from: from, marker).map { $0 + marker.unicodeScalars.count } ?? count
+        }
+
         var index = 0
         while index < count {
             if scalars[index] != "<" {
                 var next = index
                 while next < count, scalars[next] != "<" { next += 1 }
-                if skipStack.isEmpty, inBody { pending.append(contentsOf: scalars[index..<next]) }
+                pending.append(contentsOf: scalars[index..<next])
                 index = next
                 continue
             }
-            // Every tag, comment or declaration ends the current text run, exactly as the parser's
-            // data callback does.
+            // Every piece of markup ends the current text run, exactly like the parser's data
+            // callback; what does not parse as markup is text of its own.
             flushText()
+            let next: Unicode.Scalar? = index + 1 < count ? scalars[index + 1] : nil
             if matches(scalars, at: index, "<!--") {
-                index = find(scalars, from: index + 4, "-->").map { $0 + 3 } ?? count
-                continue
-            }
-            if matches(scalars, at: index, "<!") || matches(scalars, at: index, "<?") {
-                index = firstIndex(of: ">", in: scalars, from: index).map { $0 + 1 } ?? count
-                continue
-            }
-            guard let end = tagEnd(scalars, from: index) else { break }
-            let raw = String(String.UnicodeScalarView(scalars[(index + 1)..<end]))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            index = end + 1
-            let closing = raw.hasPrefix("/")
-            let selfClosing = !closing && raw.hasSuffix("/")
-            let name = tagName(raw)
-            if name.isEmpty { continue }
-
-            if !closing {
+                index = skipPast("-->", from: index + 4)
+            } else if matches(scalars, at: index, "<![") {
+                index = skipPast("]]>", from: index + 3)
+            } else if next == "!" || next == "?" {
+                index = skipPast(">", from: index + 2)
+            } else if let next, isAsciiLetter(next) {
+                // An unfinished tag at the end of the file is dropped, as the parser drops it.
+                guard let end = tagEnd(scalars, from: index) else { break }
+                let raw = String(String.UnicodeScalarView(scalars[(index + 1)..<end]))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                index = end + 1
+                let selfClosing = raw.hasSuffix("/")
+                let name = tagName(raw)
                 if name == "body" { inBody = true }
                 if skipTags.contains(name) {
                     if selfClosing { continue } // a self-closing skip tag has no content
@@ -218,13 +231,25 @@ nonisolated enum EpubSentenceSegmenter {
                         skipStack.removeLast()
                     }
                     skipStack.append(name)
+                    if rawTextTags.contains(name) { index = rawTextEnd(scalars, from: index, name: name) }
                     continue
                 }
                 if !skipStack.isEmpty { continue }
                 if blockTags.contains(name) { boundary() }
                 // A self-closing block tag emits one boundary, not two, and never opens a heading.
                 if !selfClosing, headingTags.contains(name), heading.isEmpty { headingDepth += 1 }
-            } else {
+            } else if next == "/" {
+                if matches(scalars, at: index, "</>") {
+                    index += 3
+                    continue
+                }
+                guard let end = firstIndex(of: ">", in: scalars, from: index + 2) else { break }
+                let raw = String(String.UnicodeScalarView(scalars[(index + 2)..<end]))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                index = end + 1
+                // `</` followed by anything but a letter is a bogus comment, skipped whole.
+                guard let first = raw.unicodeScalars.first, isAsciiLetter(first) else { continue }
+                let name = tagName(raw)
                 if skipTags.contains(name) {
                     if skipStack.contains(name) {
                         while let popped = skipStack.popLast(), popped != name {}
@@ -244,6 +269,10 @@ nonisolated enum EpubSentenceSegmenter {
                         headingChunks = ""
                     }
                 }
+            } else {
+                // `<` followed by anything else is text, delivered as a run of its own.
+                emit("<")
+                index += 1
             }
         }
         flushText()
@@ -365,55 +394,125 @@ nonisolated enum EpubSentenceSegmenter {
         return String(out)
     }
 
-    /// The named references that appear in real EPUB text, plus every numeric reference.
-    ///
-    /// Numeric references are the ones that matter for correctness: `&#12354;` left undecoded is
-    /// the five matchable digits `12354`, which would shift every offset after it in the chapter.
-    /// The named set is pinned to the Android port's table so the two apps agree character for
-    /// character.
-    private static let namedEntities: [String: String] = [
-        "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": "\u{00A0}",
-        "hellip": "…", "mdash": "—", "ndash": "–", "ensp": "\u{2002}", "emsp": "\u{2003}",
-        "thinsp": "\u{2009}", "copy": "©", "reg": "®", "trade": "™", "laquo": "«", "raquo": "»",
-        "lsquo": "‘", "rsquo": "’", "ldquo": "“", "rdquo": "”", "middot": "·", "bull": "•",
-        "deg": "°", "times": "×",
-    ]
-
+        /// Python's `html.unescape`, which the tool's parser applies to every text run: named
+    /// references with the longest-prefix rule for the legacy semicolon-less names, numeric
+    /// references with or without `;`, and the standard's replacements for invalid code points.
     static func decodeEntities(_ text: String) -> String {
         guard text.contains("&") else { return text }
         let scalars = Array(text.unicodeScalars)
+        let count = scalars.count
         var out = String.UnicodeScalarView()
         var index = 0
-        while index < scalars.count {
+        while index < count {
             let scalar = scalars[index]
             guard scalar == "&" else {
                 out.append(scalar)
                 index += 1
                 continue
             }
-            guard let end = firstIndex(of: ";", in: scalars, from: index + 1), end - index <= 12 else {
+            if index + 1 < count, scalars[index + 1] == "#" {
+                let hex = index + 2 < count && (scalars[index + 2] == "x" || scalars[index + 2] == "X")
+                let digitsStart = hex ? index + 3 : index + 2
+                var end = digitsStart
+                while end < count, hex ? isHexDigit(scalars[end]) : isDigit(scalars[end]) { end += 1 }
+                if end == digitsStart {
+                    out.append(scalar)
+                    index += 1
+                    continue
+                }
+                var value: UInt32 = 0
+                for digit in scalars[digitsStart..<end] {
+                    value = value * (hex ? 16 : 10) + digitValue(digit)
+                    if value > 0x10FFFF { value = 0x110000 } // saturate: anything above is U+FFFD
+                }
+                if end < count, scalars[end] == ";" { end += 1 }
+                out.append(contentsOf: numericReference(value).unicodeScalars)
+                index = end
+                continue
+            }
+            // A name: up to 32 scalars that are not `\t \n \f space < & # ;`, then an optional `;`.
+            var end = index + 1
+            while end < count, end - (index + 1) < 32, !nameStop.contains(scalars[end]) { end += 1 }
+            if end == index + 1 {
                 out.append(scalar)
                 index += 1
                 continue
             }
-            let body = String(String.UnicodeScalarView(scalars[(index + 1)..<end]))
-            let decoded: String?
-            if body.lowercased().hasPrefix("#x") {
-                decoded = UInt32(body.dropFirst(2), radix: 16).flatMap(Unicode.Scalar.init).map { String($0) }
-            } else if body.hasPrefix("#") {
-                decoded = UInt32(body.dropFirst()).flatMap(Unicode.Scalar.init).map { String($0) }
-            } else {
-                decoded = namedEntities[body]
+            let hasSemicolon = end < count && scalars[end] == ";"
+            let nameEnd = hasSemicolon ? end + 1 : end
+            let nameScalars = Array(scalars[(index + 1)..<nameEnd])
+            index = nameEnd
+            if let exact = HtmlEntities.table[String(String.UnicodeScalarView(nameScalars))] {
+                out.append(contentsOf: exact.unicodeScalars)
+                continue
             }
-            if let decoded {
-                out.append(contentsOf: decoded.unicodeScalars)
-                index = end + 1
-            } else {
-                out.append(scalar)
-                index += 1
+            var replaced = false
+            var length = nameScalars.count - 1
+            while length >= 2 {
+                if let value = HtmlEntities.table[String(String.UnicodeScalarView(nameScalars[0..<length]))] {
+                    out.append(contentsOf: value.unicodeScalars)
+                    out.append(contentsOf: nameScalars[length...])
+                    replaced = true
+                    break
+                }
+                length -= 1
+            }
+            if !replaced {
+                out.append("&")
+                out.append(contentsOf: nameScalars)
             }
         }
         return String(out)
+    }
+
+    private static let nameStop: Set<Unicode.Scalar> = Set("\t\n\u{0C} <&#;".unicodeScalars)
+
+    private static func isDigit(_ scalar: Unicode.Scalar) -> Bool { ("0"..."9").contains(scalar) }
+
+    private static func isHexDigit(_ scalar: Unicode.Scalar) -> Bool {
+        isDigit(scalar) || ("a"..."f").contains(scalar) || ("A"..."F").contains(scalar)
+    }
+
+    private static func isAsciiLetter(_ scalar: Unicode.Scalar) -> Bool {
+        ("a"..."z").contains(scalar) || ("A"..."Z").contains(scalar)
+    }
+
+    private static func digitValue(_ scalar: Unicode.Scalar) -> UInt32 {
+        switch scalar {
+        case "0"..."9": return scalar.value - 48
+        case "a"..."f": return scalar.value - 97 + 10
+        case "A"..."F": return scalar.value - 65 + 10
+        default: return 0
+        }
+    }
+
+    private static func numericReference(_ code: UInt32) -> String {
+        if let replacement = HtmlEntities.invalidCharrefs[code] { return replacement }
+        if (0xD800...0xDFFF).contains(code) || code > 0x10FFFF { return "\u{FFFD}" }
+        if HtmlEntities.isInvalidCodepoint(code) { return "" }
+        return Unicode.Scalar(code).map { String($0) } ?? "\u{FFFD}"
+    }
+
+    /// Where a `<script>`/`<style>` element's raw text ends: at `</script` (any case) followed by
+    /// whitespace, `/` or `>`, like the parser's CDATA mode. The end tag itself is left for the
+    /// main loop, which pops the skip stack. No end tag means the rest of the file is script.
+    private static func rawTextEnd(_ scalars: [Unicode.Scalar], from start: Int, name: String) -> Int {
+        let closer = Array(("</" + name).unicodeScalars)
+        var index = max(start, 0)
+        while index + closer.count <= scalars.count {
+            var hit = true
+            for offset in 0..<closer.count {
+                let scalar = scalars[index + offset]
+                let lowered = ("A"..."Z").contains(scalar) ? Unicode.Scalar(scalar.value + 32)! : scalar
+                if lowered != closer[offset] { hit = false; break }
+            }
+            if hit {
+                let after = index + closer.count < scalars.count ? scalars[index + closer.count] : nil
+                if after == nil || after == ">" || after == "/" || after!.properties.isWhitespace { return index }
+            }
+            index += 1
+        }
+        return scalars.count
     }
 
     // MARK: - Scanning helpers

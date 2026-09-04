@@ -34,14 +34,20 @@ nonisolated enum SentenceReaderPositionStore {
         readAll()[bookKey]
     }
 
+    /// Every save runs on one serial queue, off the caller's actor: a swipe never waits on the
+    /// file, and two quick swipes cannot interleave their read-modify-write and keep the older one.
+    private static let queue = DispatchQueue(label: "moe.antimony.hoshi.sentence-positions", qos: .utility)
+
     static func save(_ position: SentencePosition, bookKey: String) {
         guard let fileURL else { return }
-        var all = readAll()
-        guard all[bookKey] != position else { return }
-        all[bookKey] = position
-        guard let data = try? JSONEncoder().encode(all) else { return }
-        // Atomic: a half-written map would lose every book's cursor, not just this one's.
-        try? data.write(to: fileURL, options: .atomic)
+        queue.async {
+            var all = readAll()
+            guard all[bookKey] != position else { return }
+            all[bookKey] = position
+            guard let data = try? JSONEncoder().encode(all) else { return }
+            // Atomic: a half-written map would lose every book's cursor, not just this one's.
+            try? data.write(to: fileURL, options: .atomic)
+        }
     }
 
     private static func readAll() -> [String: SentencePosition] {

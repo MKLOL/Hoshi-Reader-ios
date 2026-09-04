@@ -42,7 +42,9 @@ struct SentenceReaderView: View {
     /// Longest query handed to the dictionary from a tap; `scanLength` trims it further.
     private static let maxTapQueryChars = 32
     private static let fontSizeStep = 2
-    private static let fontSizeRange = 10...60
+    /// The reader's Appearance sheet allows 16...40; `fontSize` is shared, so the steppers here
+    /// must not push the web reader to a size that sheet cannot produce.
+    private static let fontSizeRange = 16...40
     private static let rootSpace = "sentenceReaderRoot"
 
     private enum LoadState {
@@ -67,7 +69,7 @@ struct SentenceReaderView: View {
                 guard case let .ready(book) = state, let sentence = book.sentence(at: current) else { return nil }
                 return translations?.translation(for: sentence)
             }
-            if let new { SentenceReaderPositionStore.save(new, bookKey: bookKey) }
+            if let new { SentenceReaderPositionStore.save(new, bookKey: bookKey) } // queued off the main actor
         }
         .sheet(isPresented: $showAppearance) {
             AppearanceView(userConfig: userConfig, showDismiss: true)
@@ -245,8 +247,12 @@ struct SentenceReaderView: View {
         let key = bookKey
         let anchor = bookmark
 
-        let loaded = await Task.detached(priority: .userInitiated) {
+        // Detached so a novel's segmentation and the blob decode stay off the main actor, but
+        // tied to this view's `.task`: leaving the screen cancels the work instead of letting it
+        // finish and write into a dismissed view.
+        let work = Task.detached(priority: .userInitiated) { () -> (SentenceBook, SentenceTranslationSource?, SentencePosition?, SentenceTranslation?)? in
             let segmented = SentenceReaderLoader.segment(sources: sources)
+            guard !Task.isCancelled else { return nil }
             var source: SentenceTranslationSource?
             if let folder, let bookSyncId,
                EpubTranslationStore.shared.preload(
@@ -263,7 +269,13 @@ struct SentenceReaderView: View {
             )
             let first = start.flatMap { segmented.sentence(at: $0) }.flatMap { source?.translation(for: $0) }
             return (segmented, source, start, first)
-        }.value
+        }
+        let loaded = await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
+        }
+        guard let loaded, !Task.isCancelled else { return }
 
         translations = loaded.1
         position = loaded.2
@@ -370,7 +382,7 @@ struct SentenceReaderView: View {
             lookupResults: lookupResults,
             dictionaryStyles: LookupEngine.shared.getStylesMap(),
             isVertical: false,
-            isFullWidth: false,
+            isFullWidth: userConfig.popupFullWidth,
             clearSelection: false
         )
         popups.append(popup)

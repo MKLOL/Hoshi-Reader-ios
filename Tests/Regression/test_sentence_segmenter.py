@@ -33,6 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SEGMENTER_SOURCE = ROOT / "Features/Reader/Sentence/EpubSentenceSegmenter.swift"
+ENTITIES_SOURCE = ROOT / "Features/Reader/Sentence/HtmlEntities.swift"
 TRANSLATION_STORE_SOURCE = ROOT / "Features/AI/EpubTranslationStore.swift"
 PRETRANSLATE = ROOT / "tools/pretranslate"
 
@@ -135,6 +136,64 @@ VECTORS = [
         True,
     ),
     (
+        # U+FA11 is a compatibility ideograph the tool's \p{Unified_Ideograph} matches; the old
+        # reader filter did not, and every address after it drifted by one.
+        "compat-ideographs-are-matchable",
+        0,
+        chapter("<p>山﨑さん。次。</p>"),
+        [("c0s0", 4, "山﨑さん。"), ("c0s4", 1, "次。")],
+        None,
+        True,
+    ),
+    (
+        # The tool decodes every HTML5 name (html.unescape), not a hand-picked few: an undecoded
+        # name is ASCII letters, i.e. matchable, and shifts every address after it.
+        "html5-named-entities-decode",
+        0,
+        chapter("<p>caf&eacute; は良い。&yen;100だ。次の文。</p>"),
+        [("c0s0", 6, "café は良い。"), ("c0s6", 4, "¥100だ。"), ("c0s10", 3, "次の文。")],
+        None,
+        True,
+    ),
+    (
+        # Legacy semicolon-less names, numeric references without `;`, the longest-prefix rule
+        # (`&notit;` is `¬` + `it;`) and the standard's invalid-reference replacements.
+        "legacy-and-numeric-entities-follow-html-unescape",
+        0,
+        chapter("<p>a&ampb。&#12354&#x3042;&notit;。&#128;&#0;&#x1;x。</p>"),
+        [("c0s0", 2, "a&b。"), ("c0s2", 4, "ああ¬it;。"), ("c0s6", 1, "€\ufffdx。")],
+        None,
+        True,
+    ),
+    (
+        # script/style content is raw text: a `<` inside it must not start a tag, or the end tag
+        # is swallowed and the whole chapter vanishes.
+        "script-and-style-content-is-raw-text",
+        0,
+        "<html><head><script>for(i=0;i<n;i++){}</script></head><body><p>本文。</p>"
+        "<script>if (a < b) {}</script><p>次。</p><style>a>b{}</style><p>三。</p></body></html>",
+        [("c0s0", 2, "本文。"), ("c0s2", 1, "次。"), ("c0s3", 1, "三。")],
+        [1, 3, 5],
+        True,
+    ),
+    (
+        # A `<` that starts no markup is text; CDATA sections and comments are skipped whole.
+        "stray-less-than-cdata-and-comments",
+        0,
+        chapter("<p>if a < b then。次。</p><p>第一<![CDATA[x > y]]>章。<!-- 。 -->終。</p>"),
+        [("c0s0", 8, "if a < b then。"), ("c0s8", 1, "次。"), ("c0s9", 3, "第一章。"), ("c0s12", 1, "終。")],
+        None,
+        True,
+    ),
+    (
+        "unknown-entities-survive-and-nbsp-collapses",
+        0,
+        chapter("<p>&bogus; a&nbsp;b。</p>"),
+        [("c0s0", 7, "&bogus; a b。")],
+        None,
+        True,
+    ),
+    (
         # `html.parser` gates every text node on having seen `<body>`, so the tool sees nothing
         # here. Both apps treat a body-less fragment as all body instead, because the reader can be
         # handed a chapter that was already unwrapped. Swift-only on purpose.
@@ -150,6 +209,13 @@ VECTORS = [
 ENTITY_VECTORS = [
     ("a&lt;b&gt;&amp;&quot;&apos;&hellip;&#x78;", "a<b>&\"'…x"),
     ("&bogus; &", "&bogus; &"),
+    ("a&ampb", "a&b"),
+    ("&notit;", "¬it;"),
+    ("&#128;&#0;&#x1;", "€\ufffd"),
+    ("&amp\r", "&\r"),
+    ("&" + "a" * 40 + ";", "&" + "a" * 40 + ";"),
+    ("&#x110000;&#xD800;&#99999999999999999999;", "\ufffd\ufffd\ufffd"),
+    ("&Tab;&NewLine;&#65;", "\t\nA"),
 ]
 
 MATCHABLE_COUNT_VECTORS = [("「今日は」", 1, 0), ("「今日は」", 3, 2), ("「今日は」", 99, 3)]
@@ -269,7 +335,7 @@ class SentenceSegmenterParityTest(unittest.TestCase):
         harness.write_text(build_harness_source(), encoding="utf-8")
         cls.binary = cls.workdir / "harness"
         subprocess.run(
-            ["swiftc", "-O", "-o", str(cls.binary), str(SEGMENTER_SOURCE), str(harness)],
+            ["swiftc", "-O", "-o", str(cls.binary), str(SEGMENTER_SOURCE), str(ENTITIES_SOURCE), str(harness)],
             check=True,
             capture_output=True,
             text=True,
