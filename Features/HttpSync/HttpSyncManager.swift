@@ -190,10 +190,11 @@ final class HttpSyncManager {
                 if let expected = transport.expectedLegacyEtags(
                     after: mapChanges.observedLegacyEtags
                 ), after == expected {
-                    _ = try await batchState.publishMaps(
+                    let published = try await batchState.publishMaps(
                         transport: transport,
                         acknowledgedLegacyEtags: expected
                     )
+                    result.downloadedBookmarks += published.downloadedBookmarks
                 }
             }
             catch { result.errors.append(error.localizedDescription) }

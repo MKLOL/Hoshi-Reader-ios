@@ -329,6 +329,15 @@ final class HttpSyncBatchState {
         let before = loadState()
         let captured = loadPending()
         let localBooks = (try? BookStorage.loadAllBooks()) ?? []
+        // The preflight fetched every shard before the reconcile imported remote-only books, so
+        // it could not place their positions yet. Apply the newest known position to the books
+        // that exist now; otherwise a fresh install's first "Sync now" leaves each imported book
+        // at the older legacy-key position until the next map pass.
+        let applied = try applyRemoteWinners(
+            remote: mergeShards(Array(before.bookmarkShards.values)),
+            local: readLocalBookmarks(books: localBooks),
+            books: localBooks
+        )
         let local = readLocalBookmarks(books: localBooks)
         let owned = merge(remote: before.ownedBookmarks, local: local)
         var books = cachedLocalBookHashes(books: localBooks)
@@ -360,7 +369,7 @@ final class HttpSyncBatchState {
         ))
         let completed = Dictionary(uniqueKeysWithValues: captured.map { ($0.key, $0.mutationId) })
         savePending(loadPending().filter { completed[$0.key] != $0.mutationId })
-        return HttpSyncMapChanges(uploadedBookmarks: local.count)
+        return HttpSyncMapChanges(uploadedBookmarks: local.count, downloadedBookmarks: applied)
     }
 
     /// A full reconcile may write legacy keys itself. Publish maps only after the observed
