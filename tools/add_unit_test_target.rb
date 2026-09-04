@@ -1,9 +1,14 @@
 # Adds the HoshiReaderTests unit-test bundle (hosted by the app) to the project and to the
-# shared scheme's Test action. Idempotent: re-running is a no-op once the target exists.
+# shared scheme's Test action, and keeps it in sync with the sources under Tests/Integration.
+# Idempotent and convergent: re-running creates nothing twice, adds any new test file, and
+# re-applies the mirrored build settings. Works from any working directory.
 require 'xcodeproj'
+
+Dir.chdir(File.expand_path('..', __dir__))
 
 PROJECT = 'Hoshi Reader.xcodeproj'
 TARGET_NAME = 'HoshiReaderTests'
+SOURCES = 'Tests/Integration'
 project = Xcodeproj::Project.open(PROJECT)
 app = project.targets.find { |t| t.name == 'Hoshi Reader' } or abort('app target not found')
 
@@ -11,13 +16,6 @@ test_target = project.targets.find { |t| t.name == TARGET_NAME }
 unless test_target
   test_target = project.new_target(:unit_test_bundle, TARGET_NAME, :ios, '18.6')
   test_target.add_dependency(app)
-  group = project.main_group.find_subpath('Tests/Integration', true)
-  group.set_source_tree('<group>')
-  group.set_path('Tests/Integration')
-  Dir.glob('Tests/Integration/*.swift').sort.each do |path|
-    ref = group.new_file(File.basename(path))
-    test_target.add_file_references([ref])
-  end
   test_target.build_configurations.each do |config|
     s = config.build_settings
     s['TEST_HOST'] = '$(BUILT_PRODUCTS_DIR)/Hoshi Reader.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Hoshi Reader'
@@ -30,17 +28,26 @@ unless test_target
     s['SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY'] = 'YES'
     s['GENERATE_INFOPLIST_FILE'] = 'YES'
     s['CODE_SIGN_STYLE'] = 'Automatic'
-    s['DEVELOPMENT_TEAM'] = 'XR83Z84FJZ'
+    s['DEVELOPMENT_TEAM'] = app.build_configurations.first.build_settings['DEVELOPMENT_TEAM'] || 'XR83Z84FJZ'
     s['IPHONEOS_DEPLOYMENT_TARGET'] = '18.6'
     s['TARGETED_DEVICE_FAMILY'] = '1,2'
     s['SWIFT_EMIT_LOC_STRINGS'] = 'NO'
     s['CURRENT_PROJECT_VERSION'] = '1'
     s['MARKETING_VERSION'] = '1.0'
   end
-  project.save
   puts "added target #{TARGET_NAME}"
-else
-  puts "target #{TARGET_NAME} already present"
+end
+
+# Source files: every Swift file under Tests/Integration compiles into the bundle.
+group = project.main_group.find_subpath(SOURCES, true)
+group.set_source_tree('<group>')
+group.set_path(SOURCES)
+compiled = test_target.source_build_phase.files_references.map { |ref| ref.real_path.to_s }
+Dir.glob("#{SOURCES}/*.swift").sort.each do |path|
+  next if compiled.include?(File.expand_path(path))
+  ref = group.files.find { |f| f.real_path.to_s == File.expand_path(path) } || group.new_file(File.basename(path))
+  test_target.add_file_references([ref])
+  puts "added #{path}"
 end
 
 # `@testable import Hoshi_Reader` compiles the app module's interface, which references the
@@ -70,6 +77,5 @@ unless already
   scheme.add_test_target(test_target)
   scheme.save!
   puts 'added test target to the shared scheme'
-else
-  puts 'scheme already tests the target'
 end
+puts 'ok'

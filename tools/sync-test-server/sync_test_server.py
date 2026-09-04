@@ -27,6 +27,9 @@ outside the client under test:
     POST   /_test/load                         replace the store with a snapshot
     GET    /_test/requests                     the request log since the last clear
     POST   /_test/requests/clear               clear the request log
+    POST   /_test/fail_next                    {"pathPrefix", "status", "method"?, "count"?, "body"?}:
+                                               fail the next `count` matching API requests
+    HEAD   /v1/kv/{key}                        headers only, like GET
 
 Run:  sync_test_server.py --port 0 --token secret [--state snapshot.json]
 Prints `SYNC_TEST_SERVER_READY port=<n>` on stdout once it is listening.
@@ -70,17 +73,37 @@ class Store:
         self.entries: dict[str, dict] = {}
         self.uploads: dict[str, dict] = {}
         self.requests: list[dict] = []
+        self.faults: list[dict] = []
         self._last_stamp = ""
 
     # -- stamps -------------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_stamp(stamp: str) -> tuple[_dt.datetime, bool] | None:
+        """Parses an RFC 3339 UTC stamp; the flag says whether it carried a fractional part."""
+        for pattern, fractional in (("%Y-%m-%dT%H:%M:%S.%fZ", True), ("%Y-%m-%dT%H:%M:%SZ", False)):
+            try:
+                return _dt.datetime.strptime(stamp, pattern), fractional
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _format_stamp(moment: _dt.datetime) -> str:
+        return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
     def _next_stamp(self) -> str:
-        now = _dt.datetime.now(_dt.timezone.utc)
-        stamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+        stamp = self._format_stamp(_dt.datetime.now(_dt.timezone.utc))
         if stamp <= self._last_stamp:
-            previous = _dt.datetime.strptime(self._last_stamp, "%Y-%m-%dT%H:%M:%S.%fZ")
-            bumped = previous + _dt.timedelta(milliseconds=1)
-            stamp = bumped.strftime("%Y-%m-%dT%H:%M:%S.") + f"{bumped.microsecond // 1000:03d}Z"
+            # Clients compare stamps as strings for the `since` filter, so the next stamp must
+            # sort after the last one textually. A loaded snapshot may carry stamps without a
+            # fractional part, and `…:00Z` sorts after `…:00.999Z`, so step a whole second past
+            # those. A stamp we cannot parse must never take the server down; just move past it.
+            parsed = self._parse_stamp(self._last_stamp)
+            if parsed is not None:
+                previous, fractional = parsed
+                step = _dt.timedelta(milliseconds=1) if fractional else _dt.timedelta(seconds=1)
+                stamp = self._format_stamp(previous + step)
         self._last_stamp = stamp
         return stamp
 
@@ -182,6 +205,7 @@ class Store:
             self.entries.clear()
             self.uploads.clear()
             self.requests.clear()
+            self.faults.clear()
 
     def dump(self) -> dict:
         with self.lock:
@@ -223,6 +247,26 @@ class Store:
         with self.lock:
             self.requests.append({"method": method, "path": path, "status": status, "size": size})
 
+    # -- fault injection -----------------------------------------------------------------
+
+    def add_fault(self, fault: dict) -> None:
+        with self.lock:
+            self.faults.append(fault)
+
+    def take_fault(self, method: str, path: str) -> dict | None:
+        """Consumes and returns the first armed fault matching this request, if any."""
+        with self.lock:
+            for index, fault in enumerate(self.faults):
+                if fault.get("method") and fault["method"] != method:
+                    continue
+                if not path.startswith(fault["pathPrefix"]):
+                    continue
+                fault["count"] -= 1
+                if fault["count"] <= 0:
+                    del self.faults[index]
+                return fault
+            return None
+
     def request_log(self) -> list[dict]:
         with self.lock:
             return list(self.requests)
@@ -245,15 +289,52 @@ class Handler(BaseHTTPRequestHandler):
         if os.environ.get("SYNC_TEST_SERVER_VERBOSE"):
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
 
+    def parse_request(self) -> bool:  # noqa: D102 - BaseHTTPRequestHandler API
+        ok = super().parse_request()
+        self._consumed = 0
+        return ok
+
+    def _declared_length(self) -> int:
+        try:
+            return max(0, int(self.headers.get("Content-Length") or 0))
+        except ValueError:
+            return 0
+
+    def _drain_body(self) -> None:
+        """Reads and discards whatever part of a declared body a handler never consumed.
+
+        Without this a rejected PUT leaves its body on the keep-alive socket and the client's
+        next request on that connection is parsed out of the leftover bytes.
+        """
+        remaining = self._declared_length() - self._consumed
+        if remaining <= 0:
+            return
+        if remaining > self.max_body:
+            # Too big to swallow politely: tell the client this connection is done.
+            self.close_connection = True
+            return
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+        self._consumed = self._declared_length()
+
     def _send(self, status: int, body: bytes = b"", content_type: str = JSON_CONTENT_TYPE,
               headers: dict | None = None) -> None:
+        self._drain_body()
         self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        if status == HTTPStatus.NO_CONTENT:
+            self.send_header("Content-Length", "0")
+        else:
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
         for name, value in (headers or {}).items():
             self.send_header(name, value)
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
-        if body and self.command != "HEAD":
+        if body and self.command != "HEAD" and status != HTTPStatus.NO_CONTENT:
             self.wfile.write(body)
         if not self.path.startswith("/_test/"):
             self.store.record(self.command, self.path, status, len(body))
@@ -277,7 +358,9 @@ class Handler(BaseHTTPRequestHandler):
         if length > self.max_body:
             self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"body exceeds {self.max_body} bytes")
             return None
-        return self.rfile.read(length)
+        body = self.rfile.read(length)
+        self._consumed = len(body)
+        return body
 
     def _read_json(self) -> dict | None:
         body = self._read_body()
@@ -299,6 +382,16 @@ class Handler(BaseHTTPRequestHandler):
         self._error(HTTPStatus.UNAUTHORIZED, "invalid bearer token")
         return False
 
+    def _injected_failure(self, path: str) -> bool:
+        """Serves an armed `/_test/fail_next` fault for this API request, if one matches."""
+        if path.startswith("/_test/"):
+            return False
+        fault = self.store.take_fault(self.command, path)
+        if fault is None:
+            return False
+        self._error(fault["status"], fault.get("body") or "injected failure")
+        return True
+
     @staticmethod
     def _valid_key(key: str) -> bool:
         if not KEY_RE.fullmatch(key) or len(key.encode("utf-8")) > MAX_KEY_BYTES:
@@ -317,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
         path, query = self._route()
         if path == "/_test/health":
             return self._send_json(HTTPStatus.OK, {"ok": True})
-        if not self._authorized():
+        if not self._authorized() or self._injected_failure(path):
             return
         if path == "/_test/dump":
             return self._send_json(HTTPStatus.OK, self.store.dump())
@@ -329,9 +422,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._get(path[len("/v1/kv/"):])
         self._error(HTTPStatus.NOT_FOUND, "no such route")
 
+    def do_HEAD(self) -> None:  # noqa: N802
+        path, _ = self._route()
+        if not self._authorized() or self._injected_failure(path):
+            return
+        if path.startswith("/v1/kv/"):
+            return self._get(path[len("/v1/kv/"):])
+        self._error(HTTPStatus.NOT_FOUND, "no such route")
+
     def do_PUT(self) -> None:  # noqa: N802
         path, _ = self._route()
-        if not self._authorized():
+        if not self._authorized() or self._injected_failure(path):
             return
         if path.startswith("/v1/kv/"):
             return self._put(path[len("/v1/kv/"):])
@@ -342,10 +443,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path, _ = self._route()
-        if not self._authorized():
+        if not self._authorized() or self._injected_failure(path):
             return
         if path == "/_test/reset":
             self.store.reset()
+            return self._send_json(HTTPStatus.OK, {"ok": True})
+        if path == "/_test/fail_next":
+            request = self._read_json()
+            if request is None:
+                return
+            prefix = request.get("pathPrefix")
+            status = request.get("status")
+            if not isinstance(prefix, str) or not prefix.startswith("/v1/") or not isinstance(status, int):
+                return self._error(HTTPStatus.BAD_REQUEST, "fail_next needs a /v1/ pathPrefix and an int status")
+            self.store.add_fault({
+                "method": request.get("method"),
+                "pathPrefix": prefix,
+                "status": status,
+                "count": int(request.get("count") or 1),
+                "body": request.get("body"),
+            })
             return self._send_json(HTTPStatus.OK, {"ok": True})
         if path == "/_test/load":
             snapshot = self._read_json()
@@ -364,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         path, _ = self._route()
-        if not self._authorized():
+        if not self._authorized() or self._injected_failure(path):
             return
         if path.startswith("/v1/kv/"):
             key = path[len("/v1/kv/"):]

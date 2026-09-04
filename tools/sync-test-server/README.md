@@ -11,8 +11,12 @@ SYNC_TEST_SERVER_READY port=51234
 ```
 
 Test-only routes (`/_test/health`, `/_test/reset`, `/_test/dump`, `/_test/load`,
-`/_test/requests`) let a test inspect or shape server state from outside the client under
-test. `test_sync_test_server.py` pins the server's own contract.
+`/_test/requests`, `/_test/requests/clear`, and `/_test/fail_next` to make the next matching
+API requests fail with a chosen status) let a test inspect or shape server state from outside the
+client under test. `test_sync_test_server.py` pins the server's own contract.
+
+A green suite proves the clients agree with *this* implementation of the documented contract; it
+says nothing about the production deployment, which is only covered by the live smoke test.
 
 ## Where it is used
 

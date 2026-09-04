@@ -8,9 +8,14 @@
 #
 # Requires Xcode with an available iPhone simulator. Set HOSHI_IOS_SIMULATOR to a device name to
 # pick a specific one, HOSHI_DERIVED_DATA to reuse a derived-data directory (default build/DD-sim).
+#
+# WARNING: the scenarios simulate fresh installs, so they WIPE the app's book library and sync
+# settings on the simulator they run on. Without HOSHI_IOS_SIMULATOR the runner therefore picks a
+# shut-down device, never one that is currently booted.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +34,22 @@ TEST_BUNDLE = "HoshiReaderTests"
 TOKEN = "ios-integration-token"
 
 
+MANGA_SYNC_ID = "integration_manga"
+NOVEL_SYNC_ID = "integration_novel"
+
+
+def runtime_version(runtime: str) -> tuple[int, ...]:
+    """`com.apple.CoreSimulator.SimRuntime.iOS-18-6` -> (18, 6)."""
+    return tuple(int(part) for part in re.findall(r"\d+", runtime.rsplit("iOS", 1)[-1]))
+
+
 def pick_simulator() -> str | None:
+    """The simulator to test on.
+
+    `HOSHI_IOS_SIMULATOR` names one explicitly. Otherwise prefer a SHUT DOWN iPhone on the newest
+    runtime: the suite wipes the app's library and sync settings on whichever device it runs on,
+    so it must never grab the simulator a developer is using right now.
+    """
     wanted = os.environ.get("HOSHI_IOS_SIMULATOR")
     listing = json.loads(subprocess.run(
         ["xcrun", "simctl", "list", "devices", "available", "-j"], check=True, capture_output=True, text=True
@@ -43,11 +63,30 @@ def pick_simulator() -> str | None:
                 continue
             if wanted and device["name"] != wanted:
                 continue
-            candidates.append((device.get("state") == "Booted", runtime, device["udid"]))
+            shutdown = device.get("state") != "Booted"
+            candidates.append((shutdown, runtime_version(runtime), device["udid"]))
     if not candidates:
         return None
-    candidates.sort(reverse=True)  # booted first, newest runtime next
+    candidates.sort(reverse=True)  # shut-down devices first, then the newest runtime
     return candidates[0][2]
+
+
+def expected_corpus_keys(entries: list[dict]) -> set[str]:
+    """Every key the Android client publishes for the corpus (SyncCorpusSnapshotTest.kt mirror)."""
+    keys = {e["key"] for e in entries}
+    chat_keys = {k for k in keys if k.startswith(f"books/{MANGA_SYNC_ID}/chat/")}
+    shard_keys = {k for k in keys if k.startswith("sync/maps/bookmarks/")}
+    if len(chat_keys) != 1 or len(shard_keys) != 1:
+        raise AssertionError(
+            f"stale corpus: expected one chat entry and one bookmark shard, found {sorted(chat_keys)} {sorted(shard_keys)}"
+        )
+    return {
+        f"books/{MANGA_SYNC_ID}/payload.zip", f"books/{MANGA_SYNC_ID}/payload.manifest",
+        f"books/{MANGA_SYNC_ID}/bookmark", f"books/{MANGA_SYNC_ID}/metadata", f"books/{MANGA_SYNC_ID}/pretranslations",
+        f"books/{NOVEL_SYNC_ID}/epub.zip", f"books/{NOVEL_SYNC_ID}/epub.manifest",
+        f"books/{NOVEL_SYNC_ID}/bookmark", f"books/{NOVEL_SYNC_ID}/metadata", f"books/{NOVEL_SYNC_ID}/sentences",
+        "sync/maps/books.json",
+    } | chat_keys | shard_keys
 
 
 class ServerProcess:
@@ -88,7 +127,10 @@ class IosSyncIntegration(unittest.TestCase):
         try:
             server.call("POST", "/_test/load", CORPUS.read_bytes())
             loaded = json.loads(server.call("GET", "/_test/dump"))
-            self.assertGreaterEqual(len(loaded["entries"]), 11, "corpus loaded")
+            # A stale fixture (regenerate it from the Android repo, see the header) fails here,
+            # not silently in the simulator.
+            self.assertEqual(expected_corpus_keys(loaded["entries"]), {e["key"] for e in loaded["entries"]},
+                             "the fixture must hold exactly what the Android client publishes")
 
             env = dict(os.environ)
             env["TEST_RUNNER_HOSHI_KV_BASE_URL"] = server.base
@@ -101,8 +143,6 @@ class IosSyncIntegration(unittest.TestCase):
                 "-destination", f"platform=iOS Simulator,id={simulator}",
                 "-derivedDataPath", derived,
                 f"-only-testing:{TEST_BUNDLE}",
-                # Simulator builds are signed to run locally; an unsigned host app cannot use the
-                # Keychain, where the app keeps the sync token.
             ]
             started = time.time()
             result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)

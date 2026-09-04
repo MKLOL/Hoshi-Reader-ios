@@ -130,7 +130,10 @@ class SyncTestServerContract(unittest.TestCase):
         self.assertIn("error", body)
         self.assertEqual(404, call(self.base, "DELETE", "/v1/kv/books/none/bookmark")[0])
         call(self.base, "PUT", "/v1/kv/books/some/bookmark", b"x", "text/plain")
-        self.assertEqual(204, call(self.base, "DELETE", "/v1/kv/books/some/bookmark")[0])
+        status, headers, raw = call(self.base, "DELETE", "/v1/kv/books/some/bookmark")
+        self.assertEqual(204, status)
+        self.assertEqual(b"", raw)
+        self.assertIsNone(headers.get("Content-Type"), "a 204 carries no body and no Content-Type")
         self.assertEqual(404, call(self.base, "GET", "/v1/kv/books/some/bookmark")[0])
 
     def test_body_cap_returns_413(self):
@@ -234,6 +237,95 @@ class SyncTestServerContract(unittest.TestCase):
         _, log = call_json(self.base, "GET", "/_test/requests")
         methods = [(r["method"], r["path"], r["status"]) for r in log["requests"]]
         self.assertIn(("GET", "/v1/kv/books/a/bookmark", 200), methods)
+
+    def test_rejected_requests_never_poison_a_keep_alive_connection(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        try:
+            def request(method, path, body=None, token=TOKEN, content_type="application/octet-stream"):
+                headers = {}
+                if token is not None:
+                    headers["Authorization"] = f"Bearer {token}"
+                if body is not None:
+                    headers["Content-Type"] = content_type
+                conn.request(method, path, body=body, headers=headers)
+                response = conn.getresponse()
+                response.read()
+                return response.status
+
+            self.assertEqual(401, request("PUT", "/v1/kv/books/a/bookmark", b"x" * 4096, token="wrong"))
+            self.assertEqual(200, request("GET", "/_test/health"),
+                             "the unread body of a rejected PUT must not be parsed as the next request")
+            self.assertEqual(400, request("PUT", "/v1/kv/bad%20key", b"y" * 1024))
+            self.assertEqual(200, request("GET", "/_test/health"))
+            self.assertEqual(404, request("POST", "/v1/kv-multipart/nope/complete", b'{"parts":[1]}',
+                                          content_type="application/json"))
+            self.assertEqual(200, request("GET", "/_test/health"))
+        finally:
+            conn.close()
+        small = ServerProcess(["--max-body", "64"])
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", small.port, timeout=5)
+            conn.request("PUT", "/v1/kv/books/a/payload.zip", body=b"z" * 200,
+                         headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/zip"})
+            response = conn.getresponse()
+            response.read()
+            self.assertEqual(413, response.status)
+            conn.request("GET", "/_test/health", headers={"Authorization": f"Bearer {TOKEN}"})
+            self.assertEqual(200, conn.getresponse().status,
+                             "after a 413 the client carries on (reconnecting if told to)")
+            conn.close()
+        finally:
+            small.stop()
+
+    def test_head_returns_the_get_headers_without_a_body(self):
+        import http.client
+        call(self.base, "PUT", "/v1/kv/books/a/bookmark", b"12345", "application/json; charset=utf-8")
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        try:
+            conn.request("HEAD", "/v1/kv/books/a/bookmark", headers={"Authorization": f"Bearer {TOKEN}"})
+            response = conn.getresponse()
+            self.assertEqual(200, response.status)
+            self.assertEqual("5", response.getheader("Content-Length"))
+            self.assertEqual("sha256:" + hashlib.sha256(b"12345").hexdigest(), response.getheader("ETag"))
+            self.assertEqual(b"", response.read())
+            conn.request("HEAD", "/v1/kv/books/none/bookmark", headers={"Authorization": f"Bearer {TOKEN}"})
+            response = conn.getresponse()
+            self.assertEqual(404, response.status)
+            response.read()
+        finally:
+            conn.close()
+
+    def test_fail_next_serves_the_armed_status_then_recovers_and_is_logged(self):
+        call(self.base, "PUT", "/v1/kv/books/a/payload.zip", b"zip", "application/zip")
+        status, _ = call_json(self.base, "POST", "/_test/fail_next",
+                              {"method": "GET", "pathPrefix": "/v1/kv/books/a/payload.zip", "status": 503, "count": 2})
+        self.assertEqual(200, status)
+        call_json(self.base, "POST", "/_test/requests/clear")
+        self.assertEqual(503, call(self.base, "GET", "/v1/kv/books/a/payload.zip")[0])
+        self.assertEqual(404, call(self.base, "GET", "/v1/kv/books/a/bookmark")[0], "other keys are unaffected")
+        self.assertEqual(503, call(self.base, "GET", "/v1/kv/books/a/payload.zip")[0])
+        status, _, raw = call(self.base, "GET", "/v1/kv/books/a/payload.zip")
+        self.assertEqual(200, status, "the fault is spent after `count` hits")
+        self.assertEqual(b"zip", raw)
+        self.assertEqual(200, call(self.base, "PUT", "/v1/kv/books/a/payload.zip", b"zip2", "application/zip")[0],
+                         "a GET-only fault leaves PUT alone")
+        _, log = call_json(self.base, "GET", "/_test/requests")
+        statuses = [r["status"] for r in log["requests"]
+                    if r["path"] == "/v1/kv/books/a/payload.zip" and r["method"] == "GET"]
+        self.assertEqual([503, 503, 200], statuses)
+        status, _ = call_json(self.base, "POST", "/_test/fail_next", {"pathPrefix": "/_test/dump", "status": 500})
+        self.assertEqual(400, status, "faults only apply to API routes")
+
+    def test_snapshot_stamps_without_fractions_do_not_break_later_writes(self):
+        _, loaded = call_json(self.base, "POST", "/_test/load", {"entries": [
+            {"key": "books/a/bookmark", "contentType": "text/plain", "lastModified": "2099-01-01T00:00:00Z",
+             "body": base64.b64encode(b"x").decode()}
+        ]})
+        self.assertEqual(1, loaded["loaded"])
+        status, _, raw = call(self.base, "PUT", "/v1/kv/books/b/bookmark", b"y", "text/plain")
+        self.assertEqual(200, status)
+        self.assertGreater(json.loads(raw)["lastModified"], "2099-01-01T00:00:00Z")
 
     def test_state_file_round_trips_across_restarts(self):
         import tempfile
