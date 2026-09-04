@@ -32,6 +32,8 @@ struct SentenceTextView: UIViewRepresentable {
     /// UTF-16 range to highlight, or nil. Set from the dictionary's matched length.
     let highlight: NSRange?
     let onTap: (SentenceTap) -> Void
+    /// A tap that lands beside the text (margin, past the last line) rather than on a character.
+    let onTapOutside: () -> Void
     let onSwipeLeft: () -> Void
     let onSwipeRight: () -> Void
 
@@ -101,9 +103,19 @@ struct SentenceTextView: UIViewRepresentable {
         }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            if let tap = resolveTap(gesture) {
+                parent.onTap(tap)
+            } else {
+                // The text view fills the sentence area, so a miss here is the reader's
+                // "tap outside": it must close an open popup rather than be swallowed.
+                parent.onTapOutside()
+            }
+        }
+
+        private func resolveTap(_ gesture: UITapGestureRecognizer) -> SentenceTap? {
             guard let view = textView,
                   let layoutManager = view.layoutManager as NSLayoutManager?,
-                  !view.text.isEmpty else { return }
+                  !view.text.isEmpty else { return nil }
             let container = view.textContainer
             var point = gesture.location(in: view)
             point.x -= view.textContainerInset.left
@@ -118,11 +130,11 @@ struct SentenceTextView: UIViewRepresentable {
             // A tap in the margin resolves to the nearest glyph, which would look like a hit on a
             // word the user never touched. Require the point to be inside the line it landed on.
             let lineRect = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphIndex, effectiveRange: nil)
-            guard lineRect.contains(point) else { return }
+            guard lineRect.contains(point) else { return nil }
 
             let characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
             let length = (view.text as NSString).length
-            guard characterIndex < length else { return }
+            guard characterIndex < length else { return nil }
 
             let glyphRange = layoutManager.glyphRange(
                 forCharacterRange: NSRange(location: characterIndex, length: 1),
@@ -131,7 +143,7 @@ struct SentenceTextView: UIViewRepresentable {
             var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
             rect.origin.x += view.textContainerInset.left
             rect.origin.y += view.textContainerInset.top - view.contentOffset.y
-            parent.onTap(SentenceTap(characterOffset: characterIndex, rect: rect))
+            return SentenceTap(characterOffset: characterIndex, rect: rect)
         }
     }
 }

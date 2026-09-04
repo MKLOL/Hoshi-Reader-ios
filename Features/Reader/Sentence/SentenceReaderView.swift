@@ -62,8 +62,7 @@ struct SentenceReaderView: View {
         .task { await load() }
         .onChange(of: position) { _, new in
             translationExpanded = false
-            highlight = nil
-            closePopups()
+            dismissPopups()
             translation = new.flatMap { current in
                 guard case let .ready(book) = state, let sentence = book.sentence(at: current) else { return nil }
                 return translations?.translation(for: sentence)
@@ -86,13 +85,16 @@ struct SentenceReaderView: View {
         case let .ready(sentenceBook):
             VStack(spacing: 0) {
                 header(sentenceBook)
+                    .dismissesPopupsOnTap(dismissPopups)
                 sentenceArea(sentenceBook)
                 TranslationPanel(
                     markdown: translation?.markdownResponse,
                     isExpanded: $translationExpanded,
                     foregroundColor: foregroundColor
                 )
+                .dismissesPopupsOnTap(dismissPopups)
                 bottomBar(sentenceBook)
+                    .dismissesPopupsOnTap(dismissPopups)
             }
         }
     }
@@ -135,8 +137,10 @@ struct SentenceReaderView: View {
     @ViewBuilder
     private func sentenceArea(_ sentenceBook: SentenceBook) -> some View {
         ZStack {
-            // A swipe that starts beside the text still turns the page.
+            // A swipe that starts beside the text still turns the page, and a tap there closes
+            // an open popup, exactly as tapping the page does in the reader.
             Color.clear.contentShape(Rectangle())
+                .onTapGesture { dismissPopups() }
             if let position, let sentence = sentenceBook.sentence(at: position) {
                 SentenceTextView(
                     text: sentence.text,
@@ -149,6 +153,7 @@ struct SentenceReaderView: View {
                     lineHeightMultiple: CGFloat(userConfig.lineHeight),
                     highlight: highlight,
                     onTap: { tap in handleTap(tap, sentence: sentence) },
+                    onTapOutside: { dismissPopups() },
                     onSwipeLeft: { move(to: SentenceNavigation.next(in: sentenceBook, from: position)) },
                     onSwipeRight: { move(to: SentenceNavigation.previous(in: sentenceBook, from: position)) }
                 )
@@ -341,8 +346,7 @@ struct SentenceReaderView: View {
                     guard let index = popups.firstIndex(where: { $0.id == popupId }),
                           popups.indices.contains(index) else { return }
                     if index == 0 {
-                        highlight = nil
-                        closePopups()
+                        dismissPopups()
                     } else if popups.indices.contains(index - 1) {
                         popups[index - 1].clearSelection.toggle()
                         closeChildPopups(parent: index - 1)
@@ -384,6 +388,12 @@ struct SentenceReaderView: View {
         return cxxStringToSwift(firstResult.matched).count
     }
 
+    /// What a tap anywhere outside the popup does: the reader's `onTapOutside`, minus the web view.
+    private func dismissPopups() {
+        highlight = nil
+        closePopups()
+    }
+
     private func closePopups() {
         guard !popups.isEmpty else { return }
         let popupIds = Set(popups.map(\.id))
@@ -404,6 +414,14 @@ struct SentenceReaderView: View {
         } completion: {
             popups.removeAll { popupIds.contains($0.id) }
         }
+    }
+}
+
+private extension View {
+    /// A tap on this view's empty space closes the dictionary popups. Buttons inside keep
+    /// priority, so the controls still work with a popup open.
+    func dismissesPopupsOnTap(_ dismiss: @escaping () -> Void) -> some View {
+        contentShape(Rectangle()).onTapGesture(perform: dismiss)
     }
 }
 
