@@ -418,7 +418,9 @@ private nonisolated func decodeDownsampledScreenshot(base64: String, maxPixelSiz
 /// Textual library theme for AI replies on the opaque card: primary text in every node so it
 /// stays legible in both colour schemes. This styles Textual's parsed nodes; it does not parse or
 /// rewrite Markdown.
-private struct HoshiMarkdownStyle: StructuredText.Style {
+///
+/// Shared with sentence mode's translation panel, which shows the same pre-translated reply.
+struct HoshiMarkdownStyle: StructuredText.Style {
     let useUniformTextSize: Bool
 
     var inlineStyle: InlineStyle {
@@ -452,7 +454,7 @@ private struct HoshiMarkdownStyle: StructuredText.Style {
     let thematicBreakStyle: StructuredText.GitHubThematicBreakStyle = .gitHub
 }
 
-private struct HoshiMarkdownHeadingStyle: StructuredText.HeadingStyle {
+struct HoshiMarkdownHeadingStyle: StructuredText.HeadingStyle {
     let useUniformTextSize: Bool
     private static let markdownScales: [CGFloat] = [2, 1.5, 1.25, 1, 0.875, 0.85]
 
@@ -467,7 +469,7 @@ private struct HoshiMarkdownHeadingStyle: StructuredText.HeadingStyle {
     }
 }
 
-private struct HoshiMarkdownBlockQuoteStyle: StructuredText.BlockQuoteStyle {
+struct HoshiMarkdownBlockQuoteStyle: StructuredText.BlockQuoteStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 0) {
             RoundedRectangle(cornerRadius: 3)

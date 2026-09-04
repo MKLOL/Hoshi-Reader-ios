@@ -88,6 +88,9 @@ struct ReaderView: View {
     /// ordering. Only the cache it reads differs (sentences rather than bubbles).
     @State private var aiController = MangaAiController()
     @State private var focusMode = false
+    /// Sentence mode is a whole reading mode rather than a settings sheet, so it gets its own
+    /// full-screen presentation instead of a case in `ActiveSheet`.
+    @State private var showSentenceMode = false
     @State private var inactiveSince: Date?
     @State private var topBarLeftWidth: CGFloat = 0
     @State private var topBarRightWidth: CGFloat = 0
@@ -119,6 +122,19 @@ struct ReaderView: View {
             return "#332A1B"
         }
         return userConfig.theme == .custom ? UIColor(userConfig.customTextColor).hexString : nil
+    }
+    
+    /// The same colour as `readerTextColor`, for the parts of the reader drawn natively rather
+    /// than in the web view. `nil` there means "leave it to the stylesheet", which natively is the
+    /// system label colour.
+    private var readerForegroundColor: Color {
+        if sepiaInverted {
+            return Color(red: 0.949, green: 0.886, blue: 0.788)
+        }
+        if userConfig.theme == .sepia || (userConfig.theme == .system && userConfig.systemLightSepia && systemColorScheme == .light) {
+            return Color(red: 0.200, green: 0.165, blue: 0.106)
+        }
+        return userConfig.theme == .custom ? userConfig.customTextColor : Color(.label)
     }
     
     private var readerTheme: ColorScheme {
@@ -416,6 +432,12 @@ struct ReaderView: View {
                         Label("Highlights", systemImage: "highlighter")
                     }
                     
+                    Button {
+                        showSentenceMode = true
+                    } label: {
+                        Label("Sentence mode", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
+                    
                     if userConfig.enableStatistics {
                         Button {
                             viewModel.activeSheet = .statistics
@@ -605,6 +627,21 @@ struct ReaderView: View {
                     coverURL: viewModel.book.coverURL
                 )
             }
+        }
+        .fullScreenCover(isPresented: $showSentenceMode) {
+            SentenceReaderView(
+                book: viewModel.book,
+                document: viewModel.document,
+                coverURL: viewModel.coverURL,
+                bookmark: SentenceBookmarkAnchor(
+                    chapterIndex: viewModel.index,
+                    progress: viewModel.currentProgress
+                ),
+                backgroundColor: readerBackgroundColor,
+                foregroundColor: readerForegroundColor
+            )
+            .environment(userConfig)
+            .preferredColorScheme(readerTheme)
         }
         .sheet(item: $viewModel.activeSheet) { item in
             switch item {
