@@ -154,6 +154,7 @@ struct SentenceReaderView: View {
                     color: UIColor(foregroundColor),
                     lineHeightMultiple: CGFloat(userConfig.lineHeight),
                     highlight: highlight,
+                    ruby: userConfig.readerHideFurigana ? [] : sentence.ruby,
                     onTap: { tap in handleTap(tap, sentence: sentence) },
                     onTapOutside: { dismissPopups() },
                     onSwipeLeft: { move(to: SentenceNavigation.next(in: sentenceBook, from: position)) },

@@ -47,9 +47,18 @@ nonisolated struct ReaderSentence: Equatable, Sendable {
     let text: String
     /// Paragraph ordinal within the chapter.
     let paragraph: Int
+    /// Furigana over runs of `text`, for display only; the tool never sees readings.
+    var ruby: [RubyAnnotation] = []
 
     /// The pre-translation tool's address for this sentence.
     var id: String { "c\(spine)s\(start)" }
+}
+
+/// A `<ruby>` base inside a sentence: `start` and `length` are UTF-16 units into the sentence text.
+nonisolated struct RubyAnnotation: Equatable, Sendable {
+    let start: Int
+    let length: Int
+    let reading: String
 }
 
 /// A chapter as the tool sees it: its first heading, and its sentences.
@@ -96,7 +105,7 @@ nonisolated enum EpubSentenceSegmenter {
         let extracted = extractParts(html)
         return SegmentedChapter(
             heading: extracted.heading,
-            sentences: segmentParts(spine: spine, parts: extracted.parts)
+            sentences: segmentParts(spine: spine, parts: extracted.parts, readings: extracted.readings)
         )
     }
 
@@ -142,11 +151,20 @@ nonisolated enum EpubSentenceSegmenter {
 
     // MARK: - Extraction
 
+    /// One of the tool's text runs. `groups` is the ruby group of each scalar (`-1` for none), or
+    /// nil when the run carries no furigana at all; group ids index `Extraction.readings`.
+    struct TextRun {
+        let text: String
+        let groups: [Int]?
+    }
+
     struct Extraction {
         /// Text runs in document order; `nil` marks a block boundary.
-        let parts: [String?]
+        let parts: [TextRun?]
         /// The chapter's first heading, whitespace-collapsed. Empty when it has none.
         let heading: String
+        /// The furigana readings the runs' groups refer to.
+        let readings: [String]
     }
 
     /// Turns chapter markup into the tool's text runs.
@@ -161,7 +179,7 @@ nonisolated enum EpubSentenceSegmenter {
     /// like `html.unescape`. Tolerant of the markup real books ship: unclosed tags, mismatched
     /// furigana.
     static func extractParts(_ html: String) -> Extraction {
-        var parts: [String?] = []
+        var parts: [TextRun?] = []
         var heading = ""
         var headingChunks = ""
         var headingDepth = 0
@@ -170,18 +188,44 @@ nonisolated enum EpubSentenceSegmenter {
         // A fragment with no `<body>` at all is all body — the tool never sees one, but the reader
         // may be handed a chapter that was already unwrapped.
         var inBody = html.range(of: "<body", options: [.caseInsensitive, .literal]) == nil
+        // Furigana ride along for display: text inside <ruby> forms a base group until its <rt>
+        // supplies the reading. Offsets are untouched — the tool skips <rt> and so do we.
+        var readings: [String] = []
+        var rubyDepth = 0
+        var pendingGroup = -1
+        var rtText = ""
 
         // The tool's handle_data: text only counts inside <body> and outside skipped subtrees.
         func emit(_ data: String) {
             guard skipStack.isEmpty, inBody else { return }
-            parts.append(data)
+            var groups: [Int]?
+            if rubyDepth > 0 {
+                if pendingGroup < 0 {
+                    pendingGroup = readings.count
+                    readings.append("")
+                }
+                groups = Array(repeating: pendingGroup, count: data.unicodeScalars.count)
+            }
+            parts.append(TextRun(text: data, groups: groups))
             if headingDepth > 0 { headingChunks += data }
         }
 
         func flushText() {
             guard !pending.isEmpty else { return }
-            emit(decodeEntities(String(pending)))
+            let decoded = decodeEntities(String(pending))
+            if skipStack.last == "rt" { rtText += decoded } else { emit(decoded) }
             pending = String.UnicodeScalarView()
+        }
+
+        // An <rt> closed, explicitly or by a sibling or </ruby>: its text is the reading of the
+        // base group collected before it. A reading with no base is dropped.
+        func finishRt() {
+            let reading = collapseWhitespace(rtText)
+            rtText = ""
+            if pendingGroup >= 0 {
+                if readings[pendingGroup].isEmpty { readings[pendingGroup] = reading }
+                pendingGroup = -1
+            }
         }
 
         func boundary() {
@@ -228,13 +272,17 @@ nonisolated enum EpubSentenceSegmenter {
                     if selfClosing { continue } // a self-closing skip tag has no content
                     // `<rt>` implicitly closes a previous `<rt>`/`<rp>` sibling.
                     if furiganaTags.contains(name), let top = skipStack.last, furiganaTags.contains(top) {
-                        skipStack.removeLast()
+                        if skipStack.removeLast() == "rt" { finishRt() }
                     }
                     skipStack.append(name)
                     if rawTextTags.contains(name) { index = rawTextEnd(scalars, from: index, name: name) }
                     continue
                 }
                 if !skipStack.isEmpty { continue }
+                if name == "ruby", !selfClosing {
+                    rubyDepth += 1
+                    pendingGroup = -1
+                }
                 if blockTags.contains(name) { boundary() }
                 // A self-closing block tag emits one boundary, not two, and never opens a heading.
                 if !selfClosing, headingTags.contains(name), heading.isEmpty { headingDepth += 1 }
@@ -252,13 +300,20 @@ nonisolated enum EpubSentenceSegmenter {
                 let name = tagName(raw)
                 if skipTags.contains(name) {
                     if skipStack.contains(name) {
-                        while let popped = skipStack.popLast(), popped != name {}
+                        while let popped = skipStack.popLast() {
+                            if popped == "rt" { finishRt() }
+                            if popped == name { break }
+                        }
                     }
                     continue
                 }
                 if name == "ruby" {
                     // `</ruby>` closes any `<rt>`/`<rp>` still open, as every browser does.
-                    while let top = skipStack.last, furiganaTags.contains(top) { skipStack.removeLast() }
+                    while let top = skipStack.last, furiganaTags.contains(top) {
+                        if skipStack.removeLast() == "rt" { finishRt() }
+                    }
+                    if rubyDepth > 0 { rubyDepth -= 1 }
+                    pendingGroup = -1
                 }
                 if !skipStack.isEmpty { continue }
                 if blockTags.contains(name) { boundary() }
@@ -276,37 +331,34 @@ nonisolated enum EpubSentenceSegmenter {
             }
         }
         flushText()
-        return Extraction(parts: parts, heading: heading)
+        return Extraction(parts: parts, heading: heading, readings: readings)
     }
 
     // MARK: - Segmentation
 
-    static func segmentParts(spine: Int, parts: [String?]) -> [ReaderSentence] {
+    static func segmentParts(spine: Int, parts: [TextRun?], readings: [String] = []) -> [ReaderSentence] {
         var sentences: [ReaderSentence] = []
         var normalizedCount = 0
-        // One entry per scalar, so an over-long split lands on a character boundary.
+        // One entry per scalar, so an over-long split lands on a character boundary; the parallel
+        // array carries each scalar's ruby group.
         var buffer: [Unicode.Scalar] = []
+        var bufferGroups: [Int] = []
         var bufferStart: Int?
         var bufferLength = 0
         var paragraph = 0
         var lastSoftBreak = -1
 
-        func collapsed(_ scalars: ArraySlice<Unicode.Scalar>) -> String {
-            var view = String.UnicodeScalarView()
-            view.append(contentsOf: scalars)
-            return collapseWhitespace(String(view))
-        }
-
         func flush() {
             if let start = bufferStart, bufferLength > 0 {
-                let text = collapsed(buffer[...])
+                let (text, ruby) = collapse(buffer[...], bufferGroups[...], readings)
                 if !text.isEmpty {
                     sentences.append(ReaderSentence(
-                        spine: spine, start: start, length: bufferLength, text: text, paragraph: paragraph
+                        spine: spine, start: start, length: bufferLength, text: text, paragraph: paragraph, ruby: ruby
                     ))
                 }
             }
             buffer = []
+            bufferGroups = []
             bufferStart = nil
             bufferLength = 0
             lastSoftBreak = -1
@@ -319,17 +371,20 @@ nonisolated enum EpubSentenceSegmenter {
                 ? lastSoftBreak + 1
                 : buffer.count
             let head = buffer[0..<headEnd]
+            let headGroups = bufferGroups[0..<headEnd]
             let tail = Array(buffer[headEnd...])
+            let tailGroups = Array(bufferGroups[headEnd...])
             let headLength = head.reduce(into: 0) { $0 += isMatchable($1) ? 1 : 0 }
-            let text = collapsed(head)
+            let (text, ruby) = collapse(head, headGroups, readings)
             if !text.isEmpty, headLength > 0, let start = bufferStart {
                 sentences.append(ReaderSentence(
-                    spine: spine, start: start, length: headLength, text: text, paragraph: paragraph
+                    spine: spine, start: start, length: headLength, text: text, paragraph: paragraph, ruby: ruby
                 ))
             }
             let tailMatchable = tail.reduce(into: 0) { $0 += isMatchable($1) ? 1 : 0 }
             let start = bufferStart
             buffer = tail
+            bufferGroups = tailGroups
             bufferLength = tailMatchable
             bufferStart = (start != nil && tailMatchable > 0) ? start! + headLength : nil
             lastSoftBreak = -1
@@ -341,12 +396,14 @@ nonisolated enum EpubSentenceSegmenter {
                 paragraph += 1
                 continue
             }
-            let scalars = Array(part.unicodeScalars)
+            let scalars = Array(part.text.unicodeScalars)
+            let groups = part.groups
             var position = 0
             while position < scalars.count {
                 let scalar = scalars[position]
-                position += 1
                 buffer.append(scalar)
+                bufferGroups.append(groups?[position] ?? -1)
+                position += 1
                 if isMatchable(scalar) {
                     if bufferStart == nil { bufferStart = normalizedCount }
                     normalizedCount += 1
@@ -357,8 +414,9 @@ nonisolated enum EpubSentenceSegmenter {
                 if sentenceTerminators.contains(scalar) {
                     while position < scalars.count, trailingChars.contains(scalars[position]) {
                         let trailing = scalars[position]
-                        position += 1
                         buffer.append(trailing)
+                        bufferGroups.append(groups?[position] ?? -1)
+                        position += 1
                         if isMatchable(trailing) {
                             normalizedCount += 1
                             bufferLength += 1
@@ -374,6 +432,48 @@ nonisolated enum EpubSentenceSegmenter {
         return sentences
     }
 
+    /// The sentence text (`collapseWhitespace` of the buffer) plus its furigana, whose offsets
+    /// are UTF-16 units into that collapsed text. A base whose group never got a reading is
+    /// dropped.
+    private static func collapse(
+        _ scalars: ArraySlice<Unicode.Scalar>,
+        _ groups: ArraySlice<Int>,
+        _ readings: [String]
+    ) -> (String, [RubyAnnotation]) {
+        var out = String.UnicodeScalarView()
+        var outGroups: [Int] = []
+        var pendingSpace = false
+        for (scalar, group) in zip(scalars, groups) {
+            if isPythonSpace(scalar) {
+                pendingSpace = !out.isEmpty
+            } else {
+                if pendingSpace {
+                    out.append(" ")
+                    outGroups.append(-1)
+                }
+                pendingSpace = false
+                out.append(scalar)
+                for _ in 0..<scalar.utf16.count { outGroups.append(group) }
+            }
+        }
+        var ruby: [RubyAnnotation] = []
+        var i = 0
+        while i < outGroups.count {
+            let group = outGroups[i]
+            if group < 0 {
+                i += 1
+                continue
+            }
+            var j = i
+            while j < outGroups.count, outGroups[j] == group { j += 1 }
+            if group < readings.count, !readings[group].isEmpty {
+                ruby.append(RubyAnnotation(start: i, length: j - i, reading: readings[group]))
+            }
+            i = j
+        }
+        return (String(out), ruby)
+    }
+
     // MARK: - Text helpers
 
     /// Python's `" ".join(text.split())`: every whitespace run becomes a single space, and leading
@@ -383,7 +483,7 @@ nonisolated enum EpubSentenceSegmenter {
         var out = String.UnicodeScalarView()
         var pendingSpace = false
         for scalar in text.unicodeScalars {
-            if scalar.properties.isWhitespace || (0x1C...0x1F).contains(scalar.value) {
+            if isPythonSpace(scalar) {
                 pendingSpace = !out.isEmpty
             } else {
                 if pendingSpace { out.append(" ") }
@@ -394,7 +494,12 @@ nonisolated enum EpubSentenceSegmenter {
         return String(out)
     }
 
-        /// Python's `html.unescape`, which the tool's parser applies to every text run: named
+    /// Python's `str.isspace`: Unicode `White_Space` plus the four ASCII separators U+001C…U+001F.
+    private static func isPythonSpace(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.properties.isWhitespace || (0x1C...0x1F).contains(scalar.value)
+    }
+
+    /// Python's `html.unescape`, which the tool's parser applies to every text run: named
     /// references with the longest-prefix rule for the legacy semicolon-less names, numeric
     /// references with or without `;`, and the standard's replacements for invalid code points.
     static func decodeEntities(_ text: String) -> String {

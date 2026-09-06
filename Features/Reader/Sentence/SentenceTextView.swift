@@ -12,6 +12,11 @@
 //  is requested explicitly (`usingTextLayoutManager: false`) because `NSLayoutManager` answers both
 //  questions directly, which is exactly what `selection.js` does for the web reader.
 //
+//  Furigana are drawn by hand (`CenteringTextView.draw`) rather than with a `CTRubyAnnotation`
+//  attribute: NSLayoutManager (TextKit 1) does not render that Core Text attribute, so it would
+//  silently show nothing. The reader keeps the base text untouched — offsets, taps and the
+//  highlight all address the base — and the readings ride above each base's glyphs.
+//
 
 import SwiftUI
 import UIKit
@@ -31,11 +36,16 @@ struct SentenceTextView: UIViewRepresentable {
     let lineHeightMultiple: CGFloat
     /// UTF-16 range to highlight, or nil. Set from the dictionary's matched length.
     let highlight: NSRange?
+    /// Furigana to draw above their bases, half-size like the reader. Empty when hidden.
+    let ruby: [RubyAnnotation]
     let onTap: (SentenceTap) -> Void
     /// A tap that lands beside the text (margin, past the last line) rather than on a character.
     let onTapOutside: () -> Void
     let onSwipeLeft: () -> Void
     let onSwipeRight: () -> Void
+
+    /// Furigana are half the base size, as in the web reader.
+    private static let rubySizeFactor: CGFloat = 0.5
 
     func makeUIView(context: Context) -> CenteringTextView {
         let view = CenteringTextView(usingTextLayoutManager: false)
@@ -65,25 +75,45 @@ struct SentenceTextView: UIViewRepresentable {
     func updateUIView(_ uiView: CenteringTextView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.textView = uiView
-        let attributed = NSMutableAttributedString(string: text, attributes: attributes())
-        if let highlight, highlight.location >= 0, NSMaxRange(highlight) <= (text as NSString).length {
+        // Ruby annotations compare by identity, so the attributed string itself cannot tell a
+        // no-op update from a real one; a signature of everything that feeds it can.
+        let signature = [
+            text, "\(highlight?.location ?? -1),\(highlight?.length ?? -1)", font.fontName,
+            "\(font.pointSize)", color.description, "\(lineHeightMultiple)",
+            ruby.map { "\($0.start)+\($0.length)=\($0.reading)" }.joined(separator: "|"),
+        ].joined(separator: "\u{1F}")
+        guard context.coordinator.signature != signature else { return }
+        context.coordinator.signature = signature
+
+        let readingFont = font.withSize((font.pointSize * Self.rubySizeFactor).rounded())
+        let length = (text as NSString).length
+        let attributed = NSMutableAttributedString(string: text, attributes: attributes(readingFont: readingFont))
+        if let highlight, highlight.location >= 0, NSMaxRange(highlight) <= length {
             attributed.addAttribute(
                 .backgroundColor,
                 value: color.withAlphaComponent(0.18),
                 range: highlight
             )
         }
-        if uiView.attributedText != attributed {
-            uiView.attributedText = attributed
-            uiView.setNeedsLayout()
-        }
+        uiView.attributedText = attributed
+        uiView.configureRuby(
+            ruby.filter { $0.start >= 0 && $0.length > 0 && $0.start + $0.length <= length },
+            font: readingFont,
+            color: color
+        )
+        uiView.setNeedsLayout()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
-    private func attributes() -> [NSAttributedString.Key: Any] {
+    private func attributes(readingFont: UIFont) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineHeightMultiple = lineHeightMultiple
+        // Furigana are drawn into the gap above each line: the first line uses the centering inset
+        // above it, and lineSpacing opens the same gap above every following line.
+        if !ruby.isEmpty {
+            paragraph.lineSpacing = readingFont.lineHeight
+        }
         paragraph.alignment = .natural
         paragraph.lineBreakMode = .byWordWrapping
         return [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]
@@ -93,6 +123,7 @@ struct SentenceTextView: UIViewRepresentable {
     final class Coordinator {
         var parent: SentenceTextView
         weak var textView: CenteringTextView?
+        var signature = ""
 
         init(parent: SentenceTextView) {
             self.parent = parent
@@ -148,9 +179,20 @@ struct SentenceTextView: UIViewRepresentable {
     }
 }
 
-/// A text view that keeps its content vertically centered, so a one-line sentence sits in the
-/// middle of the screen rather than pinned under the header.
+/// A text view that keeps its content vertically centered (so a one-line sentence sits in the
+/// middle of the screen) and draws furigana above their base glyphs.
 final class CenteringTextView: UITextView {
+    private var ruby: [RubyAnnotation] = []
+    private var rubyFont: UIFont = .systemFont(ofSize: 8)
+    private var rubyColor: UIColor = .label
+
+    func configureRuby(_ ruby: [RubyAnnotation], font: UIFont, color: UIColor) {
+        self.ruby = ruby
+        rubyFont = font
+        rubyColor = color
+        setNeedsDisplay()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         guard let layoutManager = layoutManager as NSLayoutManager? else { return }
@@ -160,6 +202,36 @@ final class CenteringTextView: UITextView {
         // The inset change re-enters layout; the threshold stops that from oscillating.
         if abs(textContainerInset.top - top) > 0.5 {
             textContainerInset = UIEdgeInsets(top: top, left: 0, bottom: 0, right: 0)
+        }
+        setNeedsDisplay()
+    }
+
+    override func draw(_ rect: CGRect) {
+        super.draw(rect)
+        guard !ruby.isEmpty, let layoutManager = layoutManager as NSLayoutManager? else { return }
+        let container = textContainer
+        let inset = textContainerInset
+        let readingAttributes: [NSAttributedString.Key: Any] = [.font: rubyFont, .foregroundColor: rubyColor]
+        let length = (text as NSString).length
+
+        for annotation in ruby {
+            let range = NSRange(location: annotation.start, length: annotation.length)
+            guard NSMaxRange(range) <= length else { continue }
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            // A base that wraps keeps its reading over the part on its first line.
+            let firstLine = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+            var baseRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+            baseRect = baseRect.intersection(CGRect(x: -.greatestFiniteMagnitude / 2, y: firstLine.minY,
+                                                    width: .greatestFiniteMagnitude, height: firstLine.height))
+            guard !baseRect.isNull, baseRect.width > 0 else { continue }
+
+            let reading = NSAttributedString(string: annotation.reading, attributes: readingAttributes)
+            let size = reading.size()
+            let centerX = baseRect.midX + inset.left
+            // Sit the reading in the gap just above the base line's glyphs.
+            let baseTop = firstLine.minY + inset.top
+            let origin = CGPoint(x: centerX - size.width / 2, y: baseTop - size.height + 1)
+            reading.draw(at: origin)
         }
     }
 }

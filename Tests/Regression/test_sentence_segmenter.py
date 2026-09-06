@@ -218,6 +218,33 @@ ENTITY_VECTORS = [
     ("&Tab;&NewLine;&#65;", "\t\nA"),
 ]
 
+# (name, html, expected ruby per sentence as [(start, length, reading)]) — offsets are UTF-16 units
+# into the sentence text. Copied from EpubSentenceSegmenterTest.kt; the tool has no notion of
+# furigana, so these pin the two apps to each other.
+RUBY_VECTORS = [
+    (
+        "furigana-ride-along-as-ruby-annotations",
+        chapter(
+            "<p>「<ruby>今日<rt>きょう</rt></ruby>も<ruby>学校<rt>がっこう</rt></ruby>か……」と、"
+            "<ruby>私<rt>わたし</rt></ruby>は<ruby>小<rt>ちい</rt></ruby>さくつぶやいた。</p>"
+        ),
+        [[(1, 2, "きょう"), (4, 2, "がっこう"), (12, 1, "わたし"), (14, 1, "ちい")]],
+    ),
+    (
+        "ruby-pairs-rp-and-unclosed-rt-follow-the-browser",
+        chapter(
+            "<p>　<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>を<ruby>読<rp>(</rp><rt>よ</rt><rp>)</rp></ruby>む。"
+            "<ruby>今<rt>いま</ruby>から<ruby>行</ruby>く。</p>"
+        ),
+        [[(0, 1, "かん"), (1, 1, "じ"), (3, 1, "よ")], [(0, 1, "いま")]],
+    ),
+    (
+        "ruby-annotations-survive-the-overlong-split",
+        chapter(f"<p>{CLAUSE}、<ruby>{CLAUSE}<rt>よみ</rt></ruby>、{CLAUSE}。</p>"),
+        [[], [(0, 250, "よみ")], []],
+    ),
+]
+
 MATCHABLE_COUNT_VECTORS = [("「今日は」", 1, 0), ("「今日は」", 3, 2), ("「今日は」", 99, 3)]
 
 DEMO_EPUB = Path(
@@ -268,6 +295,7 @@ func segmentJob(_ job: [String: Any]) -> [String: Any] {{
             "length": $0.length,
             "text": $0.text,
             "paragraph": $0.paragraph,
+            "ruby": $0.ruby.map {{ [$0.start, $0.length, $0.reading] as [Any] }},
         ] as [String: Any]
     }}
     return ["sentences": sentences]
@@ -375,6 +403,22 @@ class SentenceSegmenterParityTest(unittest.TestCase):
                         tool_sentences(spine, html),
                         "the desktop tool disagrees with the shipped vector",
                     )
+
+    def test_ruby_annotations_match_kotlin(self):
+        for name, html, expected in RUBY_VECTORS:
+            with self.subTest(vector=name):
+                sentences = self.swift_sentences(0, html)
+                self.assertEqual(len(expected), len(sentences))
+                for sentence, ruby in zip(sentences, expected):
+                    self.assertEqual([list(r) for r in ruby], sentence["ruby"])
+                    for start, length, _ in ruby:
+                        base = sentence["text"][start:start + length]
+                        self.assertTrue(base and not base.isspace(), f"ruby base {start}+{length} is blank")
+                # Furigana never change what the tool addresses.
+                self.assertEqual(
+                    tool_sentences(0, html),
+                    [(s["id"], s["length"], s["text"]) for s in sentences],
+                )
 
     def test_entities_decode_and_unknown_ones_survive(self):
         jobs = [{"op": "entities", "text": raw} for raw, _ in ENTITY_VECTORS]
