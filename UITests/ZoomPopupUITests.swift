@@ -1,6 +1,74 @@
 import XCTest
 
 final class ZoomPopupUITests: XCTestCase {
+    func testPageJumpResetsZoomAndAllowsTheNextSwipe() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture()
+        let webView = app.webViews.firstMatch
+        let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForViewport(probe, containing: "zoom=1.000;offsetX=0.0;offsetY=0.0"), probe.label)
+        webView.pinch(withScale: 2, velocity: 1)
+        XCTAssertFalse(probe.label.contains("zoom=1.000"), probe.label)
+
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["Go to page"].tap()
+        let field = app.textFields.firstMatch
+        field.tap()
+        let oldValue = field.value as? String ?? ""
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + "2")
+        app.buttons["Go"].tap()
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;zoom=1.000;offsetX=0.0;offsetY=0.0"), probe.label)
+        webView.swipeRight()
+        XCTAssertTrue(waitForViewport(probe, containing: "page=3;zoom=1.000;offsetX=0.0;offsetY=0.0"), probe.label)
+        webView.swipeLeft()
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;zoom=1.000;offsetX=0.0;offsetY=0.0"), probe.label)
+        saveScreenshot(app, name: "page-turn-at-fit-scale")
+    }
+
+    private func waitForViewport(_ probe: XCUIElement, containing value: String) -> Bool {
+        XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", value), object: probe
+        )], timeout: 10) == .completed
+    }
+
+    /// Run on an empty simulator with tools/sync-test-server listening on loopback port 18795.
+    func testBookshelfCloudSyncShowsCompletionAndErrors() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons["Advanced"].tap()
+        app.buttons["Sync (HTTP)"].tap()
+        let url = app.textFields["Base URL"]
+        XCTAssertTrue(url.waitForExistence(timeout: 5))
+        url.tap()
+        url.press(forDuration: 1.2)
+        let selectAll = app.menuItems["Select All"]
+        if selectAll.waitForExistence(timeout: 3) { selectAll.tap() }
+        url.typeText("http://127.0.0.1:18795")
+        XCTAssertEqual(url.value as? String, "http://127.0.0.1:18795")
+        let token = app.secureTextFields["Bearer token"]
+        token.tap()
+        token.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 80))
+        token.typeText("bookshelf-ui-test\n")
+        app.tabBars.buttons["Books"].tap()
+        let cloud = app.buttons["bookshelf-http-sync"]
+        XCTAssertTrue(cloud.waitForExistence(timeout: 5))
+        cloud.tap()
+        XCTAssertTrue(app.staticTexts["Sync complete"].waitForExistence(timeout: 60))
+        saveScreenshot(app, name: "bookshelf-sync-complete")
+        app.buttons["Done"].tap()
+        app.tabBars.buttons["Settings"].tap()
+        token.tap()
+        token.typeText("-invalid\n")
+        app.tabBars.buttons["Books"].tap()
+        cloud.tap()
+        let error = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "401")).firstMatch
+        XCTAssertTrue(error.waitForExistence(timeout: 20), app.debugDescription)
+        saveScreenshot(app, name: "bookshelf-sync-error")
+    }
+
     func testUltraThinActionButtonsStayVisibleAndTappable() throws {
         let app = try launchZoomFixture(aiStub: true)
         let webView = app.webViews.firstMatch

@@ -146,6 +146,13 @@ struct MangaReaderView: View {
         .overlay(alignment: .topLeading) {
             if uiTestingEnabled {
                 VStack(spacing: 0) {
+                    TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+                        Text("page=\(model.pageIndex + 1);\(controller.uiTestViewportProbeLabel())")
+                            .font(.system(size: 1))
+                            .foregroundStyle(.clear)
+                            .frame(width: 1, height: 1)
+                            .accessibilityIdentifier("manga-viewport-probe")
+                    }
                     Text(uiTestSelectionProbe)
                         .font(.system(size: 1))
                         .foregroundStyle(.clear)

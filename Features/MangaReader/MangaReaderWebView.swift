@@ -263,7 +263,6 @@ struct MangaReaderWebView: UIViewRepresentable {
             let loadToken = controller.loadToken
             context.coordinator.lastLoadToken = loadToken
             context.coordinator.allowedImagePaths = controller.allowedImagePaths
-            webView.scrollView.setZoomScale(1, animated: false)
             if let navigation = webView.loadHTMLString(html, baseURL: URL(string: MangaPageHtml.baseURLString)) {
                 context.coordinator.trackNavigation(navigation, loadToken: loadToken)
             }
@@ -360,7 +359,15 @@ struct MangaReaderWebView: UIViewRepresentable {
             guard let finishedLoadToken = navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation)) else {
                 return
             }
+            guard finishedLoadToken == parent.controller.loadToken else { return }
+            // WebKit can restore the previous document's viewport during navigation. Reset only
+            // after the current document loads, before exposing it for page-turn gestures.
             MangaReaderWebView.configureZoom(for: webView.scrollView)
+            webView.scrollView.setZoomScale(webView.scrollView.minimumZoomScale, animated: false)
+            webView.scrollView.setContentOffset(.zero, animated: false)
+            previousPinchLocation = nil
+            indirectPinchTransform = nil
+            trackpadPanSession = nil
             parent.controller.syncHostViewport()
             parent.onPageReady(finishedLoadToken)
             // Re-assert first responder so hardware-keyboard arrows keep turning pages after a

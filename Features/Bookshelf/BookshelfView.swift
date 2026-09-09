@@ -315,6 +315,9 @@ struct BookshelfView: View {
                 .disabled(selectedBooks.isEmpty)
             }
         } else {
+            ToolbarItem(placement: .topBarTrailing) {
+                HttpSyncBookshelfButton()
+            }
             ToolbarItem(placement: .topBarLeading) {
                 Menu {
                     Section {

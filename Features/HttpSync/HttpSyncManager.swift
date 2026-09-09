@@ -103,6 +103,9 @@ final class HttpSyncManager {
     }
 
     private func runReconcile(preflight: HttpSyncMapChanges?) async {
+        lastError = nil
+        lastErrors = []
+        lastStatus = nil
         guard settings.isConfigured else {
             lastError = "HTTP sync is not configured. Add a base URL and token first."
             log.error("syncNow aborted: not configured")
@@ -121,6 +124,8 @@ final class HttpSyncManager {
         defer {
             isSyncing = false
             progress = nil
+            // The shelf shortcut stays on Books while sync imports/removes titles and positions.
+            NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil)
         }
 
         // Network IO runs off-thread inside URLSession's async methods; the heavy file work (zip,
