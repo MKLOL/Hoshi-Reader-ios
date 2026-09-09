@@ -54,14 +54,12 @@ nonisolated enum SentenceBatchPrompt {
         let cleaned = strip(reply)
         guard let array = parseArray(cleaned) else { return [:] }
         var result: [String: SentenceTranslationResult] = [:]
-        var order: [String] = []
         for element in array {
             guard let item = element as? [String: Any], let rawId = item["id"] as? String else { continue }
             let id = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
             guard expectedIds.contains(id), result[id] == nil else { continue }
             guard let translation = (item["translation"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !translation.isEmpty else { continue }
             result[id] = SentenceTranslationResult(sentenceId: id, translation: translation, explanation: (item["explanation"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
-            order.append(id)
         }
         return result
     }

@@ -57,6 +57,9 @@ nonisolated struct PretranslationRunner: Sendable {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                // The cloud clients wrap every error, including the one URLSession raises when the
+                // task is cancelled; a cancel must end the job, not count against the budget.
+                if Task.isCancelled { throw CancellationError() }
                 failures += 1
                 lastError = error
                 if failures > maxFailedRequests {
@@ -104,7 +107,10 @@ nonisolated struct PretranslationRunner: Sendable {
             }
             await onProgress(sink.count, sentences.count)
         }
-        if sink.count == 0, !sentences.isEmpty {
+        // Reused entries alone are not success: if requests failed and nothing new arrived, say so
+        // instead of rewriting the old blob and reporting the job as finished.
+        let newlyTranslated = pending.contains { sink.contains($0.id) }
+        if !pending.isEmpty, !newlyTranslated, failures > 0 || sink.count == 0 {
             throw PretranslationTooManyFailures(message: "No sentence could be translated" + (lastError.map { ": \($0.localizedDescription)" } ?? ""))
         }
         return sink.snapshot

@@ -459,5 +459,6 @@ Since the News tab (`Features/News/`) the app itself can produce `sentence_trans
 as the Python tool), validates it with `validationError(expectedSyncId:spineCount:)` before writing,
 and `SentenceTranslationsUploader` PUTs `books/{syncId}/sentences`. The sync engines stay
 download-only for that key; a blob written on one device reaches the others through the normal
-sentences import. Partial results are kept on failure or cancel unless a complete sidecar from
-another model or prompt already exists. The Android app writes the identical format.
+sentences import. Partial results are kept (and uploaded) on failure or cancel unless a sidecar
+from another model or prompt, partial or complete, already exists. An open reader shows new
+translations after its next chapter load. The Android app writes the identical format.

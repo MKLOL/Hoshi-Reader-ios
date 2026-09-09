@@ -8,7 +8,9 @@
 //  Process-wide queue of pre-translation jobs and their states. Jobs run one at a time (the cloud
 //  clients have no rate limiting and the on-device model is strictly serial) inside a Task that
 //  holds a UIKit background task, so leaving the app mid-job gives it the platform's grace period
-//  instead of stopping it instantly; partial results are persisted either way.
+//  instead of stopping it instantly. Partial results are written (and uploaded when sync is
+//  configured) when a job fails or is cancelled, unless a sidecar from another model or prompt,
+//  partial or complete, already exists.
 //
 
 import Foundation
@@ -115,8 +117,11 @@ final class NewsPretranslationManager {
             do { try SentenceTranslationsWriter.write(data, bookRoot: root) } catch { return 0 }
             let config = HttpSyncSettingsStore.shared.currentConfig()
             if config.isConfigured {
+                // This runs inside a job that may already be cancelled, and a cancelled Task fails
+                // URLSession immediately; an unstructured Task is not cancelled with its creator.
+                let syncId = plan.syncId
                 let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
-                _ = try? await SentenceTranslationsUploader(transport: transport).upload(syncId: plan.syncId, blob: data)
+                _ = await Task { try? await SentenceTranslationsUploader(transport: transport).upload(syncId: syncId, blob: data) }.value
             }
             return sink.count - existingCount
         }
@@ -138,8 +143,9 @@ final class NewsPretranslationManager {
                 translator = CloudSentenceTranslator(provider: provider, apiKey: apiKey, modelId: modelId)
             case .onDevice(let modelId):
                 // The offline manager always runs the model selected in settings.
-                guard OfflineTranslationSettingsStore.shared.selectedModel.id == modelId else {
-                    throw PretranslationFailure("Select \(modelId) as the offline translation model in Settings first.")
+                let selected = OfflineTranslationSettingsStore.shared.selectedModel
+                guard selected.id == modelId, ModelDownloadManager.shared.isDownloaded(selected) else {
+                    throw PretranslationFailure("Select and download \(modelId) as the offline translation model in Settings first.")
                 }
                 translator = OnDeviceSentenceTranslator()
             }
@@ -160,6 +166,7 @@ final class NewsPretranslationManager {
 
             var uploaded = false
             let syncConfig = HttpSyncSettingsStore.shared.currentConfig()
+            let uploadAttempted = syncConfig.isConfigured
             if syncConfig.isConfigured {
                 publish(bookId, .uploading)
                 let transport = HttpSyncKvClient(baseURL: syncConfig.baseURL, bearerToken: syncConfig.token)
@@ -169,7 +176,7 @@ final class NewsPretranslationManager {
                 articleId: request.articleId,
                 record: NewsTranslationRecord(model: label, sentenceCount: built.sentences.count, translatedCount: translations.count, completedAt: nowEpochMillis(), uploaded: uploaded)
             )
-            publish(bookId, .finished(translated: translations.count, total: built.sentences.count, uploaded: uploaded, engineLabel: label))
+            publish(bookId, .finished(translated: translations.count, total: built.sentences.count, uploadAttempted: uploadAttempted, uploaded: uploaded, engineLabel: label))
         } catch is CancellationError {
             let saved = await persistPartial()
             publish(bookId, .cancelled(savedTranslations: saved))

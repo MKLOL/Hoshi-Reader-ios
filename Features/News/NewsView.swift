@@ -252,8 +252,8 @@ private struct NewsArticleRow: View {
             }
         case .uploading:
             statusRow("Uploading translations…") {}
-        case .finished(let translated, let total, let uploaded, _):
-            statusRow("Translated \(translated) of \(total) sentences" + (uploaded ? "" : "\nTranslated, but the upload to sync failed. Run Pre-translate again to retry the upload.")) {
+        case .finished(let translated, let total, let uploadAttempted, let uploaded, _):
+            statusRow("Translated \(translated) of \(total) sentences" + (uploadAttempted && !uploaded ? "\nTranslated, but the upload to sync failed. Run Pre-translate again to retry the upload." : "")) {
                 if let saved { Button { onDismissJob(saved.bookId) } label: { Image(systemName: "xmark") } }
             }
         case .failed(let message, let kept):
@@ -375,6 +375,9 @@ final class PretranslateSheetModel: Identifiable {
     }
 
     func prepare() async {
+        // Offer the models first so the picker is populated even when saving or planning fails.
+        choices = Self.modelChoices()
+        syncConfigured = HttpSyncSettingsStore.shared.isConfigured
         do {
             let saved = try await NewsStore.shared.saveArticle(article)
             self.saved = saved
@@ -386,9 +389,9 @@ final class PretranslateSheetModel: Identifiable {
             let config = self.config
             plan = try await Task.detached { try PretranslationPlanner.plan(bookId: book.id, syncId: bookSyncId, bookRoot: root, config: config) }.value
             estimate = plan?.estimate
-            choices = Self.modelChoices()
             apiKeyMissingFor = Self.apiKeyMissing(for: config.engine)
-            syncConfigured = HttpSyncSettingsStore.shared.isConfigured
+        } catch let failure as PretranslationFailure {
+            self.error = failure.message
         } catch {
             self.error = "Could not save the article: \(error.localizedDescription)"
         }
@@ -461,7 +464,7 @@ private struct PretranslateSheet: View {
             Form {
                 Section {
                     Text(model.article.title).font(.headline).lineLimit(2)
-                    Text("Every sentence is sent to the model below, and the translations are saved with the article and shared through sync so other devices can read them.")
+                    Text("The article is saved to the News shelf first. Every sentence is then sent to the model below, and the translations are saved with the article and shared through sync so other devices can read them.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     if let error = model.error { Text(error).foregroundStyle(.red) }

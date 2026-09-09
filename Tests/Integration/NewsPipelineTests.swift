@@ -130,7 +130,7 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertNil(NewsArticleEpubWriter.imageType(Data("not an image".utf8)))
     }
 
-    func testSentenceBlobPassesTheReaderValidationAndIsLookedUpByTheStore() throws {
+    func testSentenceBlobPassesTheReaderValidationAndMatchesTheSegmenterAddresses() throws {
         let root = try tempDir()
         defer { try? FileManager.default.removeItem(at: root) }
         try writeArticle(to: root)
@@ -152,16 +152,15 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertNil(decoded.validationError(expectedSyncId: "rain-sync", spineCount: 1))
 
         let rain = try XCTUnwrap(plan.sentences.first { $0.text.hasPrefix("東京") })
-        let hash = EpubTranslationStore.textHash(EpubTranslationStore.normalize(rain.text))
-        let folder = root.lastPathComponent
-        // The store keys by folder name under Books/; point it at the temp root's parent instead.
-        let store = EpubTranslationStore.shared
-        store.invalidate(root: root)
         let entry = try XCTUnwrap(decoded.entries[rain.id])
-        XCTAssertEqual(entry.hash, hash)
+        XCTAssertEqual(entry.hash, EpubTranslationStore.textHash(EpubTranslationStore.normalize(rain.text)))
         XCTAssertEqual(entry.translation, "EN 東京で雨が降りました。")
         XCTAssertEqual(entry.len, EpubTranslationStore.normalize(rain.text).unicodeScalars.count)
-        _ = folder
+        // Wire format shared with the Python tool and the Android app.
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), ["version", "kind", "syncId", "title", "model", "promptId", "generatedAt", "spineCount", "entries"])
+        XCTAssertEqual(Set((try XCTUnwrap((json["entries"] as? [String: Any])?[rain.id] as? [String: Any])).keys), ["spine", "start", "len", "text", "hash", "translation", "explanation"])
+        XCTAssertNotNil(blob.generatedAt.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#, options: .regularExpression))
 
         // Reuse honors model + prompt; another configuration counts as foreign.
         XCTAssertEqual(SentenceTranslationsWriter.existingTranslations(bookRoot: root, plan: plan, model: "gpt-4o-mini", promptId: SentenceBatchPrompt.promptId(includeExplanations: true)).count, 5)
@@ -240,6 +239,22 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertEqual(emptyLarge.calls.batches.map(\.count), [4, 2, 2])
         XCTAssertTrue(emptyLarge.calls.singles.isEmpty)
         XCTAssertEqual(halved.count, 4)
+    }
+
+    func testRerunWhereEveryNewRequestFailsIsNotReportedAsSuccess() async {
+        let sentences = (0..<3).map { sentence($0 * 10, "文\($0)。") }
+        let dead = FakeTranslator(supportsBatches: false, single: { _ in throw Boom() })
+        let existing = ["c0s0": SentenceTranslationResult(sentenceId: "c0s0", translation: "old")]
+        do {
+            _ = try await PretranslationRunner(translator: dead, config: PretranslationConfig(engine: .cloud(modelId: "m")), maxFailedRequests: 6).run(sentences: sentences, existing: existing, sink: PretranslationSink())
+            XCTFail("two failed requests within budget and no new sentence must not count as success")
+        } catch is PretranslationTooManyFailures {
+        } catch {
+            XCTFail("unexpected \(error)")
+        }
+        XCTAssertEqual(PretranslationConfig(engine: .cloud(modelId: "claude-haiku-4-5")).withEffectiveBatchSize().sentencesPerRequest, PretranslationConfig.anthropicSentencesPerRequest)
+        XCTAssertEqual(PretranslationConfig(engine: .cloud(modelId: "gpt-4o-mini")).withEffectiveBatchSize().sentencesPerRequest, PretranslationConfig.defaultSentencesPerRequest)
+        XCTAssertEqual(PretranslationConfig(engine: .cloud(modelId: "claude-haiku-4-5"), sentencesPerRequest: 3).withEffectiveBatchSize().sentencesPerRequest, 3)
     }
 
     func testRunnerKeepsPartialResultsInTheSinkWhenItGivesUp() async {

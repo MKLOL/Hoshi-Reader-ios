@@ -81,7 +81,8 @@ nonisolated enum PretranslationJobState: Equatable, Sendable {
     /// `cancelling`: the user asked to stop; the in-flight request finishes before the job ends.
     case running(completed: Int, total: Int, engineLabel: String, cancelling: Bool)
     case uploading
-    case finished(translated: Int, total: Int, uploaded: Bool, engineLabel: String)
+    /// `uploadAttempted` is false when sync is not configured; `uploaded` is meaningful only then.
+    case finished(translated: Int, total: Int, uploadAttempted: Bool, uploaded: Bool, engineLabel: String)
     /// `savedTranslations`: sentences translated and saved before the job gave up.
     case failed(message: String, savedTranslations: Int)
     case cancelled(savedTranslations: Int)
