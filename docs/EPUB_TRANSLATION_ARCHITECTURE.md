@@ -448,3 +448,16 @@ tests) plus Swift unit tests for the store and the anchor serializer, mirroring
   EPUB controller would duplicate the provider routing, the on-device path, the error taxonomy and
   the history browser. (Their *names* become slightly wrong — renaming to `AiTutorController` /
   `AiTutorPopupView` is a mechanical follow-up, kept out of the feature diff.)
+
+
+## In-app writer: News pre-translation
+
+Since the News tab (`Features/News/`) the app itself can produce `sentence_translations.json`:
+`Pretranslate/PretranslationPlanner` segments a saved article with `EpubSentenceSegmenter`,
+`PretranslationRunner` batches the sentences through `CloudChat` or the on-device model,
+`SentenceTranslationsWriter` builds an `HttpSyncSentencesBlob` (same `promptId`/hash/`len` rules
+as the Python tool), validates it with `validationError(expectedSyncId:spineCount:)` before writing,
+and `SentenceTranslationsUploader` PUTs `books/{syncId}/sentences`. The sync engines stay
+download-only for that key; a blob written on one device reaches the others through the normal
+sentences import. Partial results are kept on failure or cancel unless a complete sidecar from
+another model or prompt already exists. The Android app writes the identical format.

@@ -33,6 +33,8 @@ struct BookshelfView: View {
     @Binding var pendingRemoteImportURL: URL?
     @Binding var pendingLookup: String?
     @Binding var pendingTab: Int?
+    /// An article URL shared into the app ("Save as article"); the News tab saves and opens it.
+    @Binding var pendingNewsURL: String?
     
     var body: some View {
         TabView(selection: Binding(get: { selectedTab }, set: { newTab in
@@ -112,6 +114,14 @@ struct BookshelfView: View {
                 }
             }
             
+            // Tag 3 keeps the existing Books/Dictionary/Settings tags (0/1/2) that quick actions and
+            // pendingTab rely on; the declaration order puts News second.
+            Tab("News", systemImage: "newspaper", value: 3) {
+                NavigationStack {
+                    NewsView(pendingSharedURL: $pendingNewsURL)
+                }
+            }
+
             Tab("Dictionary", systemImage: "character.magnify.ja", value: 1) {
                 NavigationStack {
                     DictionarySearchView(
@@ -186,6 +196,11 @@ struct BookshelfView: View {
             if let tab {
                 selectedTab = tab
                 pendingTab = nil
+            }
+        }
+        .onChange(of: pendingNewsURL, initial: true) { _, url in
+            if url != nil {
+                selectedTab = 3
             }
         }
         .onChange(of: pendingLookup) { _, text in

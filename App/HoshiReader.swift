@@ -19,6 +19,8 @@ struct HoshiReaderApp: App {
     @State private var pendingRemoteImportURL: URL?
     @State private var pendingLookup: String?
     @State private var pendingTab: Int?
+
+    @State private var pendingNewsURL: String?
     private var shortcutHandler = ShortcutHandler.shared
     
     init() {
@@ -50,7 +52,8 @@ struct HoshiReaderApp: App {
                 pendingImportURL: $pendingImportURL,
                 pendingRemoteImportURL: $pendingRemoteImportURL,
                 pendingLookup: $pendingLookup,
-                pendingTab: $pendingTab
+                pendingTab: $pendingTab,
+                pendingNewsURL: $pendingNewsURL
             )
             .environment(userConfig)
             .preferredColorScheme(userConfig.theme == .custom ? userConfig.uiTheme.colorScheme : (userConfig.theme == .sepia && userConfig.sepiaInvertInDark ? nil : userConfig.theme.colorScheme))
@@ -99,6 +102,12 @@ struct HoshiReaderApp: App {
             } else if url.host == "search" {
                 let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
                 pendingLookup = components?.queryItems?.first(where: { $0.name == "text" })?.value ?? ""
+            } else if url.host == "news" {
+                pendingTab = 3
+            } else if url.host == "save-article", let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                      let article = components.queryItems?.first(where: { $0.name == "url" })?.value,
+                      let articleURL = NewsSharedUrl.extract(article) {
+                pendingNewsURL = articleURL
             } else if url.host == "open", let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                       let urlString = components.queryItems?.first(where: { $0.name == "url" })?.value,
                       let remoteURL = URL(string: urlString) {
