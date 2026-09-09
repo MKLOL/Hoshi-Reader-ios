@@ -4,6 +4,11 @@ import XCTest
 /// the pre-translate sheet and the reader. Network-dependent by nature; screenshots are attached
 /// at each step so a failure can be diagnosed from the result bundle.
 final class NewsTabUITests: XCTestCase {
+    override func setUpWithError() throws {
+        // A failed step must not cascade into later taps that save and pre-translate other articles.
+        continueAfterFailure = false
+    }
+
     func testNewsTabListsSavesPretranslatesAndOpens() throws {
         let app = XCUIApplication()
         app.launch()
@@ -12,6 +17,13 @@ final class NewsTabUITests: XCTestCase {
         XCTAssertTrue(newsTab.waitForExistence(timeout: 10))
         newsTab.tap()
         attach(app, "1-news-tab")
+
+        // Sources finish loading at different times and the merged list re-sorts as they arrive,
+        // which can scroll the row that was tapped out of the accessibility tree. Filtering to one
+        // source keeps the row in place.
+        let watanoc = app.buttons["Watanoc"].firstMatch
+        XCTAssertTrue(watanoc.waitForExistence(timeout: 10), "no Watanoc source chip")
+        watanoc.tap()
 
         let wantToRead = app.buttons["Want to read"].firstMatch
         XCTAssertTrue(wantToRead.waitForExistence(timeout: 90), "no article appeared in the News tab")
@@ -36,7 +48,15 @@ final class NewsTabUITests: XCTestCase {
         open.tap()
         let reader = app.webViews.firstMatch
         XCTAssertTrue(reader.waitForExistence(timeout: 30), "the reader did not open")
+        // The reader shows a spinner until the book is laid out; the screenshot is only useful
+        // once it is gone, and a spinner that never goes away means the article does not render.
+        let spinner = app.activityIndicators.firstMatch
+        let deadline = Date().addingTimeInterval(60)
+        while spinner.exists && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+        }
         attach(app, "5-reader")
+        XCTAssertFalse(spinner.exists, "the reader kept loading the article")
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

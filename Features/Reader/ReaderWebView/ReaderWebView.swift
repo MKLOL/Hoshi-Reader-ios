@@ -640,7 +640,8 @@ struct ReaderWebView: UIViewRepresentable {
                 var imagePromises = Array.from(images).map(img => {
                     return new Promise(resolve => {
                         const isGaiji = img.classList.contains('gaiji') || img.classList.contains('gaiji-line');
-                        if (img.complete && img.naturalWidth > 0) {
+                        // complete covers a failed load too: its error event fired before this ran.
+                        if (img.complete) {
                             if (!isGaiji && (img.naturalWidth > 256 || img.naturalHeight > 256)) {
                                 img.classList.add('block-img');
                             }
@@ -653,6 +654,8 @@ struct ReaderWebView: UIViewRepresentable {
                                 resolve();
                             };
                             img.onerror = () => resolve();
+                            // A remote image that stalls must not keep the page from opening.
+                            setTimeout(resolve, 10000);
                         }
                     });
                 });
