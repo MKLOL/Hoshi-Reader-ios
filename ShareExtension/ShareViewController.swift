@@ -18,22 +18,36 @@ final class ShareViewController: UIViewController {
             return
         }
 
-        // A web page shared from a browser arrives as a URL; it becomes an article in the News
-        // tab. Plain text keeps its original meaning: a dictionary lookup.
-        if let urlProvider = attachments.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.url.identifier) }) {
-            urlProvider.loadItem(forTypeIdentifier: UTType.url.identifier) { [weak self] item, _ in
-                let shared = (item as? URL)?.absoluteString ?? (item as? String)
-                self?.open(host: "save-article", query: "url", value: shared)
+        // Text keeps its original meaning, a dictionary lookup, unless the text itself is a link.
+        // A page shared from a browser without selected text arrives as a URL only and becomes an
+        // article in the News tab.
+        if let textProvider = attachments.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.text.identifier) }) {
+            textProvider.loadItem(forTypeIdentifier: UTType.text.identifier) { [weak self] item, _ in
+                let text = item as? String ?? (item as? Data).flatMap { String(data: $0, encoding: .utf8) }
+                if let text, Self.isBareLink(text) {
+                    self?.open(host: "save-article", query: "url", value: text.trimmingCharacters(in: .whitespacesAndNewlines))
+                } else {
+                    self?.open(host: "search", query: "text", value: text)
+                }
             }
             return
         }
-        guard let provider = attachments.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.text.identifier) }) else {
+        guard let urlProvider = attachments.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.url.identifier) }) else {
             finish()
             return
         }
-        provider.loadItem(forTypeIdentifier: UTType.text.identifier) { [weak self] item, _ in
-            self?.open(host: "search", query: "text", value: item as? String)
+        urlProvider.loadItem(forTypeIdentifier: UTType.url.identifier) { [weak self] item, _ in
+            let shared = (item as? URL)?.absoluteString
+                ?? (item as? String)
+                ?? (item as? Data).flatMap { String(data: $0, encoding: .utf8) }
+            self?.open(host: "save-article", query: "url", value: shared)
         }
+    }
+
+    private static func isBareLink(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains(where: \.isWhitespace), let url = URL(string: trimmed), let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
     }
 
     private func open(host: String, query: String, value: String?) {

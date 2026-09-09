@@ -35,13 +35,26 @@ enum NewsBookImporter {
             try? fm.removeItem(at: stagingRoot)
             throw NewsBookImportError(message: "The article could not be parsed as a book: \(error.localizedDescription)")
         }
-        let booksDir = try BookStorage.getBooksDirectory()
+        let booksDir: URL
+        do {
+            booksDir = try BookStorage.getBooksDirectory()
+            // A fresh install that goes straight to News has no Books/ yet.
+            try fm.createDirectory(at: booksDir, withIntermediateDirectories: true)
+        } catch {
+            try? fm.removeItem(at: stagingRoot)
+            throw error
+        }
         let bookFolder = booksDir.appendingPathComponent(folderName, isDirectory: true)
         if fm.fileExists(atPath: bookFolder.path(percentEncoded: false)) {
             try? fm.removeItem(at: stagingRoot)
             throw NewsBookImportError(message: "A book directory named \(folderName) already exists")
         }
-        try fm.moveItem(at: stagingRoot, to: bookFolder)
+        do {
+            try fm.moveItem(at: stagingRoot, to: bookFolder)
+        } catch {
+            try? fm.removeItem(at: stagingRoot)
+            throw error
+        }
         do {
             // Re-parse from the final location so manifest paths resolve against it.
             let placed = try BookStorage.loadEpub(bookFolder)
@@ -72,8 +85,11 @@ enum NewsBookImporter {
         }
     }
 
-    /// Puts the book on the News shelf, creating the shelf when needed, and notifies sync.
+    /// Puts the book on the News shelf, creating the shelf when needed, and notifies sync. The
+    /// Books tab holds its own copy of the shelves, so it is told to reload rather than left to
+    /// overwrite this placement with the next shelf edit.
     static func addToNewsShelf(_ book: BookMetadata) throws {
+        defer { NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil) }
         let booksDir = try BookStorage.getBooksDirectory()
         var shelves = BookStorage.loadShelves() ?? []
         for index in shelves.indices {
@@ -92,11 +108,17 @@ enum NewsBookImporter {
     static func folderName(title: String, url: String) -> String {
         let unsafe = CharacterSet(charactersIn: "\\/:*?\"<>| ").union(.newlines).union(.controlCharacters)
         let cleaned = title.components(separatedBy: unsafe).joined(separator: "_").trimmingCharacters(in: .whitespacesAndNewlines)
-        let safe = String(cleaned.prefix(60))
+        // Count code points like the Android app so both derive the same folder (and sync id).
+        let safe = String(String.UnicodeScalarView(cleaned.unicodeScalars.prefix(60)))
         return "\(safe.isEmpty ? "article" : safe)-\(sha256Hex(url).prefix(8))"
     }
 
     static func bookExists(id: UUID) -> Bool {
         ((try? BookStorage.loadAllBooks()) ?? []).contains { $0.id == id }
     }
+}
+
+extension Notification.Name {
+    /// Books or shelves changed on disk outside the Books tab (a saved News article).
+    static let hoshiLibraryChanged = Notification.Name("HoshiLibraryChanged")
 }

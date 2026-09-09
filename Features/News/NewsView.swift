@@ -78,7 +78,7 @@ struct NewsView: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .padding()
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .task {
+                    .task(id: message) {
                         try? await Task.sleep(for: .seconds(4))
                         withAnimation { self.message = nil }
                     }

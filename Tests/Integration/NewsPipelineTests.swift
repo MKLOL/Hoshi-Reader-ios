@@ -67,6 +67,24 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertEqual(items[0].summary, "要約です。")
     }
 
+    func testMediaCaptionsDoNotOverwriteTheArticleTitleOrSummary() {
+        let feed = """
+        <rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>
+          <title>本物の見出し</title>
+          <link>https://example.jp/a</link>
+          <description>本文の要約。</description>
+          <media:content url="https://example.jp/img.jpg" type="image/jpeg">
+            <media:title>写真のキャプション</media:title>
+            <media:description>撮影者</media:description>
+          </media:content>
+        </item></channel></rss>
+        """
+        let item = RssFeedParser.parse(feed).first
+        XCTAssertEqual(item?.title, "本物の見出し")
+        XCTAssertEqual(item?.summary, "本文の要約。")
+        XCTAssertEqual(item?.imageUrl, "https://example.jp/img.jpg")
+    }
+
     func testMalformedFeedsYieldNoItems() {
         XCTAssertTrue(RssFeedParser.parse("<html><body>not a feed</body></html>").isEmpty)
         XCTAssertTrue(RssFeedParser.parse("<rss><channel><item><title>x").isEmpty)
@@ -93,6 +111,12 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         for forbidden in ["script", "home", "onclick", "href", "width", "javascript", "<p></p>", "<div>"] {
             XCTAssertFalse(output.contains(forbidden), "\(forbidden) leaked: \(output)")
         }
+        // Allowed elements inside unwrapped wrappers must survive (NHK/MATCHA wrap ruby in spans).
+        let nested = try XCTUnwrap(NewsArticleXhtml.sanitize("<section><p><span><ruby>東京<rt>と</rt></ruby></span>で<a href=\"x\"><strong>雨</strong></a>。</p></section>"))
+        XCTAssertEqual(nested, "<p><ruby>東京<rt>と</rt></ruby>で<strong>雨</strong>。</p>")
+        // Plain-http images are rewritten to https so the reader (ATS) can load them.
+        let upgraded = try XCTUnwrap(NewsArticleXhtml.sanitize("<p><img src=\"http://example.jp/a.jpg\" alt=\"x\"/>本文</p>"))
+        XCTAssertTrue(upgraded.contains("src=\"https://example.jp/a.jpg\""), upgraded)
         XCTAssertNil(NewsArticleXhtml.sanitize("<div><p>unclosed"))
         XCTAssertNil(NewsArticleXhtml.sanitize("<div><nav>x</nav><p>  </p></div>"))
         XCTAssertEqual(NewsArticleXhtml.paragraphs(fromText: "一行目 <b>\n\n  二行目 & 三\n"), "<p>一行目 &lt;b&gt;</p>\n<p>二行目 &amp; 三</p>")
@@ -286,7 +310,10 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertNil(NewsSharedUrl.extract("ただの文章です。"))
         XCTAssertEqual(NewsSourceCatalog.source(forUrl: "https://matcha-jp.com/easy/10505").id, NewsSourceCatalog.matchaEasyId)
         XCTAssertEqual(NewsSourceCatalog.source(forUrl: "https://example.jp/x").id, NewsSourceCatalog.sharedLinkId)
-        XCTAssertEqual(NewsBookImporter.folderName(title: "雨/晴れ: 😀 title", url: "https://s/1").hasSuffix("-\(sha256Hex("https://s/1").prefix(8))"), true)
+        let folder = NewsBookImporter.folderName(title: "雨/晴れ: 😀 title", url: "https://s/1")
+        XCTAssertTrue(folder.hasSuffix("-\(sha256Hex("https://s/1").prefix(8))"), folder)
+        XCTAssertTrue(folder.hasPrefix("雨_晴れ__😀_title-"), folder)
+        XCTAssertEqual(NewsBookImporter.folderName(title: String(repeating: "あ", count: 80), url: "u").unicodeScalars.count, 60 + 9)
     }
 
     @MainActor

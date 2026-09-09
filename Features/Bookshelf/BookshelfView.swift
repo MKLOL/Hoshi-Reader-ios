@@ -80,6 +80,9 @@ struct BookshelfView: View {
                     .onAppear {
                         viewModel.loadBooks()
                     }
+                    .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in
+                        viewModel.loadBooks()
+                    }
                     .fileImporter(
                         isPresented: $viewModel.isImporting,
                         allowedContentTypes: [UTType(filenameExtension: "cbz") ?? .data, .zip, .folder],
@@ -199,8 +202,9 @@ struct BookshelfView: View {
             }
         }
         .onChange(of: pendingNewsURL, initial: true) { _, url in
+            // Through pendingTab rather than selectedTab so an open reader on the Books tab closes.
             if url != nil {
-                selectedTab = 3
+                pendingTab = 3
             }
         }
         .onChange(of: pendingLookup) { _, text in

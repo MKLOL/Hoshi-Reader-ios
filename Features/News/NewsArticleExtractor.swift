@@ -37,6 +37,9 @@ final class WebViewNewsExtractor: NSObject, NewsArticleExtracting, WKNavigationD
     private let pollInterval: TimeInterval = 0.4
     private var webView: WKWebView?
     private var pageFinished: CheckedContinuation<Void, Error>?
+    /// The main-frame navigation the current run started; callbacks for any other navigation
+    /// (a stopped previous load, the about:blank reset) are ignored.
+    private var currentNavigation: WKNavigation?
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private lazy var script: String = {
@@ -103,7 +106,7 @@ final class WebViewNewsExtractor: NSObject, NewsArticleExtracting, WKNavigationD
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             self.pageFinished = continuation
             view.stopLoading()
-            view.load(URLRequest(url: target))
+            self.currentNavigation = view.load(URLRequest(url: target))
         }
         pageFinished = nil
 
@@ -125,6 +128,7 @@ final class WebViewNewsExtractor: NSObject, NewsArticleExtracting, WKNavigationD
             }
             try await Task.sleep(for: .seconds(pollInterval))
         }
+        currentNavigation = nil
         view.stopLoading()
         view.load(URLRequest(url: URL(string: "about:blank")!))
         guard let last else { throw NewsExtractionError(message: "Extraction script produced no result for \(url)") }
@@ -198,18 +202,31 @@ final class WebViewNewsExtractor: NSObject, NewsArticleExtracting, WKNavigationD
 
     // MARK: - WKNavigationDelegate
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        // A page that replaces itself while loading (location.replace, a consent bounce) cancels
+        // the navigation this run started and begins another: follow it while the run still waits.
+        guard pageFinished != nil, currentNavigation != nil, let navigation else { return }
+        currentNavigation = navigation
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView.url?.absoluteString == "about:blank" { return }
+        guard let navigation, navigation === currentNavigation else { return }
         pageFinished?.resume()
         pageFinished = nil
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        pageFinished?.resume(throwing: error)
-        pageFinished = nil
+        failCurrent(navigation, error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        failCurrent(navigation, error)
+    }
+
+    private func failCurrent(_ navigation: WKNavigation?, _ error: Error) {
+        guard let navigation, navigation === currentNavigation else { return }
+        // stopLoading() on our own navigation surfaces as "cancelled"; the timeout owns that case.
+        if (error as NSError).code == NSURLErrorCancelled { return }
         pageFinished?.resume(throwing: error)
         pageFinished = nil
     }

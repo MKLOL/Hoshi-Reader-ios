@@ -109,11 +109,15 @@ nonisolated enum NewsArticleXhtml {
                         dropDepth += 1
                         return
                     }
-                    kept["src"] = src
+                    // Plain-http images never load under App Transport Security; the https
+                    // variant usually exists (the Android app applies the same rewrite).
+                    kept["src"] = lowered.hasPrefix("http://") ? "https://" + src.dropFirst("http://".count) : src
                     if let alt = attributes["alt"], !alt.trimmingCharacters(in: .whitespaces).isEmpty { kept["alt"] = alt }
                 }
                 let node = Node(name: name, attributes: kept)
-                stack.last?.children.append(node)
+                // Attach to the nearest kept ancestor: an unwrapped wrapper (span, section, a) in
+                // between must not swallow the element the way it would if it were a real parent.
+                realParent?.children.append(node)
                 stack.append(node)
             } else {
                 // Unwrapped: children attach to the current parent. Push a marker so the matching
@@ -135,7 +139,7 @@ nonisolated enum NewsArticleXhtml {
         }
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
-            guard dropDepth == 0, string.contains(where: { !$0.isWhitespace }) || !string.isEmpty else { return }
+            guard dropDepth == 0, !string.isEmpty else { return }
             realParent?.children.append(Node(name: "#text", text: string))
         }
 

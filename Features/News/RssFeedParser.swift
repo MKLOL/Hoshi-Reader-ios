@@ -105,8 +105,13 @@ nonisolated enum RssFeedParser {
                 return
             }
             guard inItem else { return }
-            currentElement = name
-            text = ""
+            let isMedia = namespaceURI?.contains("mrss") == true || namespaceURI?.contains("media") == true
+            // Elements nested inside a captured one (Atom type="xhtml" content) keep accumulating
+            // into that capture instead of restarting it.
+            if currentElement == nil, !isMedia {
+                currentElement = name
+                text = ""
+            }
             switch name {
             case "link":
                 if let href = attributes["href"] {
@@ -157,6 +162,9 @@ nonisolated enum RssFeedParser {
                 return
             }
             guard inItem else { return }
+            let isMedia = namespaceURI?.contains("mrss") == true || namespaceURI?.contains("media") == true
+            // media:title / media:description describe an attachment, not the article.
+            guard !isMedia, name == currentElement else { return }
             let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
             switch name {
             case "title": title = value
@@ -164,7 +172,7 @@ nonisolated enum RssFeedParser {
             case "pubdate", "published", "date": date = value
             case "updated": updated = value
             case "description", "summary": summary = value
-            case "content", "encoded": if namespaceURI?.contains("media") != true { content = value }
+            case "content", "encoded": content = value
             default: break
             }
             currentElement = nil

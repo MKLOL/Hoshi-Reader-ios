@@ -12,10 +12,12 @@
 //
 
 import Foundation
+import OSLog
 
 @Observable
 @MainActor
 final class NewsStore {
+    private let log = Logger(subsystem: "com.dragosristache.hoshi", category: "News")
     static let shared = NewsStore()
 
     private(set) var articles: [NewsArticle] = []
@@ -167,7 +169,12 @@ final class NewsStore {
         )
         try await Task.detached { try NewsArticleEpubWriter.write(to: staging, input: input) }.value
         let book = try NewsBookImporter.register(stagingRoot: staging, folderName: NewsBookImporter.folderName(title: title, url: article.url))
-        try? NewsBookImporter.addToNewsShelf(book)
+        do {
+            try NewsBookImporter.addToNewsShelf(book)
+        } catch {
+            // The book is registered and readable either way; only its shelf placement failed.
+            log.error("Could not place \(book.title ?? book.folder ?? book.id.uuidString, privacy: .public) on the News shelf: \(error.localizedDescription, privacy: .public)")
+        }
         let record = SavedNewsArticle(articleId: article.id, bookId: book.id, sourceId: source.id, url: article.url, title: title, savedAt: nowEpochMillis())
         feedStore.upsertSaved(record)
         saved[article.id] = record
