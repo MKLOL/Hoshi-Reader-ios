@@ -23,12 +23,13 @@ nonisolated struct CloudSentenceTranslator: SentenceTranslating {
     let provider: ChatProvider
     let apiKey: String
     let modelId: String
+    var customInstructions: String = ""
     var supportsBatches: Bool { true }
 
     func translateBatch(_ sentences: [ReaderSentence], includeExplanations: Bool) async throws -> [String: SentenceTranslationResult] {
         let reply = try await CloudChat.complete(
             provider: provider, apiKey: apiKey, model: modelId,
-            prompt: SentenceBatchPrompt.instructions(includeExplanations: includeExplanations),
+            prompt: SentenceBatchPrompt.instructions(includeExplanations: includeExplanations, customInstructions: customInstructions),
             bubbleText: SentenceBatchPrompt.itemsJson(sentences)
         )
         return SentenceBatchPrompt.parseBatch(reply, expectedIds: Set(sentences.map(\.id)))
@@ -37,7 +38,7 @@ nonisolated struct CloudSentenceTranslator: SentenceTranslating {
     func translateOne(_ sentence: ReaderSentence, includeExplanations: Bool) async throws -> SentenceTranslationResult? {
         let reply = try await CloudChat.complete(
             provider: provider, apiKey: apiKey, model: modelId,
-            prompt: SentenceBatchPrompt.singleInstructions(includeExplanations: includeExplanations),
+            prompt: SentenceBatchPrompt.singleInstructions(includeExplanations: includeExplanations, customInstructions: customInstructions),
             bubbleText: sentence.text
         )
         return SentenceBatchPrompt.parseSingle(reply, sentenceId: sentence.id)

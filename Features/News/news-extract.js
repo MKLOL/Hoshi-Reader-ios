@@ -1,7 +1,7 @@
 // Runs inside the hidden news WebView (see WebViewNewsExtractor). Defines
 // window.hoshiNewsExtract(options) and returns a JSON string:
 //   listing: {ready, items:[{url,title,publishedAt,imageUrl}]}
-//   article: {ready, url, title, xhtml, text, publishedAt, imageUrl}
+//   article: {ready, url, title, titleXhtml, xhtml, text, publishedAt, imageUrl}
 // "ready" is false while a client-rendered page has not produced its content yet; the host
 // keeps polling until it flips to true or a timeout expires.
 (function () {
@@ -126,6 +126,18 @@
         return text.trim();
     }
 
+    // The headline with its ruby, for the saved article's own <h1>. Only a headline that carries
+    // ruby and reads as the extracted title is worth serializing; plain titles need no markup.
+    function extractTitleXhtml(hints) {
+        var hinted = firstMatching(hints.titleSelectors || []) || document.querySelector('h1');
+        if (!hinted || !hinted.querySelector('ruby')) return '';
+        if (visibleText(hinted) !== extractTitle(hints)) return '';
+        var clone = hinted.cloneNode(true);
+        clone.querySelectorAll(JUNK_SELECTOR).forEach(function (el) { el.remove(); });
+        clone.querySelectorAll('[style]').forEach(function (el) { el.removeAttribute('style'); });
+        try { return new XMLSerializer().serializeToString(clone); } catch (e) { return ''; }
+    }
+
     // NHK ONE shows a one-time "For users abroad: text is available, some videos are not —
     // I understand" notice before any content renders outside Japan. Only a source that names the
     // button (hints.acknowledgeSelector) is allowed to click it, at most once per page load, and
@@ -176,6 +188,7 @@
             ready: ready && japaneseLength(text) >= 40,
             url: location.href,
             title: extractTitle(hints),
+            titleXhtml: extractTitleXhtml(hints),
             xhtml: xhtml,
             text: text,
             publishedAt: published,

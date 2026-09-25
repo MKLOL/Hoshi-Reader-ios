@@ -155,7 +155,7 @@ final class NewsStore {
 
         let extracted = try await extractor.extractArticle(source: source, url: article.url)
         let body = await Task.detached {
-            NewsArticleXhtml.sanitize(extracted.xhtml) ?? NewsArticleXhtml.paragraphs(fromText: extracted.text)
+            NewsArticleXhtml.sanitize(extracted.xhtml, fullWidthDigits: source.language == "ja") ?? NewsArticleXhtml.paragraphs(fromText: extracted.text, fullWidthDigits: source.language == "ja")
         }.value
         var cover: Data?
         if let imageUrl = extracted.imageUrl ?? article.imageUrl {
@@ -165,7 +165,7 @@ final class NewsStore {
         let staging = FileManager.default.temporaryDirectory.appendingPathComponent("NewsImport-\(UUID().uuidString)", isDirectory: true)
         let input = NewsArticleEpubWriter.Input(
             title: title, bodyXhtml: body, sourceName: source.name, sourceUrl: article.url,
-            language: source.language, publishedAt: extracted.publishedAt ?? article.publishedAt, cover: cover
+            language: source.language, publishedAt: extracted.publishedAt ?? article.publishedAt, cover: cover, titleXhtml: extracted.titleXhtml
         )
         try await Task.detached { try NewsArticleEpubWriter.write(to: staging, input: input) }.value
         let book = try NewsBookImporter.register(stagingRoot: staging, folderName: NewsBookImporter.folderName(title: title, url: article.url))

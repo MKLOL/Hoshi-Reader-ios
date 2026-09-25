@@ -137,6 +137,24 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertEqual(NewsArticleXhtml.paragraphs(fromText: "一行目 <b>\n\n  二行目 & 三\n"), "<p>一行目 &lt;b&gt;</p>\n<p>二行目 &amp; 三</p>")
     }
 
+    func testHeadlineRubyAndUprightDigitsPreserveImageURLs() throws {
+        let title = try XCTUnwrap(NewsArticleXhtml.sanitizeTitle("<h1><ruby>東京<rt>とうきょう</rt></ruby>で4人<img src=\"https://e/4.jpg\"/></h1>", fullWidthDigits: true))
+        XCTAssertEqual(title, "<ruby>東京<rt>とうきょう</rt></ruby>で４人")
+        let body = try XCTUnwrap(NewsArticleXhtml.sanitize("<div><p>2026年4月</p><img src=\"https://e/4.jpg\"/></div>", fullWidthDigits: true))
+        XCTAssertTrue(body.contains("２０２６年４月"))
+        XCTAssertTrue(body.contains("https://e/4.jpg"))
+    }
+
+    func testCustomInstructionsKeepReplyContractAndDefaultIdentity() {
+        let original = SentenceBatchPrompt.promptId(includeExplanations: true)
+        XCTAssertEqual(original, SentenceBatchPrompt.promptId(includeExplanations: true, customInstructions: "  "))
+        let prompt = SentenceBatchPrompt.instructions(includeExplanations: true, customInstructions: "Explain every particle")
+        XCTAssertTrue(prompt.hasPrefix("Explain every particle. Reply with JSON only:"))
+        XCTAssertFalse(prompt.contains("You translate sentences"))
+        XCTAssertNotEqual(original, SentenceBatchPrompt.promptId(includeExplanations: true, customInstructions: "Explain every particle"))
+        XCTAssertTrue(SentenceBatchPrompt.singleInstructions(includeExplanations: true, customInstructions: "Literal:").hasPrefix("Literal: This request contains a single sentence"))
+    }
+
     // MARK: EPUB writer + reader consumption
 
     private func writeArticle(to root: URL, body: String = "<p><ruby>東京<rt>とうきょう</rt></ruby>で雨が降りました。</p><p>二つ目の文です。三つ目！</p>") throws {

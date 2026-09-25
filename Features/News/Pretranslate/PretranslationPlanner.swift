@@ -42,7 +42,7 @@ nonisolated enum PretranslationPlanner {
         let characters = sentences.reduce(0) { $0 + $1.text.count }
         let perRequest = max(1, config.sentencesPerRequest)
         let requests = sentences.isEmpty ? 0 : (sentences.count + perRequest - 1) / perRequest
-        let promptTokens = TokenEstimator.promptTokens(SentenceBatchPrompt.instructions(includeExplanations: config.includeExplanations)) * requests
+        let promptTokens = TokenEstimator.promptTokens(SentenceBatchPrompt.instructions(includeExplanations: config.includeExplanations, customInstructions: config.effectiveInstructions)) * requests
         let inputTokens = promptTokens + sentences.reduce(0) { $0 + TokenEstimator.inputTokens(forSentence: $1.text) }
         let outputTokens = sentences.reduce(0) { $0 + TokenEstimator.outputTokens(forSentence: $1.text, withExplanation: config.includeExplanations) }
         let cost: Double?

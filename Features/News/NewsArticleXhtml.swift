@@ -27,8 +27,8 @@ nonisolated enum NewsArticleXhtml {
     private static let blocks: Set<String> = ["p", "div", "li", "ul", "ol", "blockquote", "figure", "h1", "h2", "h3", "h4", "h5", "h6"]
 
     /// Returns the sanitized fragment, or nil when `xhtml` is not well-formed XML or has no content.
-    static func sanitize(_ xhtml: String) -> String? {
-        let delegate = Builder()
+    static func sanitize(_ xhtml: String, fullWidthDigits: Bool = false, titleOnly: Bool = false) -> String? {
+        let delegate = Builder(fullWidthDigits: fullWidthDigits, titleOnly: titleOnly)
         let parser = XMLParser(data: Data(xhtml.utf8))
         parser.shouldProcessNamespaces = true
         parser.shouldResolveExternalEntities = false
@@ -42,12 +42,22 @@ nonisolated enum NewsArticleXhtml {
     }
 
     /// Escapes `text` into one `<p>` per non-blank line for the plain-text fallback.
-    static func paragraphs(fromText text: String) -> String {
-        text.split(whereSeparator: \.isNewline)
+    static func paragraphs(fromText text: String, fullWidthDigits: Bool = false) -> String {
+        (fullWidthDigits ? uprightDigits(text) : text).split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { "<p>\(escape($0))</p>" }
             .joined(separator: "\n")
+    }
+
+    static func sanitizeTitle(_ xhtml: String, fullWidthDigits: Bool = false) -> String? {
+        sanitize(xhtml, fullWidthDigits: fullWidthDigits, titleOnly: true)
+    }
+
+    static func uprightDigits(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.map { scalar in
+            (48...57).contains(scalar.value) ? UnicodeScalar(scalar.value + 0xFEE0)! : scalar
+        }))
     }
 
     static func escape(_ text: String) -> String {
@@ -83,12 +93,17 @@ nonisolated enum NewsArticleXhtml {
     /// Collects the allowed subtree while unwrapping unknown elements and dropping junk ones.
     private final class Builder: NSObject, XMLParserDelegate {
         var root: Node?
+        let fullWidthDigits: Bool
+        let titleOnly: Bool
+        init(fullWidthDigits: Bool, titleOnly: Bool) {
+            self.fullWidthDigits = fullWidthDigits; self.titleOnly = titleOnly
+        }
         private var stack: [Node] = []
         private var dropDepth = 0
 
         func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes: [String: String] = [:]) {
             let name = elementName.lowercased()
-            if dropDepth > 0 || dropped.contains(name) {
+            if dropDepth > 0 || dropped.contains(name) || (titleOnly && name == "img") {
                 dropDepth += 1
                 return
             }
@@ -98,7 +113,7 @@ nonisolated enum NewsArticleXhtml {
                 stack = [node]
                 return
             }
-            if allowed.contains(name) {
+            if allowed.contains(name) && (!titleOnly || ["ruby", "rt", "rp", "rb", "strong", "em", "b", "i", "br"].contains(name)) {
                 var kept: [String: String] = [:]
                 if name == "img" {
                     let src = attributes["src"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -140,12 +155,12 @@ nonisolated enum NewsArticleXhtml {
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
             guard dropDepth == 0, !string.isEmpty else { return }
-            realParent?.children.append(Node(name: "#text", text: string))
+            realParent?.children.append(Node(name: "#text", text: fullWidthDigits ? uprightDigits(string) : string))
         }
 
         func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
             guard dropDepth == 0 else { return }
-            realParent?.children.append(Node(name: "#text", text: String(decoding: CDATABlock, as: UTF8.self)))
+            self.parser(parser, foundCharacters: String(decoding: CDATABlock, as: UTF8.self))
         }
 
         private var realParent: Node? { stack.last(where: { $0.name != "#unwrap" }) }

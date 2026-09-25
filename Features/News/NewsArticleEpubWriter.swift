@@ -24,6 +24,7 @@ nonisolated enum NewsArticleEpubWriter {
         var publishedAt: Int64? = nil
         /// JPEG, PNG or WebP bytes; anything else is ignored.
         var cover: Data? = nil
+        var titleXhtml: String? = nil
     }
 
     struct ImageType { let fileExtension: String; let mediaType: String }
@@ -45,6 +46,9 @@ nonisolated enum NewsArticleEpubWriter {
         let coverType = input.cover.flatMap(imageType)
         let coverName = "cover.\(coverType?.fileExtension ?? "jpg")"
         let e = NewsArticleXhtml.escape
+        let upright = input.language == "ja"
+        let heading = input.titleXhtml.flatMap { NewsArticleXhtml.sanitizeTitle($0, fullWidthDigits: upright) }
+            ?? e(upright ? NewsArticleXhtml.uprightDigits(title) : title)
 
         try fm.createDirectory(at: root.appendingPathComponent("META-INF"), withIntermediateDirectories: true)
         try fm.createDirectory(at: root.appendingPathComponent("OEBPS"), withIntermediateDirectories: true)
@@ -95,7 +99,7 @@ nonisolated enum NewsArticleEpubWriter {
         chapter += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         chapter += "<html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"\(input.language)\" lang=\"\(input.language)\">\n"
         chapter += "<head><meta charset=\"utf-8\"/><title>\(e(title))</title><link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/></head>\n"
-        chapter += "<body>\n<h1>\(e(title))</h1>\n"
+        chapter += "<body>\n<h1>\(heading)</h1>\n"
         let sourceLine = [input.sourceName.trimmingCharacters(in: .whitespaces).isEmpty ? nil : input.sourceName, published].compactMap { $0 }.joined(separator: " · ")
         if !sourceLine.isEmpty { chapter += "<p class=\"hoshi-news-source\">\(e(sourceLine))</p>\n" }
         chapter += input.bodyXhtml.trimmingCharacters(in: .whitespacesAndNewlines) + "\n</body>\n</html>\n"

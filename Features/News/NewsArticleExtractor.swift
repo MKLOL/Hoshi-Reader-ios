@@ -83,7 +83,8 @@ final class WebViewNewsExtractor: NSObject, NewsArticleExtracting, WKNavigationD
             xhtml: (result["xhtml"] as? String) ?? "",
             text: text,
             publishedAt: (result["publishedAt"] as? NSNumber)?.int64Value,
-            imageUrl: result["imageUrl"] as? String
+            imageUrl: result["imageUrl"] as? String,
+            titleXhtml: result["titleXhtml"] as? String
         )
     }
 

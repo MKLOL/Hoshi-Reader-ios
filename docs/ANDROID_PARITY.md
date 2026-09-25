@@ -27,8 +27,8 @@ Each Android commit is accounted for below. Follow-up fixes are implemented with
 | `c75b955b` | 2026-09-12 | feat(statistics): keep reading statistics per device | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
 | `9ac6464c` | 2026-09-13 | chore: release 0.11.13 | No app port: release metadata |
 | `ab74ab90` | 2026-09-21 | feat(podcasts): add authenticated NHK learning lessons | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 7 behavior tests pass |
-| `0611f589` | 2026-09-21 | fix(news): keep headline furigana and upright digits in saved articles | Pending review/port |
-| `88bd2ca4` | 2026-09-21 | feat(news): let the user write the pre-translation instructions | Pending review/port |
+| `0611f589` | 2026-09-21 | fix(news): keep headline furigana and upright digits in saved articles | Ported: headline ruby, upright Japanese digits, remembered cloud instructions; 18 news tests pass |
+| `88bd2ca4` | 2026-09-21 | feat(news): let the user write the pre-translation instructions | Ported: headline ruby, upright Japanese digits, remembered cloud instructions; 18 news tests pass |
 | `d505d02e` | 2026-09-21 | fix(podcasts): list episodes over an hour and unknown lengths | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 7 behavior tests pass |
 | `d5b181a5` | 2026-09-21 | fix(podcasts): remember where a seek landed, not where it left | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 7 behavior tests pass |
 | `f29fd479` | 2026-09-21 | fix(podcasts): drop a replaced or rejected account's lessons and keep its marker off backups | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 7 behavior tests pass |

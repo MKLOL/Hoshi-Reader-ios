@@ -369,7 +369,7 @@ final class PretranslateSheetModel: Identifiable {
     init(article: NewsArticle) {
         self.article = article
         let engine = Self.defaultEngine()
-        config = PretranslationConfig(engine: engine, includeExplanations: !engine.isOnDevice).withEffectiveBatchSize()
+        config = PretranslationConfig(engine: engine, includeExplanations: !engine.isOnDevice, customInstructions: UserDefaults.standard.string(forKey: "news.pretranslationInstructions") ?? "").withEffectiveBatchSize()
     }
 
     var canStart: Bool {
@@ -402,6 +402,12 @@ final class PretranslateSheetModel: Identifiable {
 
     func select(engine: PretranslationEngine) {
         update { $0.engine = engine }
+    }
+
+    func setInstructions(_ text: String) {
+        let bounded = String(text.prefix(12000))
+        UserDefaults.standard.set(bounded, forKey: "news.pretranslationInstructions")
+        update { $0.customInstructions = bounded }
     }
 
     func setIncludeExplanations(_ include: Bool) {
@@ -484,6 +490,9 @@ private struct PretranslateSheet: View {
                     }
                     .pickerStyle(.navigationLink)
                     if !model.config.engine.isOnDevice {
+                        TextField("Your translation instructions (optional)", text: Binding(get: { model.config.customInstructions }, set: { model.setInstructions($0) }), axis: .vertical)
+                            .lineLimit(3...8)
+                        Text("Leave blank for the default. The reply format is added automatically.").font(.caption).foregroundStyle(.secondary)
                         Toggle("Include vocabulary and grammar notes", isOn: Binding(get: { model.config.includeExplanations }, set: { model.setIncludeExplanations($0) }))
                     }
                 }

@@ -32,6 +32,8 @@ nonisolated struct PretranslationConfig: Hashable, Sendable {
     var engine: PretranslationEngine
     /// Ask for a short vocabulary/grammar note per sentence in addition to the translation.
     var includeExplanations: Bool = true
+    var customInstructions: String = ""
+    var effectiveInstructions: String { engine.isOnDevice ? "" : customInstructions }
     var sentencesPerRequest: Int = PretranslationConfig.defaultSentencesPerRequest
 
     static let defaultSentencesPerRequest = 12

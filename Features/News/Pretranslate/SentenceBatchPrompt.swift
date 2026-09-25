@@ -15,7 +15,7 @@
 import Foundation
 
 nonisolated enum SentenceBatchPrompt {
-    static func instructions(includeExplanations: Bool) -> String {
+    static func instructions(includeExplanations: Bool, customInstructions: String = "") -> String {
         var text = "You translate sentences from an easy Japanese news article for a language learner. "
         text += "For every item in the JSON array below, write a natural English translation"
         if includeExplanations {
@@ -23,6 +23,7 @@ nonisolated enum SentenceBatchPrompt {
             text += "leave the note empty when nothing is tricky"
         }
         text += ". "
+        if let custom = customTask(customInstructions) { text = custom + " " }
         text += "Reply with JSON only: an array with one object per input item, in the same order, "
         text += "shaped like {\"id\": string, \"translation\": string, \"explanation\": string}. "
         text += "Keep the id exactly as given. Do not add any text before or after the JSON."
@@ -30,8 +31,14 @@ nonisolated enum SentenceBatchPrompt {
     }
 
     /// Stable identifier of the prompt, stored in the translation blob's `promptId`.
-    static func promptId(includeExplanations: Bool) -> String {
-        "sha256:" + String(sha256Hex(instructions(includeExplanations: includeExplanations)).prefix(32))
+    static func promptId(includeExplanations: Bool, customInstructions: String = "") -> String {
+        "sha256:" + String(sha256Hex(instructions(includeExplanations: includeExplanations, customInstructions: customInstructions)).prefix(32))
+    }
+
+    private static func customTask(_ raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = text.last else { return nil }
+        return ".!?:。！？：".contains(last) ? text : text + "."
     }
 
     static func itemsJson(_ sentences: [ReaderSentence]) -> String {
@@ -41,9 +48,10 @@ nonisolated enum SentenceBatchPrompt {
     }
 
     /// The one-sentence prompt used when a batch reply left an item out.
-    static func singleInstructions(includeExplanations: Bool) -> String {
+    static func singleInstructions(includeExplanations: Bool, customInstructions: String = "") -> String {
         var text = "Translate this sentence from an easy Japanese news article into natural English"
         if includeExplanations { text += ", then add a short note on tricky vocabulary or grammar if any" }
+        if let custom = customTask(customInstructions) { text = custom + " This request contains a single sentence" }
         text += ". Reply with JSON only, shaped like {\"translation\": string, \"explanation\": string}."
         return text
     }

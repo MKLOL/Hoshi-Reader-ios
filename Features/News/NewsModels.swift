@@ -98,6 +98,7 @@ nonisolated struct ExtractedNewsArticle: Sendable {
     let text: String
     var publishedAt: Int64? = nil
     var imageUrl: String? = nil
+    var titleXhtml: String? = nil
 }
 
 /// One entry read from a listing page or feed before it becomes a `NewsArticle`.

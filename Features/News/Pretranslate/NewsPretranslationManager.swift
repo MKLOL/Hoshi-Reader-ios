@@ -100,7 +100,7 @@ final class NewsPretranslationManager {
         defer { if queue.isEmpty { endBackgroundTask() } }
         let bookId = request.bookId
         let label = request.config.engine.label
-        let promptId = SentenceBatchPrompt.promptId(includeExplanations: request.config.includeExplanations)
+        let promptId = SentenceBatchPrompt.promptId(includeExplanations: request.config.includeExplanations, customInstructions: request.config.effectiveInstructions)
         let sink = PretranslationSink()
         var plan: PretranslationPlan?
         var root: URL?
@@ -140,7 +140,7 @@ final class NewsPretranslationManager {
                 let provider = ChatModelCatalog.provider(forModelId: modelId)
                 let apiKey = AiChatSettingsStore.shared.apiKey(for: provider)
                 guard !apiKey.isEmpty else { throw PretranslationFailure("Add a \(provider.displayName) API key in Settings › AI before starting.") }
-                translator = CloudSentenceTranslator(provider: provider, apiKey: apiKey, modelId: modelId)
+                translator = CloudSentenceTranslator(provider: provider, apiKey: apiKey, modelId: modelId, customInstructions: config.effectiveInstructions)
             case .onDevice(let modelId):
                 // The offline manager always runs the model selected in settings.
                 let selected = OfflineTranslationSettingsStore.shared.selectedModel
