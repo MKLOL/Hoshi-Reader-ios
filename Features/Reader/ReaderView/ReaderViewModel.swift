@@ -106,6 +106,8 @@ class ReaderViewModel {
     var lastTimestamp: Date = .now
     var lastCount: Int = 0
     private var readingTracker: MangaStatisticsTracker?
+    private var statisticsTask: Task<Void, Never>?
+    private var didSyncOnOpen = false
     var sessionStatistics: Statistics { readingTracker?.session ?? Self.getDefaultStatistic(title: document.title ?? "") }
     var todaysStatistics: Statistics { readingTracker?.today ?? Self.getDefaultStatistic(title: document.title ?? "") }
     var allTimeStatistics: Statistics { readingTracker?.allTime ?? Self.getDefaultStatistic(title: document.title ?? "") }
@@ -148,7 +150,8 @@ class ReaderViewModel {
         syncStats: Bool,
         statsSyncMode: StatisticsSyncMode,
         syncAudioBook: Bool,
-        showSentenceTranslations: Bool
+        showSentenceTranslations: Bool,
+        usageLog: UsageLog = .shared
     ) {
         self.book = book
         self.document = document
@@ -175,7 +178,7 @@ class ReaderViewModel {
             bookInfo = BookInfo(characterCount: 0, chapterInfo: [:])
         }
         
-        usage = ReaderUsageSession(book: book)
+        usage = ReaderUsageSession(book: book, log: usageLog)
         if enableStatistics {
             loadStatistics()
         }
@@ -275,6 +278,8 @@ class ReaderViewModel {
     }
     
     func syncOnOpen() async {
+        guard !didSyncOnOpen else { return }
+        didSyncOnOpen = true
         if autoSyncEnabled {
             let result = try? await SyncManager.shared.syncBook(
                 book: book,
@@ -486,6 +491,15 @@ class ReaderViewModel {
         lastTimestamp = .now
         lastCount = currentCharacter
         readingTracker?.start(currentPage: currentCharacter)
+        // The session outlives ReaderView's visibility while sentence mode covers it.
+        statisticsTask?.cancel()
+        statisticsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { break }
+                guard let self else { return }
+                self.updateStats()
+            }
+        }
     }
     
     func stopTracking() {
@@ -494,6 +508,8 @@ class ReaderViewModel {
         readingTracker?.pause(currentPage: currentCharacter)
         usage?.reading(false)
         isTracking = false
+        statisticsTask?.cancel()
+        statisticsTask = nil
     }
     
     // https://github.com/ttu-ttu/ebook-reader/blob/2703b50ec52b2e4f70afcab725c0f47dd8a66bf4/apps/web/src/lib/components/book-reader/book-reading-tracker/book-reading-tracker.svelte#L72

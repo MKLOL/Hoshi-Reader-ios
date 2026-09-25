@@ -12,23 +12,50 @@ private struct DismissReaderKey: EnvironmentKey {
     static let defaultValue: (() -> Void)? = nil
 }
 
+/// A full-screen reading mode hides its presenting view without ending the reader session.
+/// Cleanup belongs to the containing window, including when it closes with a mode still open.
+@MainActor final class ReaderWindowLifetime {
+    var onDismiss: (() -> Void)?
+    private(set) var isClosed = false
+    func close() {
+        guard !isClosed else { return }
+        isClosed = true
+        let action = onDismiss
+        onDismiss = nil
+        action?()
+    }
+}
+
+private struct ReaderWindowLifetimeKey: EnvironmentKey {
+    static let defaultValue: ReaderWindowLifetime? = nil
+}
+
 extension EnvironmentValues {
     var dismissReader: (() -> Void)? {
         get { self[DismissReaderKey.self] }
         set { self[DismissReaderKey.self] = newValue }
+    }
+    var readerWindowLifetime: ReaderWindowLifetime? {
+        get { self[ReaderWindowLifetimeKey.self] }
+        set { self[ReaderWindowLifetimeKey.self] = newValue }
     }
 }
 
 @MainActor
 final class ReaderWindow {
     private weak var hostController: UIViewController?
+    private(set) var lifetime: ReaderWindowLifetime?
     
     func present<Content: View>(@ViewBuilder content: () -> Content, onDismiss: @escaping () -> Void) {
         guard hostController == nil,
               let presenter = topPresenter() else { return }
         
         let dismiss: () -> Void = { [weak self] in self?.dismiss(onDismiss: onDismiss) }
-        let host = UIHostingController(rootView: AnyView(content().environment(\.dismissReader, dismiss)))
+        let lifetime = ReaderWindowLifetime()
+        self.lifetime = lifetime
+        let host = UIHostingController(rootView: AnyView(content()
+            .environment(\.dismissReader, dismiss)
+            .environment(\.readerWindowLifetime, lifetime)))
         host.modalPresentationStyle = .overFullScreen
         host.modalPresentationCapturesStatusBarAppearance = true
         host.view.alpha = 0
@@ -44,10 +71,13 @@ final class ReaderWindow {
     func dismiss(onDismiss: (() -> Void)? = nil) {
         guard let host = hostController else { return }
         self.hostController = nil
+        lifetime?.close()
+        lifetime = nil
         UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState, .curveEaseIn]) {
             host.view.alpha = 0
         } completion: { _ in
-            host.dismiss(animated: false) {
+            // Dismiss the whole reader stack even if the host is presenting sentence mode.
+            (host.presentingViewController ?? host).dismiss(animated: false) {
                 onDismiss?()
             }
         }

@@ -80,6 +80,7 @@ struct ReaderLoader: View {
 
 struct ReaderView: View {
     @Environment(\.dismissReader) private var dismissReader
+    @Environment(\.readerWindowLifetime) private var readerWindowLifetime
     @Environment(\.colorScheme) private var systemColorScheme
     @Environment(UserConfig.self) private var userConfig
     @State private var viewModel: ReaderViewModel
@@ -200,6 +201,24 @@ struct ReaderView: View {
             syncAudioBook: syncAudioBook,
             showSentenceTranslations: showSentenceTranslations
         ))
+    }
+
+    init(viewModel: ReaderViewModel) {
+        _viewModel = State(initialValue: viewModel)
+    }
+
+    private func finishReading() {
+        viewModel.closePopups()
+        viewModel.persistReadingTime()
+        viewModel.stopTracking()
+        viewModel.usage?.close()
+        aiController.dismiss()
+        viewModel.sasayakiPlayer.teardown()
+        Task {
+            await viewModel.flushAutoSync()
+            HttpSyncActiveBooks.close(syncId(for: viewModel.book))
+            HttpSyncManager.shared.syncInBackground()
+        }
     }
     
     private var progressString: String {
@@ -645,6 +664,16 @@ struct ReaderView: View {
             )
             .environment(userConfig)
             .preferredColorScheme(readerTheme)
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                guard viewModel.isTracking else { return }
+                viewModel.persistReadingTime()
+                viewModel.isPaused = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+                guard viewModel.isTracking else { return }
+                viewModel.resetTrackingBaseline()
+                viewModel.isPaused = false
+            }
         }
         .sheet(item: $viewModel.activeSheet) { item in
             switch item {
@@ -692,20 +721,8 @@ struct ReaderView: View {
                 .presentationDetents([.medium])
             }
         }
-        .task(id: viewModel.isTracking) {
-            // Don't gate the loop's EXISTENCE on isPaused: if the app was backgrounded (isPaused=true)
-            // before this task first ran, the early return killed reading-time tracking for the whole
-            // session even after returning to foreground. The inner `if !isPaused` already skips
-            // accrual while paused, so just keep the loop alive whenever tracking is on.
-            guard viewModel.isTracking else {
-                return
-            }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                if !viewModel.isPaused {
-                    viewModel.updateStats()
-                }
-            }
+        .onAppear {
+            if let lifetime = readerWindowLifetime, !lifetime.isClosed { lifetime.onDismiss = finishReading }
         }
         .task {
             await viewModel.syncOnOpen()
@@ -749,17 +766,8 @@ struct ReaderView: View {
             viewModel.reloadAfterHttpBookmark()
         }
         .onDisappear {
-            viewModel.closePopups()
-            viewModel.persistReadingTime()
-            viewModel.usage?.close()
-            // Cancel any in-flight request when leaving the reader, as the manga reader does.
-            aiController.dismiss()
-            viewModel.sasayakiPlayer.teardown()
-            Task {
-                await viewModel.flushAutoSync()
-                HttpSyncActiveBooks.close(syncId(for: viewModel.book))
-                HttpSyncManager.shared.syncInBackground()
-            }
+            // A full-screen sentence reader only hides this view. ReaderWindow owns dismissal.
+            if readerWindowLifetime == nil, !showSentenceMode { finishReading() }
         }
         .ignoresSafeArea(edges: .top)
         .ignoresSafeArea(.keyboard)

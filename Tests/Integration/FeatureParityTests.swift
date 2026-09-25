@@ -1,5 +1,6 @@
 import XCTest
 import EPUBKit
+import SwiftUI
 @testable import Hoshi_Reader
 
 nonisolated final class FeatureParityTests: XCTestCase {
@@ -91,5 +92,94 @@ nonisolated final class FeatureParityTests: XCTestCase {
         XCTAssertEqual(LlmModelCatalog.byId("qwen3.5-0.8b-q4km")?.contextLength, 4096)
         XCTAssertNotNil(LlmModelCatalog.byId("qwen2.5-7b-instruct-q4km"))
         XCTAssertEqual(Set(LlmModelCatalog.all.map(\.id)).count, LlmModelCatalog.all.count)
+    }
+
+    @MainActor func testFullScreenReadingModeKeepsSessionUntilReaderWindowDismissal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("reader-lifetime-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try makePathFixture(root)
+        let document = try EPUBParser().parse(documentAt: root)
+        let log = UsageLog(directory: root.appendingPathComponent("usage"))
+        let book = BookMetadata(title: "Lifetime fixture", cover: nil, folder: root.lastPathComponent,
+                                lastAccess: .now, contentType: .epub, syncId: UUID().uuidString)
+        let model = ReaderViewModel(book: book, document: document, rootURL: root,
+            enableStatistics: true, autostartStatistics: true, autoSyncEnabled: false, syncStats: false,
+            statsSyncMode: .merge, syncAudioBook: false, showSentenceTranslations: false, usageLog: log)
+        let syncId = try XCTUnwrap(syncId(for: book))
+        HttpSyncActiveBooks.open(syncId)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let presenter = UIViewController()
+        window.rootViewController = presenter
+        window.makeKeyAndVisible()
+        let readerWindow = ReaderWindow()
+        defer {
+            readerWindow.dismiss()
+            model.stopTracking()
+            HttpSyncActiveBooks.close(syncId)
+            window.isHidden = true
+            previous?.makeKeyAndVisible()
+        }
+        let config = UserConfig()
+        readerWindow.present(content: { ReaderView(viewModel: model).environment(config) }, onDismiss: {})
+        try await waitUntil { readerWindow.lifetime?.onDismiss != nil }
+        let lifetime = try XCTUnwrap(readerWindow.lifetime)
+        let host = try XCTUnwrap(presenter.presentedViewController)
+
+        // UIKit's full-screen presentation invokes the same presenting-view disappearance as
+        // SwiftUI's fullScreenCover. Use the actual sentence view as the covering controller.
+        func cover() -> UIViewController {
+            let controller = UIHostingController(rootView: SentenceReaderView(book: book, document: document,
+                coverURL: nil, bookmark: nil, backgroundColor: .white, foregroundColor: .black,
+                usage: model.usage).environment(config))
+            controller.modalPresentationStyle = .fullScreen
+            return controller
+        }
+        let firstCover = cover()
+        await withCheckedContinuation { continuation in
+            host.present(firstCover, animated: false) { continuation.resume() }
+        }
+        let before = model.sessionStatistics.readingTime
+        try await waitUntil { model.sessionStatistics.readingTime > before + 0.5 }
+        XCTAssertFalse(lifetime.isClosed)
+        XCTAssertTrue(HttpSyncActiveBooks.contains(syncId))
+        model.usage?.record(.lookup, text: "during-cover", found: true)
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        try await waitUntil { model.isPaused }
+        let pausedTime = model.sessionStatistics.readingTime
+        try await Task.sleep(for: .milliseconds(1100))
+        XCTAssertEqual(model.sessionStatistics.readingTime, pausedTime)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        try await waitUntil { !model.isPaused && model.sessionStatistics.readingTime > pausedTime + 0.5 }
+        await withCheckedContinuation { continuation in
+            firstCover.dismiss(animated: false) { continuation.resume() }
+        }
+        model.usage?.record(.lookup, text: "after-return", found: true)
+        var events = await log.read().events
+        XCTAssertFalse(events.contains { $0.type == .closed })
+        XCTAssertEqual(events.filter { $0.type == .lookup }.compactMap(\.text), ["during-cover", "after-return"])
+
+        // A shortcut can close ReaderWindow while the nested mode is still displayed.
+        let secondCover = cover()
+        await withCheckedContinuation { continuation in
+            host.present(secondCover, animated: false) { continuation.resume() }
+        }
+        let dismissed = expectation(description: "reader and nested mode dismissed")
+        readerWindow.dismiss { dismissed.fulfill() }
+        await fulfillment(of: [dismissed], timeout: 5)
+        try await waitUntil { !HttpSyncActiveBooks.contains(syncId) }
+        XCTAssertTrue(lifetime.isClosed)
+        XCTAssertFalse(model.isTracking)
+        XCTAssertNil(presenter.presentedViewController)
+        events = await log.read().events
+        XCTAssertEqual(events.filter { $0.type == .closed }.count, 1)
+        XCTAssertGreaterThan(ReadingStatisticsStore.reading(root: root).reduce(0) { $0 + $1.readingTime }, 0)
+    }
+
+    @MainActor private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition(), Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertTrue(condition(), "Presentation/session state did not settle")
     }
 }
