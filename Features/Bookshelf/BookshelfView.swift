@@ -136,6 +136,9 @@ struct BookshelfView: View {
                 }
             }
             
+            if PodcastStore.shared.enabled {
+                Tab("Podcasts", systemImage: "headphones", value: 4) { PodcastsView() }
+            }
             Tab("Settings", systemImage: "gearshape", value: 2) {
                 NavigationStack {
                     List {
@@ -195,6 +198,9 @@ struct BookshelfView: View {
                 }
             }
         }
+        .task(id: PodcastStore.shared.configID) { await PodcastStore.shared.monitorAccess() }
+        .onChange(of: PodcastStore.shared.enabled) { _, enabled in if !enabled && selectedTab == 4 { selectedTab = 0 } }
+
         .onChange(of: pendingTab) { _, tab in
             if let tab {
                 selectedTab = tab

@@ -117,7 +117,7 @@ final class HttpSyncSettingsStore {
         HttpSyncConfig(baseURL: Self.normalizeBaseURL(baseURL), token: token)
     }
 
-    private static func normalizeBaseURL(_ raw: String) -> String {
+    nonisolated private static func normalizeBaseURL(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while s.hasSuffix("/") { s.removeLast() }
         return s
@@ -125,7 +125,7 @@ final class HttpSyncSettingsStore {
 
     /// Bearer-token sync must not run over cleartext network links. Plain HTTP is accepted only
     /// for loopback development where the token never leaves the device.
-    static func isSecureBaseURL(_ raw: String) -> Bool {
+    nonisolated static func isSecureBaseURL(_ raw: String) -> Bool {
         let normalized = normalizeBaseURL(raw)
         guard let components = URLComponents(string: normalized),
               let scheme = components.scheme?.lowercased(),
@@ -141,7 +141,7 @@ final class HttpSyncSettingsStore {
 
 /// Sendable snapshot of the bits a transport needs, so the reconciler/manager can build a
 /// `HttpSyncKvClient` without touching the `@MainActor` store off the main thread.
-struct HttpSyncConfig: Sendable {
+nonisolated struct HttpSyncConfig: Sendable {
     let baseURL: String
     let token: String
     var isConfigured: Bool { !baseURL.isEmpty && !token.isEmpty && HttpSyncSettingsStore.isSecureBaseURL(baseURL) }

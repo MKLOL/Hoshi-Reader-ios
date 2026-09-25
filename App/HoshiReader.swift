@@ -102,6 +102,8 @@ struct HoshiReaderApp: App {
             } else if url.host == "search" {
                 let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
                 pendingLookup = components?.queryItems?.first(where: { $0.name == "text" })?.value ?? ""
+            } else if url.host == "podcasts" {
+                if PodcastStore.shared.enabled { pendingTab = 4 }
             } else if url.host == "news" {
                 pendingTab = 3
             } else if url.host == "save-article", let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -147,6 +149,11 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                      completionHandler: @escaping () -> Void) {
         // `UIApplicationDelegate` is `@MainActor`, so this runs on the main actor — the manager's
         // (main-actor) handler store is reachable directly.
+        if identifier == PodcastDownloads.identifier {
+            PodcastDownloads.shared.backgroundCompletion = completionHandler
+            PodcastDownloads.shared.restore()
+            return
+        }
         ModelDownloadManager.shared.setBackgroundCompletionHandler(
             completionHandler, forIdentifier: identifier
         )
