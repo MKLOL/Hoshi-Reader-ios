@@ -164,6 +164,34 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
 
     // MARK: - Local install
 
+    @MainActor
+    func testCorruptStatisticsDoNotBlockBookmarkOrSettingsSync() async throws {
+        try await prepare()
+        await syncNow()
+        let manga = try book(Self.mangaSyncId), novel = try book(Self.novelSyncId)
+        var row = Statistics.empty(title: "Fixture", day: "2026-09-25", device: .current)
+        row.add(seconds: 60, count: 10, stamp: 1)
+        try ReadingStatisticsStore.save([row], root: manga.root, scheduleSync: false)
+        try ReadingStatisticsStore.save([row], root: novel.root, scheduleSync: false)
+        let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        _ = try await client.put(key: "books/\(Self.mangaSyncId)/statistics", contentType: "application/json", body: Data("{".utf8))
+        try BookStorage.save(Bookmark(chapterIndex: 1, progress: 0.9, characterCount: 1234, lastModified: Date()), inside: novel.root, as: FileNames.bookmark)
+        let settings = StatisticsSettingsSyncProbe()
+        // Use the app's coordinator so automatic bookmark work joins this same reconcile.
+        let manager = HttpSyncManager.shared
+        let previousSettings = manager.aiSettings
+        manager.aiSettings = settings
+        defer { manager.aiSettings = previousSettings }
+        try await clearServerRequests()
+        await manager.syncNow()
+        XCTAssertTrue(manager.lastErrors.contains { $0.contains(Self.mangaSyncId) })
+        XCTAssertGreaterThan(settings.reads, 0, "translation settings still reach their independent sync phase")
+        let requests = try await serverRequests()
+        XCTAssertTrue(requests.contains { $0.method == "PUT" && $0.path.contains(httpSyncBookmarksMapPrefix) }, "the changed bookmark still uploads")
+        XCTAssertTrue(requests.contains { $0.method == "PUT" && $0.path.hasSuffix("books/\(Self.novelSyncId)/statistics") }, "the other book's statistics still upload")
+        XCTAssertFalse(requests.contains { $0.method == "PUT" && $0.path.hasSuffix(httpSyncBooksMapKey) }, "a failed statistics exchange must not acknowledge convergence")
+    }
+
     private struct LocalBook {
         let metadata: BookMetadata
         let root: URL
@@ -287,4 +315,10 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         }
         return data
     }
+}
+
+@MainActor private final class StatisticsSettingsSyncProbe: AiSettingsSyncing {
+    var reads = 0
+    func currentBlob() -> HttpSyncAiChatSettingsBlob? { reads += 1; return nil }
+    func applyFromSync(model: String, promptText: String, imagePromptText: String, remoteLastEditedAt: String) -> Bool { false }
 }

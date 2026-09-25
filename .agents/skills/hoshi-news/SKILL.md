@@ -1,6 +1,6 @@
 ---
 name: hoshi-news
-description: Find Japanese news for the user, write sentence-by-sentence English tutoring lessons, and prepare or publish an EPUB to Hoshi HTTP sync using this repository's Python tools. Use for agent-curated news reading and dry runs, not Android feature development or manga translation.
+description: Find Japanese news for the user, write sentence-by-sentence English tutoring lessons, and prepare or publish an EPUB to Hoshi HTTP sync using this repository's Python tools. Use for agent-curated news reading and dry runs, not app feature development or manga translation.
 ---
 
 # Hoshi news tutor and publisher
@@ -35,7 +35,7 @@ before writing translations. These links are relative to the repository root's
    overwrites it. The canonical URL determines the book identity.
 2. Read the entire `plan.json` and `prompt.md`. The finalized EPUB is authoritative
    for sentence text and IDs. It keeps furigana and uses full-width digits like
-   Android news imports. Do not edit the EPUB, source snapshot, plan, IDs or text
+   the apps’ news imports. Do not edit the EPUB, source snapshot, plan, IDs or text
    after preparation. The headline is a sentence entry too.
 3. Complete `translations.json` yourself, with the whole article as context. Follow
    the user's tutor style: natural English translation first, then a table covering
@@ -69,7 +69,7 @@ a local preview alone does not authorize publication. Preserve that scope.
 - Stop on conflicting content or a deletion tombstone. Different existing
   translations require review and the user's instruction to replace them before
   using `--replace-translations`. Do not bypass a conflict by changing the book ID.
-- After success, tell the user to tap Sync on Android and open the book on its
+- After success, tell the user to tap Sync on iOS or Android and open the book on its
   **News shelf in Books**. The News tab's saved list is separate and is not synced.
   Report an upload as verified only when the command succeeds; claim on-device
   verification only after observing it. Keep the job for later corrections/retries.

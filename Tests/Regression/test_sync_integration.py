@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -144,13 +145,15 @@ class IosSyncIntegration(unittest.TestCase):
                 "-derivedDataPath", derived,
                 f"-only-testing:{TEST_BUNDLE}",
             ]
+            command += shlex.split(os.environ.get("HOSHI_XCODEBUILD_ARGS", ""))
             started = time.time()
-            result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
             log = ROOT / "build" / "ios-sync-integration.log"
             log.parent.mkdir(parents=True, exist_ok=True)
-            log.write_text(result.stdout + "\n--- stderr ---\n" + result.stderr)
+            with log.open("w") as output:
+                result = subprocess.run(command, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT, timeout=900)
+            stdout = log.read_text()
             interesting = [
-                line for line in result.stdout.splitlines()
+                line for line in stdout.splitlines()
                 if "Test Case" in line or "error:" in line or "failed" in line.lower() or "** TEST" in line
             ]
             summary = "\n".join(interesting[-60:])
@@ -158,7 +161,7 @@ class IosSyncIntegration(unittest.TestCase):
                 0, result.returncode,
                 f"xcodebuild test failed after {time.time() - started:.0f}s (full log: {log})\n{summary}",
             )
-            self.assertIn("** TEST SUCCEEDED **", result.stdout, summary)
+            self.assertIn("** TEST SUCCEEDED **", stdout, summary)
             executed = [line for line in interesting if "Test Case" in line and "passed" in line]
             self.assertGreaterEqual(len(executed), 5, f"expected the sync scenarios to run, saw:\n{summary}")
             self.assertNotIn("skipped", " ".join(interesting).lower(), f"scenarios must not skip:\n{summary}")
