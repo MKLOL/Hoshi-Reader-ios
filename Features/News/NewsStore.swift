@@ -96,7 +96,7 @@ final class NewsStore {
             guard !items.isEmpty else { throw NewsNoArticlesError(url: source.homepage) }
             let fetchedAt = nowEpochMillis()
             var seen = Set<String>()
-            let fresh = items.filter { seen.insert($0.url).inserted }.prefix(Self.maxArticlesPerSource).map { item in
+            let fresh = items.filter { seen.insert($0.url).inserted }.sorted { ($0.publishedAt ?? Int64.min) > ($1.publishedAt ?? Int64.min) }.prefix(Self.maxArticlesPerSource).map { item in
                 NewsArticle(
                     id: NewsArticle.id(for: item.url), sourceId: source.id, url: item.url, title: item.title,
                     publishedAt: item.publishedAt, summary: item.summary, imageUrl: item.imageUrl, fetchedAt: fetchedAt

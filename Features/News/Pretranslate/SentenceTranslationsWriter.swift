@@ -66,6 +66,14 @@ nonisolated enum SentenceTranslationsWriter {
         return try encoder.encode(blob)
     }
 
+    /// A failed or incomplete rerun cannot erase translations from another configuration.
+    static func writeResult(_ blob: HttpSyncSentencesBlob, sentenceCount: Int, bookRoot: URL) throws -> Bool {
+        if blob.entries.count < sentenceCount && hasSidecarForOtherConfiguration(
+            bookRoot: bookRoot, syncId: blob.syncId, model: blob.model, promptId: blob.promptId) { return false }
+        try write(encode(blob), bookRoot: bookRoot)
+        return true
+    }
+
     /// Writes `data` atomically as the book's sidecar and drops the reader's cached copy.
     static func write(_ data: Data, bookRoot: URL) throws {
         try data.write(to: bookRoot.appendingPathComponent(FileNames.sentenceTranslations), options: .atomic)

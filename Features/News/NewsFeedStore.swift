@@ -45,7 +45,13 @@ nonisolated final class NewsFeedStore: @unchecked Sendable {
         }
     }
 
-    func loadArticles() -> [NewsArticle] { readFeed().articles }
+    func loadArticles() -> [NewsArticle] { readFeed().articles.sorted(by: Self.newestFirst) }
+
+    static func newestFirst(_ lhs: NewsArticle, _ rhs: NewsArticle) -> Bool {
+        let l = lhs.publishedAt ?? Int64.min
+        let r = rhs.publishedAt ?? Int64.min
+        return l != r ? l > r : lhs.id < rhs.id
+    }
 
     func refreshedAt() -> [String: Int64] { readFeed().refreshedAt }
 
@@ -55,11 +61,7 @@ nonisolated final class NewsFeedStore: @unchecked Sendable {
             var feed = readFeed()
             let kept = feed.articles.filter { $0.sourceId != sourceId }
             let merged = (kept + articles.filter { $0.sourceId == sourceId })
-                .sorted { lhs, rhs in
-                    let l = lhs.publishedAt ?? lhs.fetchedAt
-                    let r = rhs.publishedAt ?? rhs.fetchedAt
-                    return l != r ? l > r : lhs.id < rhs.id
-                }
+                .sorted(by: Self.newestFirst)
             feed.articles = Array(merged.prefix(Self.maxCachedArticles))
             feed.refreshedAt[sourceId] = refreshedAt
             writeFeed(feed)

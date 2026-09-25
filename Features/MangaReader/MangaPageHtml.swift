@@ -188,6 +188,7 @@ nonisolated enum MangaPageHtml {
           -webkit-text-size-adjust: 100%;
         }
         .page {
+          overflow: hidden;
           position: absolute;
           top: 0;
           left: 0;

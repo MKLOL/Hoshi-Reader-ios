@@ -162,7 +162,9 @@ final class NewsPretranslationManager {
             let blob = SentenceTranslationsWriter.buildBlob(plan: built, translations: translations, model: label, promptId: promptId)
             if let error = SentenceTranslationsWriter.validationError(blob) { throw PretranslationFailure("The translations could not be saved: \(error)") }
             let data = try SentenceTranslationsWriter.encode(blob)
-            try SentenceTranslationsWriter.write(data, bookRoot: bookRoot)
+            guard try SentenceTranslationsWriter.writeResult(blob, sentenceCount: built.sentences.count, bookRoot: bookRoot) else {
+                throw PretranslationFailure("The replacement is incomplete. Your previous translations were kept.")
+            }
 
             var uploaded = false
             let syncConfig = HttpSyncSettingsStore.shared.currentConfig()

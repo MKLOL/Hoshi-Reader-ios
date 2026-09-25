@@ -91,6 +91,21 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         XCTAssertTrue(RssFeedParser.parse("").isEmpty)
     }
 
+    func testCurrentNewsPrecedesUndatedCacheAndSourcesDefaultToCurrentFeeds() throws {
+        let root = try tempDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = NewsFeedStore(directory: root)
+        let undated = NewsArticle(id: "u", sourceId: "s", url: "https://e/u", title: "Guide", fetchedAt: 9999)
+        let dated = NewsArticle(id: "d", sourceId: "s", url: "https://e/d", title: "News", publishedAt: 100, fetchedAt: 100)
+        store.replaceSourceArticles(sourceId: "s", articles: [undated, dated], refreshedAt: 9999)
+        XCTAssertEqual(store.loadArticles().map(\.id), ["d", "u"])
+        XCTAssertFalse(NewsSourceCatalog.watanoc.enabledByDefault)
+        XCTAssertTrue(NewsSourceCatalog.nhkEasier.enabledByDefault)
+        XCTAssertTrue(NewsSourceCatalog.slowCommunication.enabledByDefault)
+        XCTAssertEqual(NewsSourceCatalog.source(forUrl: "https://evil.example/nhkeasier.com/").id, NewsSourceCatalog.sharedLinkId)
+        XCTAssertEqual(RssFeedParser.plainText("&lt;p&gt;News&lt;/p&gt;"), "News")
+    }
+
     // MARK: Sanitizer
 
     func testSanitizerKeepsRubyAndImagesAndDropsScriptsAttributesAndEmptyBlocks() throws {
@@ -189,6 +204,10 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         // Reuse honors model + prompt; another configuration counts as foreign.
         XCTAssertEqual(SentenceTranslationsWriter.existingTranslations(bookRoot: root, plan: plan, model: "gpt-4o-mini", promptId: SentenceBatchPrompt.promptId(includeExplanations: true)).count, 5)
         XCTAssertTrue(SentenceTranslationsWriter.existingTranslations(bookRoot: root, plan: plan, model: "other", promptId: "p").isEmpty)
+        let before = try Data(contentsOf: root.appendingPathComponent(FileNames.sentenceTranslations))
+        let incomplete = SentenceTranslationsWriter.buildBlob(plan: plan, translations: [:], model: "other", promptId: "p")
+        XCTAssertFalse(try SentenceTranslationsWriter.writeResult(incomplete, sentenceCount: plan.sentences.count, bookRoot: root))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(FileNames.sentenceTranslations)), before)
         XCTAssertTrue(SentenceTranslationsWriter.hasSidecarForOtherConfiguration(bookRoot: root, syncId: "rain-sync", model: "other", promptId: "p"))
         XCTAssertFalse(SentenceTranslationsWriter.hasSidecarForOtherConfiguration(bookRoot: root, syncId: "rain-sync", model: "gpt-4o-mini", promptId: SentenceBatchPrompt.promptId(includeExplanations: true)))
     }
@@ -321,7 +340,7 @@ nonisolated final class NewsPipelineTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "news-tests-\(UUID().uuidString)")!
         let settings = NewsSettingsStore(defaults: defaults)
         XCTAssertFalse(settings.isEnabled(NewsSourceCatalog.nhkEasy))
-        XCTAssertTrue(settings.isEnabled(NewsSourceCatalog.watanoc))
+        XCTAssertFalse(settings.isEnabled(NewsSourceCatalog.watanoc))
         settings.setEnabled(true, source: NewsSourceCatalog.nhkEasy)
         XCTAssertTrue(settings.isEnabled(NewsSourceCatalog.nhkEasy))
         settings.setEnabled(false, source: NewsSourceCatalog.watanoc)

@@ -27,7 +27,9 @@ struct NewsView: View {
     @State private var openBook: BookMetadata?
 
     private var visibleArticles: [NewsArticle] {
-        store.articles.filter { selectedSourceId == nil || $0.sourceId == selectedSourceId }
+        var seen = Set<String>()
+        return store.articles.filter { selectedSourceId == nil || $0.sourceId == selectedSourceId }
+            .filter { seen.insert($0.id).inserted }
     }
 
     var body: some View {

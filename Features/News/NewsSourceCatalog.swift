@@ -47,7 +47,8 @@ nonisolated enum NewsSourceCatalog {
             articleSelectors: [".entry-content", "article"],
             titleSelectors: ["h1.entry-title", "h1"],
             removeSelectors: [".sharedaddy", ".jp-relatedposts", ".wp-block-buttons", "nav", "footer", "aside"]
-        )
+        ),
+        enabledByDefault: false
     )
 
     static let matchaEasy = NewsSource(
@@ -65,7 +66,19 @@ nonisolated enum NewsSourceCatalog {
         )
     )
 
-    static let builtIn: [NewsSource] = [nhkEasy, watanoc, matchaEasy]
+    static let nhkEasier = NewsSource(
+        id: "nhk-easier", name: "NHK Easier", homepage: "https://nhkeasier.com/",
+        listing: .rss(url: "https://nhkeasier.com/feed/"),
+        hints: NewsExtractionHints(articleSelectors: ["article"], titleSelectors: ["article h3"],
+            removeSelectors: ["h3", "nav", "footer", "aside", "table.links"])
+    )
+    static let slowCommunication = NewsSource(
+        id: "slow-communication", name: "Slow Communication", homepage: "https://slow-communication.jp/",
+        listing: .rss(url: "https://slow-communication.jp/news/feed/"),
+        hints: NewsExtractionHints(articleSelectors: ["article"], titleSelectors: ["h1"],
+            removeSelectors: ["nav", "footer", "aside", ".reaction-container", ".share-area"])
+    )
+    static let builtIn: [NewsSource] = [nhkEasier, slowCommunication, nhkEasy, watanoc, matchaEasy]
 
     static func builtIn(id: String) -> NewsSource? { builtIn.first { $0.id == id } }
 
@@ -96,7 +109,8 @@ nonisolated enum NewsSourceCatalog {
     static func source(forUrl url: String) -> NewsSource {
         builtIn.first { source in
             guard let host = URL(string: source.homepage)?.host?.replacingOccurrences(of: "www.", with: ""), !host.isEmpty else { return false }
-            return url.contains(host)
+            let candidate = URL(string: url)?.host?.lowercased() ?? ""
+            return candidate == host || candidate.hasSuffix("." + host)
         } ?? sharedLink
     }
 }

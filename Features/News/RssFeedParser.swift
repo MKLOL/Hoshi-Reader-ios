@@ -46,7 +46,7 @@ nonisolated enum RssFeedParser {
 
     /// Strips markup from HTML that feeds put into titles and descriptions.
     static func plainText(_ html: String) -> String {
-        var text = html
+        var text = decodeEntities(html)
         // XMLParser has already decoded entities, so only ASCII-named tags count as markup; a
         // literal "<ニュース>" in a title survives.
         text = text.replacingOccurrences(of: #"</?[A-Za-z][A-Za-z0-9:-]*(\s[^<>]*)?/?>"#, with: " ", options: .regularExpression)
