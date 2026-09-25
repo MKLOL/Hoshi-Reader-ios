@@ -69,7 +69,13 @@ class SasayakiPlayer {
     var playback = SasayakiPlaybackData(lastPosition: 0)
     var currentTime: Double = 0
     var duration: Double = 0
-    var isPlaying = false { didSet { updateIdleTimerDisabled() } }
+    private let audioOwner = UUID()
+    var isPlaying = false {
+        didSet {
+            updateIdleTimerDisabled()
+            if !isPlaying { LongFormAudioCoordinator.shared.end(owner: audioOwner) }
+        }
+    }
     var stopPlaybackTime: Double?
     var lastUpdate = -1
     
@@ -271,7 +277,6 @@ class SasayakiPlayer {
         endObserver = nil
         interruptionObserver = nil
         isPlaying = false
-        Task { await WordAudioPlayer.shared.setOtherAudioActive(false) }
         duration = 0
         stopPlaybackTime = nil
         artwork = nil
@@ -286,7 +291,9 @@ class SasayakiPlayer {
             center.changePlaybackPositionCommand.removeTarget(nil)
         }
         nowPlayingSession = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        if !LongFormAudioCoordinator.shared.isActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
         
         if let url = audioURL {
             url.stopAccessingSecurityScopedResource()
@@ -333,14 +340,15 @@ class SasayakiPlayer {
     
     private func startPlayback() {
         guard let player else { return }
+        LongFormAudioCoordinator.shared.begin(owner: audioOwner) { [weak self] in self?.pausePlayback() }
         setupNowPlayingSession()
+        nowPlayingSession?.becomeActiveIfPossible()
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio)
         try? session.setActive(true)
         player.play()
         isPlaying = true
         hasPlayedOnce = true
-        Task { await WordAudioPlayer.shared.setOtherAudioActive(true) }
     }
     
     private func pausePlayback() {
@@ -511,8 +519,9 @@ class SasayakiPlayer {
             resumeAfterInterruption = isPlaying
             pausePlayback()
         case .ended:
-            if resumeAfterInterruption, AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume) {
-                resumeAfterInterruption = false
+            let resume = resumeAfterInterruption && AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
+            resumeAfterInterruption = false
+            if resume, !LongFormAudioCoordinator.shared.isActive {
                 startPlayback()
             }
         @unknown default:

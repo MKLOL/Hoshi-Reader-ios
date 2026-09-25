@@ -6,6 +6,7 @@ struct PodcastsView: View {
     @State private var playback = PodcastPlayback.shared
     @State private var length = PodcastLength.all
     @State private var showID: String?
+    @State private var appeared = false
     private var shows: [PodcastShow] { store.catalogue.shows.filter { !$0.id.isEmpty && PodcastRules.display($0.name) != nil } }
     private var inShow: [PodcastEpisode] { store.catalogue.episodes.filter { showID == nil || $0.show == showID } }
     private var episodes: [PodcastEpisode] { inShow.filter(length.includes) }
@@ -13,6 +14,29 @@ struct PodcastsView: View {
     var body: some View {
         NavigationStack {
             List {
+                if let episode = playback.episode {
+                    Section("Now playing") {
+                        Text(PodcastRules.display(episode.title) ?? "Podcast lesson").font(.headline)
+                        Slider(value: Binding(get: { playback.position }, set: { playback.seek(to: $0) }), in: 0...max(1, playback.duration))
+                            .accessibilityLabel("Playback position")
+                        HStack {
+                            Text(StatisticsMath.duration(playback.position)).monospacedDigit()
+                            Spacer()
+                            Text(StatisticsMath.duration(playback.duration)).monospacedDigit()
+                        }.font(.caption)
+                        HStack(spacing: 32) {
+                            Button { playback.seek(to: playback.position - 15) } label: { Image(systemName: "gobackward.15") }.accessibilityLabel("Back 15 seconds")
+                            Button { playback.toggle() } label: { Image(systemName: playback.playing ? "pause.fill" : "play.fill") }.accessibilityLabel(playback.playing ? "Pause" : "Play")
+                            Button { playback.seek(to: playback.position + 15) } label: { Image(systemName: "goforward.15") }.accessibilityLabel("Forward 15 seconds")
+                        }.font(.title2).buttonStyle(.borderless).frame(maxWidth: .infinity)
+                        Picker("Speed", selection: $playback.speed) {
+                            ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { Text("\($0.formatted())×").tag($0) }
+                        }
+                    }
+                }
+                if let error = playback.error {
+                    Section { Text(error).foregroundStyle(.red) }
+                }
                 if let error = store.error {
                     Section { Text(error).foregroundStyle(.secondary); Button("Retry") { Task { await store.refresh() } } }
                 }
@@ -37,7 +61,11 @@ struct PodcastsView: View {
                     Picker("Original length", selection: $length) {
                         ForEach(PodcastLength.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }.pickerStyle(.menu)
-                    if store.catalogue.feedStale { Text("Showing a saved listing; the server could not refresh the feeds.").font(.caption).foregroundStyle(.secondary) }
+                    if store.catalogue.feedStale {
+                        let stale = shows.filter { $0.feedStale == true }.compactMap { PodcastRules.display($0.name) }
+                        Text(stale.isEmpty ? "Showing a saved listing; the server could not refresh the feeds." : "Showing saved listings for: " + stale.joined(separator: ", "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if episodes.isEmpty {
                     Section {
@@ -53,40 +81,23 @@ struct PodcastsView: View {
                         episodeRow(episode)
                     }
                 }
-                if let episode = playback.episode {
-                    Section("Now playing") {
-                        Text(PodcastRules.display(episode.title) ?? "Podcast lesson").font(.headline)
-                        Slider(value: Binding(get: { playback.position }, set: { playback.seek(to: $0) }), in: 0...max(1, playback.duration))
-                            .accessibilityLabel("Playback position")
-                        HStack {
-                            Text(StatisticsMath.duration(playback.position)).monospacedDigit()
-                            Spacer()
-                            Text(StatisticsMath.duration(playback.duration)).monospacedDigit()
-                        }.font(.caption)
-                        HStack(spacing: 32) {
-                            Button { playback.seek(to: playback.position - 15) } label: { Image(systemName: "gobackward.15") }.accessibilityLabel("Back 15 seconds")
-                            Button { playback.toggle() } label: { Image(systemName: playback.playing ? "pause.fill" : "play.fill") }.accessibilityLabel(playback.playing ? "Pause" : "Play")
-                            Button { playback.seek(to: playback.position + 15) } label: { Image(systemName: "goforward.15") }.accessibilityLabel("Forward 15 seconds")
-                        }.font(.title2).buttonStyle(.borderless).frame(maxWidth: .infinity)
-                        Picker("Speed", selection: $playback.speed) {
-                            ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { Text("\($0.formatted())×").tag($0) }
-                        }
-                        if let error = playback.error { Text(error).foregroundStyle(.red) }
-                    }
-                }
+
             }
             .navigationTitle("Podcasts")
             .refreshable { await store.refresh() }
             .toolbar { if store.loading { ProgressView() } }
-            .task(id: scenePhase) {
-                guard scenePhase == .active else { store.clearLiveStatus(); return }
-                while !Task.isCancelled, store.enabled {
+            .task(id: appeared && scenePhase == .active) {
+                let visible = appeared && scenePhase == .active
+                store.setVisible(visible)
+                guard visible else { return }
+                while !Task.isCancelled, store.enabled, store.screenVisible {
                     await store.refresh()
                     do { try await Task.sleep(for: .seconds(5)) } catch { break }
                 }
             }
-            .onDisappear { store.clearLiveStatus() }
-            .onChange(of: shows.map(\.id)) { _, ids in if let showID, !ids.contains(showID) { self.showID = nil } }
+            .onAppear { appeared = true }
+            .onDisappear { appeared = false; store.setVisible(false) }
+            .onChange(of: shows.map(\.id)) { _, ids in if let showID, ids.count < 2 || !ids.contains(showID) { self.showID = nil } }
         }
     }
     private func showButton(_ title: String, id: String?) -> some View {

@@ -12,7 +12,13 @@ nonisolated final class PodcastNoRedirect: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
-nonisolated struct PodcastAPI: Sendable {
+nonisolated protocol PodcastServing: Sendable {
+    func access(config: HttpSyncConfig) async throws -> Bool
+    func catalogue(config: HttpSyncConfig) async throws -> PodcastCatalogue
+    func prepare(config: HttpSyncConfig, id: String) async throws -> PodcastEpisode
+}
+
+nonisolated struct PodcastAPI: PodcastServing {
     private static let session = URLSession(configuration: .ephemeral, delegate: PodcastNoRedirect(), delegateQueue: nil)
     static func request(config: HttpSyncConfig, suffix: String, post: Bool = false) throws -> URLRequest {
         guard let base = URLComponents(string: config.baseURL), base.user == nil, base.password == nil,
@@ -44,7 +50,14 @@ nonisolated struct PodcastAPI: Sendable {
         return try PodcastRules.decoder().decode(type, from: data)
     }
     func access(config: HttpSyncConfig) async throws -> Bool {
-        struct Access: Decodable, Sendable { let enabled: Bool }
-        return try await get(Access.self, config: config, suffix: "/access").enabled
+        struct Access: Decodable, Sendable { let enabled: Bool? }
+        return try await get(Access.self, config: config, suffix: "/access").enabled ?? false
+    }
+    func catalogue(config: HttpSyncConfig) async throws -> PodcastCatalogue {
+        try await get(PodcastCatalogue.self, config: config)
+    }
+    func prepare(config: HttpSyncConfig, id: String) async throws -> PodcastEpisode {
+        guard PodcastRules.validID(id) else { throw PodcastHTTPError(status: 0, message: "Invalid podcast episode.") }
+        return try await get(PodcastEpisode.self, config: config, suffix: "/\(id)/prepare", post: true)
     }
 }

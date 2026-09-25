@@ -8,6 +8,35 @@
 
 import Foundation
 import AVFoundation
+import os
+
+/// AVPlayers in the same app share an audio session; taking Now Playing ownership alone
+/// does not pause the previous player. Keep one long-form source audible at a time.
+@MainActor final class LongFormAudioCoordinator {
+    static let shared = LongFormAudioCoordinator()
+    private var owner: UUID?
+    private var pauseCurrent: (() -> Void)?
+    private nonisolated static let audioActive = OSAllocatedUnfairLock(initialState: false)
+    var isActive: Bool { owner != nil }
+    nonisolated static var isAudioActive: Bool { audioActive.withLock { $0 } }
+    nonisolated static func deactivateAudioIfInactive() {
+        audioActive.withLock { active in
+            if !active { try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation]) }
+        }
+    }
+
+    func begin(owner: UUID, pause: @escaping () -> Void) {
+        let previous = self.owner == owner ? nil : pauseCurrent
+        self.owner = owner; pauseCurrent = pause
+        Self.audioActive.withLock { $0 = true }
+        previous?()
+    }
+    func end(owner: UUID) {
+        guard self.owner == owner else { return }
+        self.owner = nil; pauseCurrent = nil
+        Self.audioActive.withLock { $0 = false }
+    }
+}
 
 actor WordAudioPlayer {
     static let shared = WordAudioPlayer()
@@ -16,13 +45,8 @@ actor WordAudioPlayer {
     private var playToEndObserver: NSObjectProtocol?
     private var failedToEndObserver: NSObjectProtocol?
     private var id: UUID?
-    private var otherAudioActive = false
     
     private init() {}
-    
-    func setOtherAudioActive(_ active: Bool) {
-        otherAudioActive = active
-    }
     
     func stop(id: UUID? = nil) {
         if let id, id != self.id {
@@ -41,7 +65,7 @@ actor WordAudioPlayer {
         
         do {
             try session.setCategory(.playback, mode: .spokenAudio, options: categoryOptions(for: requestedMode))
-            if !otherAudioActive {
+            if !LongFormAudioCoordinator.isAudioActive {
                 try session.setActive(true, options: [])
             }
         } catch {
@@ -80,9 +104,7 @@ actor WordAudioPlayer {
     
     private func cleanupPlayback() {
         stopPlayer()
-        if !otherAudioActive {
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        }
+        LongFormAudioCoordinator.deactivateAudioIfInactive()
     }
     
     private func stopPlayer() {

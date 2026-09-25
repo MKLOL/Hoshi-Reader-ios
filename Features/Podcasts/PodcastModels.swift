@@ -68,6 +68,17 @@ nonisolated struct PodcastGeneration: Codable, Sendable {
         }
     }
 }
+nonisolated extension PodcastGeneration {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        episode = try c.decodeIfPresent(String.self, forKey: .episode) ?? ""
+        stage = try c.decodeIfPresent(String.self, forKey: .stage) ?? ""
+        done = try c.decodeIfPresent(Int.self, forKey: .done) ?? 0
+        total = try c.decodeIfPresent(Int.self, forKey: .total) ?? 0
+        percent = try c.decodeIfPresent(Int.self, forKey: .percent) ?? 0
+        ageSeconds = try c.decodeIfPresent(Int.self, forKey: .ageSeconds)
+    }
+}
 nonisolated struct PodcastCatalogue: Codable, Sendable {
     var episodes: [PodcastEpisode] = []
     var shows: [PodcastShow] = []
@@ -121,6 +132,46 @@ nonisolated enum PodcastRules {
         let result = value.replacingOccurrences(of: #"[\p{Z}\p{Cc}\p{Cf}]+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
         return result.isEmpty ? nil : String(result.prefix(300))
     }
+    /// Underlying file and transport errors can contain private paths or URLs. Only the
+    /// server's deliberately supplied error text is suitable for direct display.
+    static func failureMessage(_ error: Error) -> String {
+        if let error = error as? PodcastHTTPError { return display(error.message) ?? "The podcast request failed." }
+        if let error = error as? URLError {
+            switch error.code {
+            case .notConnectedToInternet, .networkConnectionLost: return "The network connection was lost. Try again when connected."
+            case .timedOut: return "The podcast server took too long to respond. Try again."
+            case .cancelled: return "The download was cancelled."
+            default: return "Could not reach the podcast server. Try again."
+            }
+        }
+        if error is DecodingError { return "The podcast server returned an invalid response." }
+        if error is CocoaError { return "Could not save the lesson. Check the available storage and try again." }
+        return "The podcast operation failed. Try again."
+    }
     static func decoder() -> JSONDecoder { let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase; return d }
     static func encoder() -> JSONEncoder { let e = JSONEncoder(); e.keyEncodingStrategy = .convertToSnakeCase; e.outputFormatting = [.sortedKeys]; return e }
+}
+
+/// Session task IDs are unique for the lifetime of a URLSession. A generation distinguishes
+/// a cancelled transfer from a new one even when the user returns to the same account.
+nonisolated struct PodcastDownloadEpochs {
+    private var generation = 0
+    private var tasks: [Int: Int] = [:]
+    private var cancelledThrough: [String: Int] = [:]
+
+    mutating func record(_ taskID: Int) { tasks[taskID] = tasks[taskID] ?? generation }
+    mutating func retire(accounts: Set<String>) {
+        for account in accounts { cancelledThrough[account] = generation }
+        generation += 1
+    }
+    func isRetired(_ taskID: Int, account: String) -> Bool {
+        guard let cutoff = cancelledThrough[account] else { return false }
+        return (tasks[taskID] ?? -1) <= cutoff
+    }
+    func accepts(_ taskID: Int, account: String, currentTaskID: Int?) -> Bool {
+        guard !isRetired(taskID, account: account) else { return false }
+        if let currentTaskID { return currentTaskID == taskID }
+        // Unregistered callbacks may be queued completion events from a cold relaunch.
+        return tasks[taskID] == nil
+    }
 }
