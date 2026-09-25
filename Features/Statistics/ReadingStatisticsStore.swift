@@ -1,15 +1,61 @@
 import Foundation
 import UIKit
 
+/// Imported statistics must never make arithmetic or a floating-point conversion trap.
+nonisolated enum StatisticsNumbers {
+    static func adding(_ lhs: Int, _ rhs: Int) -> Int {
+        let (value, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? (rhs >= 0 ? .max : .min) : value
+    }
+    static func adding(_ lhs: Double, _ rhs: Double) -> Double {
+        min(Double.greatestFiniteMagnitude, max(0, lhs) + max(0, rhs))
+    }
+    static func integer(_ value: Double) -> Int {
+        guard !value.isNaN, value > 0 else { return 0 }
+        return value >= Double(Int.max) ? .max : Int(value)
+    }
+    static func speed(count: Int, seconds: Double) -> Int {
+        seconds > 0 ? integer(Double(count) / seconds * 3600) : 0
+    }
+    static func nextStamp(_ stamp: Int) -> Int { adding(stamp, 1) }
+
+    /// Kotlin's data-class tie-break uses Double.toString: shortest decimal digits, scientific
+    /// notation below 1e-3 or at/above 1e7, uppercase E and a mandatory fractional digit. Swift
+    /// already supplies the shortest digits; only their decimal placement/notation differs.
+    static func kotlinDoubleText(_ value: Double) -> String {
+        let raw = String(value)
+        let magnitude = abs(value)
+        guard value.isFinite, magnitude > 0, magnitude < 0.001 || magnitude >= 10_000_000 else { return raw }
+        let negative = raw.hasPrefix("-")
+        let unsigned = negative ? String(raw.dropFirst()) : raw
+        let components = unsigned.lowercased().split(separator: "e")
+        let mantissa = components[0].split(separator: ".", omittingEmptySubsequences: false)
+        var digits = mantissa.joined()
+        var decimalPosition = mantissa[0].count + (components.count > 1 ? Int(components[1]) ?? 0 : 0)
+        while digits.first == "0", digits.count > 1 { digits.removeFirst(); decimalPosition -= 1 }
+        while digits.last == "0", digits.count > 1 { digits.removeLast() }
+        let leading = digits.removeFirst()
+        return (negative ? "-" : "") + String(leading) + "." + (digits.isEmpty ? "0" : digits) + "E" + String(decimalPosition - 1)
+    }
+}
+
 nonisolated struct ReadingDevice: Codable, Equatable, Sendable {
     let id: String
     let name: String
 
     @MainActor static var current: ReadingDevice {
-        let defaults = UserDefaults.standard
-        let id = defaults.string(forKey: "statistics.deviceId") ?? UUID().uuidString.lowercased()
+        resolve(defaults: .standard, vendorID: UIDevice.current.identifierForVendor?.uuidString, name: UIDevice.current.name)
+    }
+
+    @MainActor static func resolve(defaults: UserDefaults, vendorID: String?, name: String) -> ReadingDevice {
+        let previousVendor = defaults.string(forKey: "statistics.deviceVendorId")
+        // System backups can copy defaults onto another phone. Keep this install's UUID across
+        // upgrades, but give a different physical device its own statistics bucket after restore.
+        let changedDevice = vendorID != nil && previousVendor != nil && vendorID != previousVendor
+        let id = changedDevice ? UUID().uuidString.lowercased() : defaults.string(forKey: "statistics.deviceId") ?? UUID().uuidString.lowercased()
         defaults.set(id, forKey: "statistics.deviceId")
-        return ReadingDevice(id: id, name: UIDevice.current.name)
+        if let vendorID { defaults.set(vendorID, forKey: "statistics.deviceVendorId") }
+        return ReadingDevice(id: id, name: name)
     }
 }
 
@@ -30,23 +76,23 @@ nonisolated extension Statistics {
                    maxReadingSpeed: 0, lastStatisticModified: 0, deviceId: device?.id, deviceName: device?.name)
     }
     mutating func add(seconds: Double, count: Int, stamp: Int) {
-        readingTime += max(0, seconds)
-        charactersRead = max(0, charactersRead + count)
-        lastReadingSpeed = readingTime > 0 ? Int(Double(charactersRead) / readingTime * 3600) : 0
+        readingTime = StatisticsNumbers.adding(readingTime, seconds)
+        charactersRead = max(0, StatisticsNumbers.adding(charactersRead, count))
+        lastReadingSpeed = StatisticsNumbers.speed(count: charactersRead, seconds: readingTime)
         maxReadingSpeed = max(maxReadingSpeed, lastReadingSpeed)
         minReadingSpeed = minReadingSpeed == 0 ? lastReadingSpeed : min(minReadingSpeed, lastReadingSpeed)
         if count != 0 { altMinReadingSpeed = altMinReadingSpeed == 0 ? lastReadingSpeed : min(altMinReadingSpeed, lastReadingSpeed) }
-        lastStatisticModified = max(stamp, lastStatisticModified + 1)
+        lastStatisticModified = max(stamp, StatisticsNumbers.nextStamp(lastStatisticModified))
     }
     // Same tie-break text as Android's ReadingStatistics data class.
     var tieBreak: String {
-        "ReadingStatistics(title=\(title), dateKey=\(dateKey), charactersRead=\(charactersRead), readingTime=\(readingTime), minReadingSpeed=\(minReadingSpeed), altMinReadingSpeed=\(altMinReadingSpeed), lastReadingSpeed=\(lastReadingSpeed), maxReadingSpeed=\(maxReadingSpeed), lastStatisticModified=\(lastStatisticModified), deviceId=\(deviceId ?? "null"), deviceName=\(deviceName ?? "null"))"
+        "ReadingStatistics(title=\(title), dateKey=\(dateKey), charactersRead=\(charactersRead), readingTime=\(StatisticsNumbers.kotlinDoubleText(readingTime)), minReadingSpeed=\(minReadingSpeed), altMinReadingSpeed=\(altMinReadingSpeed), lastReadingSpeed=\(lastReadingSpeed), maxReadingSpeed=\(maxReadingSpeed), lastStatisticModified=\(lastStatisticModified), deviceId=\(deviceId ?? "null"), deviceName=\(deviceName ?? "null"))"
     }
     static func merged(_ entries: [Statistics]) -> [Statistics] {
         var result: [String: Statistics] = [:]
         for entry in entries where entry.readingTime.isFinite && entry.readingTime >= 0 && entry.charactersRead >= 0 {
             if let old = result[entry.key], old.lastStatisticModified > entry.lastStatisticModified ||
-                (old.lastStatisticModified == entry.lastStatisticModified && old.tieBreak >= entry.tieBreak) { continue }
+                (old.lastStatisticModified == entry.lastStatisticModified && !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16)) { continue }
             result[entry.key] = entry
         }
         return result.values.sorted { $0.key < $1.key }
@@ -54,11 +100,14 @@ nonisolated extension Statistics {
     static func total(_ entries: [Statistics], title: String = "", day: String = "") -> Statistics {
         var total = empty(title: title, day: day)
         for entry in merged(entries) {
-            total.readingTime += entry.readingTime
-            total.charactersRead += entry.charactersRead
+            total.readingTime = StatisticsNumbers.adding(total.readingTime, entry.readingTime)
+            total.charactersRead = StatisticsNumbers.adding(total.charactersRead, entry.charactersRead)
             total.lastStatisticModified = max(total.lastStatisticModified, entry.lastStatisticModified)
+            if entry.minReadingSpeed > 0 { total.minReadingSpeed = total.minReadingSpeed == 0 ? entry.minReadingSpeed : min(total.minReadingSpeed, entry.minReadingSpeed) }
+            if entry.altMinReadingSpeed > 0 { total.altMinReadingSpeed = total.altMinReadingSpeed == 0 ? entry.altMinReadingSpeed : min(total.altMinReadingSpeed, entry.altMinReadingSpeed) }
+            total.maxReadingSpeed = max(total.maxReadingSpeed, entry.maxReadingSpeed)
         }
-        total.lastReadingSpeed = total.readingTime > 0 ? Int(Double(total.charactersRead) / total.readingTime * 3600) : 0
+        total.lastReadingSpeed = StatisticsNumbers.speed(count: total.charactersRead, seconds: total.readingTime)
         return total
     }
 }
@@ -71,7 +120,7 @@ nonisolated extension MangaTextStatistic {
         var result: [String: Self] = [:]
         for entry in entries where entry.charactersRead >= 0 {
             if let old = result[entry.key], old.lastModified > entry.lastModified ||
-                (old.lastModified == entry.lastModified && old.tieBreak >= entry.tieBreak) { continue }
+                (old.lastModified == entry.lastModified && !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16)) { continue }
             result[entry.key] = entry
         }
         return result.values.sorted { $0.key < $1.key }
@@ -97,14 +146,22 @@ extension Notification.Name {
             // Keep a recovery copy until the whole migration has committed.
             try BookStorage.save(legacy, inside: root, as: ".legacy_manga_statistics.json")
         }
+        let exchanged = [HttpReadingStatisticsSync.stateFile, ".http_sync_statistics.json"].contains {
+            FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path)
+        }
+        // A mixed/device-aware file already contains shared history. Its unknown-device bucket
+        // must keep that identity or the next HTTP merge would count the same history twice.
+        let attributeReading = !exchanged && !reading.contains { $0.deviceId != nil }
         reading = reading.map { row in
             var copy = row
-            if copy.deviceId == nil { copy.deviceId = device.id; copy.deviceName = device.name }
+            if attributeReading && copy.deviceId == nil { copy.deviceId = device.id; copy.deviceName = device.name }
             return copy
         }
-        let text = (BookStorage.load([MangaTextStatistic].self, from: root.appendingPathComponent(FileNames.mangaStatistics)) ?? []).map { row in
+        let originalText = BookStorage.load([MangaTextStatistic].self, from: root.appendingPathComponent(FileNames.mangaStatistics)) ?? []
+        let attributeText = !exchanged && !originalText.contains { $0.deviceId != nil }
+        let text = originalText.map { row in
             var copy = row
-            if copy.deviceId == nil { copy.deviceId = device.id; copy.deviceName = device.name }
+            if attributeText && copy.deviceId == nil { copy.deviceId = device.id; copy.deviceName = device.name }
             return copy
         }
         try BookStorage.save(Statistics.merged(reading), inside: root, as: FileNames.statistics)
@@ -143,14 +200,16 @@ extension Notification.Name {
         for total in collapsed(totals) {
             let others = next.filter { $0.dateKey == total.dateKey && $0.deviceId != device.id }
             let own = next.first { $0.dateKey == total.dateKey && $0.deviceId == device.id }
-            let time = max(0, total.readingTime - others.reduce(0) { $0 + $1.readingTime })
-            let count = max(0, total.charactersRead - others.reduce(0) { $0 + $1.charactersRead })
+            let otherTotals = Statistics.total(others)
+            let time = max(0, total.readingTime - otherTotals.readingTime)
+            let count = max(0, total.charactersRead - otherTotals.charactersRead)
+            if own == nil && time == 0 && count == 0 { continue }
             if own?.readingTime == time && own?.charactersRead == count { continue }
             var row = total
             row.readingTime = time; row.charactersRead = count
-            row.lastReadingSpeed = time > 0 ? Int(Double(count) / time * 3600) : 0
+            row.lastReadingSpeed = StatisticsNumbers.speed(count: count, seconds: time)
             row.deviceId = device.id; row.deviceName = device.name
-            row.lastStatisticModified = max(total.lastStatisticModified, (own?.lastStatisticModified ?? 0) + 1)
+            row.lastStatisticModified = max(total.lastStatisticModified, StatisticsNumbers.nextStamp(own?.lastStatisticModified ?? 0))
             next.removeAll { $0.key == row.key }; next.append(row)
         }
         if replace {

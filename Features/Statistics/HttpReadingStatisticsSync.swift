@@ -90,12 +90,25 @@ nonisolated struct MangaStatisticsBlob: Codable {
     }
     private func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
-    func pushLocalChanges(transport: any HttpSyncKvTransport) async throws {
-        guard let root = try? BookStorage.getBooksDirectory() else { return }
-        for book in (try? BookStorage.loadAllBooks()) ?? [] {
-            guard let folder = book.folder, let id = syncId(for: book) else { continue }
-            try await exchange(root: root.appendingPathComponent(folder), syncId: id, transport: transport)
+    func pushLocalChanges(transport: any HttpSyncKvTransport) async -> [String] {
+        do {
+            let directory = try BookStorage.getBooksDirectory()
+            let roots = try BookStorage.loadAllBooks().compactMap { book -> (root: URL, syncId: String)? in
+                guard let folder = book.folder, let id = syncId(for: book) else { return nil }
+                return (directory.appendingPathComponent(folder), id)
+            }
+            return await pushLocalChanges(roots: roots, transport: transport)
+        } catch { return ["Statistics: \(error.localizedDescription)"] }
+    }
+
+    /// A damaged statistics sidecar must not prevent other books or bookmarks from syncing.
+    func pushLocalChanges(roots: [(root: URL, syncId: String)], transport: any HttpSyncKvTransport) async -> [String] {
+        var errors: [String] = []
+        for book in roots {
+            do { try await exchange(root: book.root, syncId: book.syncId, transport: transport) }
+            catch { errors.append("Statistics \(book.syncId): \(error.localizedDescription)") }
         }
+        return errors
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> Data {
@@ -118,7 +131,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         }
         if listing == nil, old == nil, local.isEmpty { return }
         if let meta, (meta.size ?? 0) > 4 * 1024 * 1024 { throw HttpSyncError("Statistics exceed the size limit") }
-        let fetched = listing != nil && meta == nil ? nil : try await transport.get(key: key)
+        let fetched = listing != nil && meta == nil ? nil : try await transport.getBounded(key: key, maxBytes: 4 * 1024 * 1024)
         if let fetched, fetched.body.count > 4 * 1024 * 1024 { throw HttpSyncError("Statistics exceed the size limit") }
         let remote = try fetched.map { merge(try decode($0.body)) } ?? []
         // The reader can save while GET is in flight. Re-read before merging.

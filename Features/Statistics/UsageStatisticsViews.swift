@@ -6,6 +6,10 @@ struct UsageTodaySection: View {
     let usage: UsageDay
     var body: some View {
         Section("Today") {
+            Text(usage.date.formatted(date: .complete, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+            if let first = usage.firstActivity, let last = usage.lastActivity {
+                LabeledContent("Active", value: "\(first.formatted(date: .omitted, time: .shortened))–\(last.formatted(date: .omitted, time: .shortened))")
+            }
             LabeledContent("Reading time", value: StatisticsMath.duration(reading.seconds))
             LabeledContent("Characters", value: reading.characters.formatted())
             LabeledContent("Words looked up", value: usage.lookups.formatted())

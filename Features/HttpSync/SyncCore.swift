@@ -273,3 +273,9 @@ nonisolated func shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: String?, 
     guard let remoteShelfUpdatedAt else { return false }
     return compareRfc3339(remoteShelfUpdatedAt, localShelvesUpdatedAt) >= 0
 }
+
+/// Uploading an unshelved book is not a shelf edit. Only legacy named placements need
+/// the metadata timestamp as a fallback; an explicit removal retains its own stamp.
+nonisolated func remoteShelfPlacementStamp(shelfName: String?, shelfUpdatedAt: String?, metadataModifiedAt: String) -> String? {
+    shelfUpdatedAt ?? (shelfName == nil ? nil : metadataModifiedAt)
+}

@@ -15,7 +15,11 @@ nonisolated struct MangaStatisticsTracker {
     private var hasUpdated = false
 
     var today: Statistics {
-        Statistics.total(rows.filter { $0.dateKey == localToday.dateKey }, title: title, day: localToday.dateKey)
+        dayTotal(at: .now)
+    }
+    func dayTotal(at date: Date) -> Statistics {
+        let day = Self.dateKey(for: date)
+        return Statistics.total(rows.filter { $0.dateKey == day }, title: title, day: day)
     }
     var allTime: Statistics { Statistics.total(rows, title: title) }
     private var rows: [Statistics] { Statistics.merged(allStats.filter { $0.key != localToday.key } + [localToday]) }
@@ -56,7 +60,7 @@ nonisolated struct MangaStatisticsTracker {
         if elapsed < 0 { lastTimestamp = now }
         guard elapsed > 0 else { return }
         let delta = max(-session.charactersRead, currentPage - lastPageCount)
-        let stamp = Int(now.timeIntervalSince1970 * 1000)
+        let stamp = StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000)
         session.add(seconds: elapsed, count: delta, stamp: stamp)
         localToday.add(seconds: elapsed, count: delta, stamp: stamp)
         hasUpdated = true
@@ -70,6 +74,10 @@ nonisolated struct MangaStatisticsTracker {
         guard enabled, hasUpdated else { return nil }
         allStats = rows
         return allStats
+    }
+    mutating func mergeHistory(_ incoming: [Statistics]) {
+        allStats = Statistics.merged(rows + incoming)
+        if let merged = allStats.first(where: { $0.key == localToday.key }) { localToday = merged }
     }
     static func deduplicate(_ statistics: [Statistics]) -> [Statistics] { Statistics.merged(statistics) }
     static func dateKey(for date: Date) -> String {

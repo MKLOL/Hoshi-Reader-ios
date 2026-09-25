@@ -42,6 +42,7 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     ".statistics_devices_v2",
     ".legacy_manga_statistics.json",
     ".http_sync_statistics_state.json",
+    ".http_sync_statistics.json",
     "statistics.json",          // mutates as the user reads
     "manga_statistics.json",    // mutates as the user reads manga
     "sasayaki_match.json",      // per-device audiobook alignment

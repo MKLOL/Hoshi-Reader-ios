@@ -109,6 +109,9 @@ nonisolated protocol HttpSyncKvTransport: Sendable {
     /// Returns `nil` on `404` (key not present). All other non-2xx responses throw.
     func get(key: String) async throws -> HttpSyncKvFetched?
 
+    /// Fetch a small sidecar with a limit enforced while bytes arrive, before allocation.
+    func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched?
+
     /// Downloads `key` into `targetURL` without holding the whole body in memory. `nil` on 404.
     func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched?
 
@@ -120,6 +123,13 @@ nonisolated protocol HttpSyncKvTransport: Sendable {
 }
 
 nonisolated extension HttpSyncKvTransport {
+    /// In-memory test transports can use the ordinary GET; network transports override this.
+    func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
+        let fetched = try await get(key: key)
+        if let fetched, fetched.body.count > maxBytes { throw HttpSyncError("Sync response exceeds the size limit.") }
+        return fetched
+    }
+
     /// Convenience: walk every page of a listing, applying `handle` to each key's metadata.
     /// Mirrors Android's `do { list(...) } while (cursor != null && page.truncated)` loop.
     func listAll(
@@ -169,6 +179,10 @@ nonisolated final class HttpSyncWriteTrackingTransport: HttpSyncKvTransport, @un
 
     func get(key: String) async throws -> HttpSyncKvFetched? {
         try await base.get(key: key)
+    }
+
+    func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
+        try await base.getBounded(key: key, maxBytes: maxBytes)
     }
 
     func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? {
@@ -287,6 +301,38 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     // MARK: GET
+
+    func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
+        guard maxBytes >= 0 else { throw HttpSyncError("Invalid response size limit.") }
+        let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
+        for attempt in 0...Self.maxRateLimitRetries {
+            try await Self.requestGate.wait()
+            let (bytes, response) = try await session.bytes(for: request)
+            // Cancellation also stops oversized/chunked bodies and redirects' error bodies.
+            defer { bytes.task.cancel() }
+            guard let http = response as? HTTPURLResponse else { throw HttpSyncError("Sync server returned a non-HTTP response.") }
+            if http.statusCode == 404 { return nil }
+            if shouldRetryRateLimit(response: response, attempt: attempt) {
+                try await waitForRateLimit(response: response, attempt: attempt)
+                continue
+            }
+            let ok = (200...299).contains(http.statusCode)
+            let limit = ok ? maxBytes : 8192
+            if ok && response.expectedContentLength > Int64(maxBytes) { throw HttpSyncError("Sync response exceeds the size limit.") }
+            var body = Data()
+            for try await byte in bytes {
+                if body.count >= limit {
+                    if ok { throw HttpSyncError("Sync response exceeds the size limit.") }
+                    break
+                }
+                body.append(byte)
+            }
+            try ensureSuccess(response: response, data: body)
+            return HttpSyncKvFetched(body: body, contentType: header(http, "Content-Type") ?? "application/octet-stream",
+                lastModified: header(http, "Last-Modified") ?? "", etag: header(http, "ETag") ?? "")
+        }
+        throw HttpSyncError("Sync server kept rate-limiting requests (HTTP 429). Try again in a moment.")
+    }
 
     func get(key: String) async throws -> HttpSyncKvFetched? {
         let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)

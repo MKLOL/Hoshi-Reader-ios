@@ -7,6 +7,7 @@ struct StatisticsOverviewView: View {
     @State private var model = StatisticsOverview()
     @State private var usage = UsageStatisticsModel()
     @State private var selectedTab = 0
+    @State private var calendarDay = MangaStatisticsTracker.dateKey(for: .now)
     @AppStorage("statistics.dailyGoalMinutes") private var goal = 10
     private var today: DailyReading { model.days.first { Calendar.current.isDateInToday($0.date) } ?? DailyReading(date: .now) }
 
@@ -22,6 +23,13 @@ struct StatisticsOverviewView: View {
         .navigationTitle("Statistics")
         .onAppear { model.reload() }
         .task { await usage.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            model.reload(); Task { await usage.reload() }
+        }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now in
+            let day = MangaStatisticsTracker.dateKey(for: now)
+            if day != calendarDay { calendarDay = day; model.reload(); Task { await usage.reload() } }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .usageLogChanged).receive(on: RunLoop.main)) { _ in Task { await usage.reload() } }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload() }
         .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in model.reload() }
@@ -39,12 +47,12 @@ struct StatisticsOverviewView: View {
                 ProgressView(value: min(today.seconds / Double(goal * 60), 1))
             }
             Section("All time") {
-                LabeledContent("Reading time", value: StatisticsMath.duration(model.books.reduce(0) { $0 + $1.seconds }))
-                LabeledContent("Characters", value: model.books.reduce(0) { $0 + $1.characters }.formatted())
+                LabeledContent("Reading time", value: StatisticsMath.duration(model.books.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }))
+                LabeledContent("Characters", value: model.books.reduce(0) { StatisticsNumbers.adding($0, $1.characters) }.formatted())
             }
             Section("Last 16 weeks") { ReadingHeatmap(days: model.days) }
             Section("Time by weekday") { WeekdayReadingChart(days: model.days) }
-            DeviceReadingSection(reading: model.books.flatMap(\.reading))
+            DeviceReadingSection(devices: model.devices, showBookCount: true)
             Section("Books") {
                 ForEach(model.books) { item in
                     NavigationLink {
@@ -84,21 +92,24 @@ struct BookStatisticsDetailView: View {
                     LabeledContent("Reading time", value: StatisticsMath.duration(item.seconds))
                     LabeledContent("Characters", value: item.characters.formatted())
                     if item.isManga { LabeledContent("Pages", value: item.pages.formatted()) }
-                    if let first = item.days.first { LabeledContent("Started", value: first.date.formatted(date: .abbreviated, time: .omitted)) }
-                    if let last = item.days.last {
+                    if let first = item.days.first(where: { $0.seconds > 0 }) { LabeledContent("Started", value: first.date.formatted(date: .abbreviated, time: .omitted)) }
+                    if let last = item.days.last(where: { $0.seconds > 0 }) {
                         LabeledContent("Last read", value: last.date.formatted(date: .abbreviated, time: .omitted))
                         if item.finished { LabeledContent("Finished", value: last.date.formatted(date: .abbreviated, time: .omitted)) }
                     }
                     let count = item.isManga ? item.pages : item.characters
-                    let pace = item.seconds > 0 ? Int(Double(count) / item.seconds * 3600) : 0
+                    let pace = StatisticsNumbers.speed(count: count, seconds: item.seconds)
                     LabeledContent(item.isManga ? "Pages per hour" : "Characters per hour", value: pace.formatted())
                     if count > 0 { LabeledContent(item.isManga ? "Time per page" : "Time per 100 characters", value: StatisticsMath.duration(item.seconds / Double(count) * (item.isManga ? 1 : 100))) }
+                    let daysRead = item.days.filter { $0.seconds > 0 }.count
+                    LabeledContent("Days read", value: daysRead.formatted())
+                    if daysRead > 0 { LabeledContent("Average time per day", value: StatisticsMath.duration(item.seconds / Double(daysRead))) }
                     if let best = item.days.max(by: { $0.seconds < $1.seconds }) {
                         LabeledContent("Best day", value: "\(best.date.formatted(date: .abbreviated, time: .omitted)) · \(StatisticsMath.duration(best.seconds))")
                     }
                 }
                 Section("Last 16 weeks") { ReadingHeatmap(days: item.days) }
-                DeviceReadingSection(reading: item.reading)
+                DeviceReadingSection(devices: item.devices)
                 Section("History") {
                     ForEach(item.days.reversed()) { day in
                         VStack(alignment: .leading) {
@@ -116,14 +127,24 @@ struct BookStatisticsDetailView: View {
 }
 
 struct DeviceReadingSection: View {
-    let reading: [Statistics]
+    let devices: [DeviceReadingSummary]
+    var showBookCount = false
     var body: some View {
-        Section("By device") {
-            let groups = Dictionary(grouping: reading, by: { $0.deviceId ?? "legacy" })
-            ForEach(groups.keys.sorted(), id: \.self) { key in
-                let rows = groups[key] ?? []
-                let name = rows.max(by: { $0.lastStatisticModified < $1.lastStatisticModified })?.deviceName ?? "Earlier history"
-                LabeledContent(name, value: StatisticsMath.duration(rows.reduce(0) { $0 + $1.readingTime }))
+        if !devices.isEmpty {
+            Section("By device") {
+                ForEach(devices) { device in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(device.name ?? "Earlier history").font(.headline)
+                            if device.deviceId == ReadingDevice.current.id { Text("This device").font(.caption).foregroundStyle(.secondary) }
+                        }
+                        LabeledContent("Reading time", value: StatisticsMath.duration(device.seconds))
+                        LabeledContent("Characters", value: device.characters.formatted())
+                        if device.pages > 0 { LabeledContent("Pages", value: device.pages.formatted()) }
+                        if showBookCount { LabeledContent("Books", value: device.books.formatted()) }
+                        if let last = device.lastRead { LabeledContent("Last read", value: last.formatted(date: .abbreviated, time: .omitted)) }
+                    }
+                }
             }
         }
     }
@@ -136,7 +157,7 @@ struct ReadingHeatmap: View {
         let today = calendar.startOfDay(for: .now)
         let mondayOffset = (calendar.component(.weekday, from: today) + 5) % 7
         let start = calendar.date(byAdding: .day, value: -(15 * 7 + mondayOffset), to: today)!
-        let maximum = days.map(\.seconds).max() ?? 1
+        let maximum = days.filter { $0.date >= start && $0.date <= today }.map(\.seconds).max() ?? 1
         HStack(spacing: 3) {
             ForEach(0..<16, id: \.self) { week in
                 VStack(spacing: 3) {
@@ -159,7 +180,7 @@ struct WeekdayReadingChart: View {
     var body: some View {
         Chart(0..<7, id: \.self) { offset in
             let weekday = (offset + 1) % 7 + 1
-            let seconds = days.filter { Calendar.current.component(.weekday, from: $0.date) == weekday }.reduce(0) { $0 + $1.seconds }
+            let seconds = days.filter { Calendar.current.component(.weekday, from: $0.date) == weekday }.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }
             BarMark(x: .value("Weekday", Calendar.current.shortWeekdaySymbols[weekday - 1]), y: .value("Minutes", seconds / 60))
         }.frame(height: 150)
     }

@@ -138,8 +138,7 @@ final class HttpSyncManager {
         let transport = HttpSyncWriteTrackingTransport(
             base: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         )
-        do { try await HttpReadingStatisticsSync.shared.pushLocalChanges(transport: transport) }
-        catch { lastError = error.localizedDescription; lastErrors = [error.localizedDescription]; return }
+        let statisticsErrors = await HttpReadingStatisticsSync.shared.pushLocalChanges(transport: transport)
         let mapChanges: HttpSyncMapChanges
         if let preflight {
             mapChanges = preflight
@@ -148,15 +147,15 @@ final class HttpSyncManager {
                 mapChanges = try await batchState.syncMaps(transport: transport)
             } catch {
                 let message = error.localizedDescription
-                lastErrors = [message]
-                lastError = message
-                noteFullReconcileOutcome(errors: [message])
+                lastErrors = statisticsErrors + [message]
+                lastError = lastErrors.first
+                noteFullReconcileOutcome(errors: lastErrors)
                 log.error("map preflight failed: \(message, privacy: .public)")
                 return
             }
         }
         if mapChanges.needsBootstrap || mapChanges.booksChanged { cursor = nil }
-        if !mapChanges.needsBootstrap && !mapChanges.booksChanged && !mapChanges.otherChanged {
+        if statisticsErrors.isEmpty && !mapChanges.needsBootstrap && !mapChanges.booksChanged && !mapChanges.otherChanged {
             var result = HttpSyncResult()
             result.uploadedBookmarks = mapChanges.uploadedBookmarks
             result.downloadedBookmarks = mapChanges.downloadedBookmarks
@@ -190,6 +189,7 @@ final class HttpSyncManager {
         result.downloadedAppSettings = appSettingsOutcome.downloaded
         result.uploadedBookmarks += mapChanges.uploadedBookmarks
         result.downloadedBookmarks += mapChanges.downloadedBookmarks
+        for error in statisticsErrors where !result.errors.contains(error) { result.errors.append(error) }
         if let error = appSettingsOutcome.error { result.errors.append(error) }
         if result.errors.isEmpty {
             do {
