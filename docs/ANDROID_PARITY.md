@@ -43,15 +43,15 @@ Each Android commit is accounted for below. Follow-up fixes are implemented with
 | `31dd71e8` | 2026-09-21 | test(statistics): compare canonical paths so macOS temp directories pass | Pending review/port |
 | `d50731bb` | 2026-09-21 | chore: release 0.11.14 | No app port: release metadata |
 | `d8f787d9` | 2026-09-22 | feat(tools): add agent-authored news EPUB publisher | Pending review/port |
-| `5399683b` | 2026-09-23 | feat(ai): expand the default manga tutor prompt | Pending review/port |
-| `f0bcfec5` | 2026-09-23 | feat(manga): hide the bubble Copy button by default and enlarge Translate | Pending review/port |
-| `d988d908` | 2026-09-23 | feat(statistics): log reader usage events for timeline reconstruction | Pending review/port |
-| `5fe395a2` | 2026-09-23 | feat(statistics): lead with a Today card and add 3-day-average trend charts | Pending review/port |
-| `c4b42a4a` | 2026-09-23 | feat(statistics): list only words looked up more than once on the Today card | Pending review/port |
-| `ba78936d` | 2026-09-23 | feat(statistics): move charts to a Trends tab and add per-bubble trends | Pending review/port |
-| `24d80938` | 2026-09-23 | fix(statistics): address review findings on the usage log and trends | Pending review/port |
+| `5399683b` | 2026-09-23 | feat(ai): expand the default manga tutor prompt | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `f0bcfec5` | 2026-09-23 | feat(manga): hide the bubble Copy button by default and enlarge Translate | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `d988d908` | 2026-09-23 | feat(statistics): log reader usage events for timeline reconstruction | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `5fe395a2` | 2026-09-23 | feat(statistics): lead with a Today card and add 3-day-average trend charts | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `c4b42a4a` | 2026-09-23 | feat(statistics): list only words looked up more than once on the Today card | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `ba78936d` | 2026-09-23 | feat(statistics): move charts to a Trends tab and add per-bubble trends | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `24d80938` | 2026-09-23 | fix(statistics): address review findings on the usage log and trends | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
 | `2b15b3c9` | 2026-09-23 | chore: release 0.11.15 | No app port: release metadata |
-| `8f7ea378` | 2026-09-24 | fix(statistics): drop today's rows from the totals card | Pending review/port |
+| `8f7ea378` | 2026-09-24 | fix(statistics): drop today's rows from the totals card | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
 | `12d283b5` | 2026-09-24 | feat(podcasts): filter the episode list by show | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 7 behavior tests pass |
 | `cf9c3fbf` | 2026-09-24 | chore: release 0.11.16 | No app port: release metadata |
 | `1c9b9f12` | 2026-09-24 | feat(podcasts): show what the server is doing while a lesson is prepared | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 7 behavior tests pass |

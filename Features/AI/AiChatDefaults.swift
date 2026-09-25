@@ -15,9 +15,7 @@ enum AiChatDefaults {
     static let model = "gpt-5.5"
 
     static let prompt =
-        "You are a helpful Japanese reading tutor. For the manga speech bubble below, " +
-        "give a natural English translation, then a short, concise breakdown of any " +
-        "tricky vocabulary or grammar."
+        "You are a helpful Japanese reading tutor. For the manga speech bubble below, give a natural English translation, then a short, concise breakdown of any tricky vocabulary or grammar. Please do a translation first, with the words, then do word by word, including both furigana and romanji for the word. Put these word in the table. Make sure you don’t skip words. Then at the end the grammar."
 
     static let imagePrompt =
         "Transcribe any Japanese text visible in this image crop and translate it into " +

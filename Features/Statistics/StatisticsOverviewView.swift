@@ -1,19 +1,34 @@
 import SwiftUI
 import Charts
+import Combine
 
 struct StatisticsOverviewView: View {
     @Environment(UserConfig.self) private var userConfig
     @State private var model = StatisticsOverview()
+    @State private var usage = UsageStatisticsModel()
+    @State private var selectedTab = 0
     @AppStorage("statistics.dailyGoalMinutes") private var goal = 10
     private var today: DailyReading { model.days.first { Calendar.current.isDateInToday($0.date) } ?? DailyReading(date: .now) }
 
     var body: some View {
-        @Bindable var config = userConfig
         List {
-            Section("Today") {
-                LabeledContent("Reading time", value: StatisticsMath.duration(today.seconds))
-                LabeledContent("Characters", value: today.characters.formatted())
-            }
+            Picker("Statistics view", selection: $selectedTab) {
+                Text("Overview").tag(0)
+                Text("Trends").tag(1)
+            }.pickerStyle(.segmented)
+            if selectedTab == 0 { overviewSections }
+            else { StatisticsTrendsSections(reading: model.days, usage: usage) }
+        }
+        .navigationTitle("Statistics")
+        .onAppear { model.reload() }
+        .task { await usage.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: .usageLogChanged).receive(on: RunLoop.main)) { _ in Task { await usage.reload() } }
+        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in model.reload() }
+    }
+    @ViewBuilder private var overviewSections: some View {
+        @Bindable var config = userConfig
+            UsageTodaySection(reading: today, usage: usage.today)
             Section("Reading streak") {
                 let streak = StatisticsMath.streak(model.days, goalMinutes: goal)
                 LabeledContent("Current", value: "\(streak.current) days")
@@ -55,12 +70,8 @@ struct StatisticsOverviewView: View {
                     }
                 }
             }
-        }
-        .navigationTitle("Statistics")
-        .onAppear { model.reload() }
-        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload() }
-        .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in model.reload() }
     }
+
 }
 
 struct BookStatisticsDetailView: View {

@@ -47,6 +47,7 @@ final class MangaReaderViewModel {
     var popups: [PopupItem] = []
 
     /// Reading statistics tracker (page/time based). `nil` until the book loads.
+    private(set) var usage: ReaderUsageSession?
     private(set) var statistics: MangaStatisticsTracker?
     private var pagesRead = 0
     private var resumeTracking = false
@@ -116,6 +117,8 @@ final class MangaReaderViewModel {
     // MARK: Statistics
 
     private func setUpStatistics(title: String, root: URL, userConfig: UserConfig) {
+        usage = ReaderUsageSession(book: metadata)
+        usage?.reading(true)
         statistics = MangaStatisticsTracker(title: title, initialStatistics: ReadingStatisticsStore.reading(root: root), enabled: true, device: .current)
         textStatistics = ReadingStatisticsStore.text(root: root)
         statistics?.start(currentPage: pagesRead)
@@ -125,10 +128,12 @@ final class MangaReaderViewModel {
         guard let tracker = statistics else { return }
         if tracker.isTracking { statistics?.pause(currentPage: pagesRead) }
         else { statistics?.start(currentPage: pagesRead) }
+        usage?.reading(statistics?.isTracking == true)
         persistStatistics()
     }
 
     func suspendStatistics() {
+        usage?.reading(false)
         resumeTracking = statistics?.isTracking == true
         statistics?.pause(currentPage: pagesRead)
         persistStatistics()
@@ -136,7 +141,7 @@ final class MangaReaderViewModel {
     }
 
     func resumeStatistics() {
-        if resumeTracking { statistics?.start(currentPage: pagesRead) }
+        if resumeTracking { statistics?.start(currentPage: pagesRead); usage?.reading(true) }
         resumeTracking = false
     }
 
@@ -243,7 +248,8 @@ final class MangaReaderViewModel {
             singleTapLookup: userConfig.mangaSingleTapLookup,
             useNotoSansJpFont: userConfig.mangaUseNotoSansJpFont,
             showActionButtons: userConfig.mangaShowActionButtons,
-            selectionScript: Self.selectionScript
+            selectionScript: Self.selectionScript,
+            showCopyButton: userConfig.mangaShowCopyButton
         )
     }
 
@@ -256,7 +262,7 @@ final class MangaReaderViewModel {
             let target = direction == .forward ? start + 2 : start - 2
             guard target >= 0, target < book.pages.count else { return }
             recordTurn(to: target)
-            goToPage(target)
+            goToPage(target, isTurn: true)
             return
         }
         guard let target = MangaPageNavigation.targetIndex(
@@ -265,11 +271,12 @@ final class MangaReaderViewModel {
             direction: direction
         ) else { return }
         recordTurn(to: target)
-        goToPage(target)
+        goToPage(target, isTurn: true)
     }
 
-    func goToPage(_ index: Int) {
+    func goToPage(_ index: Int, isTurn: Bool = false) {
         guard index != pageIndex, (0..<pageCount).contains(index) else { return }
+        usage?.record(.page, source: isTurn ? nil : "jump", page: index + 1, from: pageIndex + 1, to: index + 1)
         // The view observes pageIndex to drive the directional page-turn slide and re-render.
         persistStatistics()
         pageIndex = index
@@ -295,6 +302,9 @@ final class MangaReaderViewModel {
 
     func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool) -> Int? {
         let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
+        usage?.record(.lookup, text: lookupResults.first.map { cxxStringToSwift($0.matched) } ?? selection.text,
+            term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
+            source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty, page: pageIndex + 1)
         let dictionaryStyles = LookupEngine.shared.getStylesMap()
         let popup = PopupItem(
             showPopup: false,

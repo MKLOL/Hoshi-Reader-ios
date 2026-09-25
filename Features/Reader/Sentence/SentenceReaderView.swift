@@ -25,6 +25,7 @@ struct SentenceReaderView: View {
     let bookmark: SentenceBookmarkAnchor?
     let backgroundColor: Color
     let foregroundColor: Color
+    var usage: ReaderUsageSession? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(UserConfig.self) private var userConfig
@@ -377,6 +378,9 @@ struct SentenceReaderView: View {
             maxResults: userConfig.maxResults,
             scanLength: userConfig.scanLength
         )
+        usage?.record(.lookup, text: lookupResults.first.map { cxxStringToSwift($0.matched) } ?? selection.text,
+            term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
+            source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty)
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
@@ -443,6 +447,7 @@ private struct TranslationPanel: View {
     let markdown: String?
     @Binding var isExpanded: Bool
     let foregroundColor: Color
+    var usage: ReaderUsageSession? = nil
 
     @State private var settings = AiChatSettingsStore.shared
 

@@ -158,6 +158,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     var tappableTopInset: CGFloat = 0
     /// Gates hardware-keyboard ← / → and trackpad two-finger page turns. Off during the screenshot
     /// crop overlay and the go-to-page dialog so those aren't disturbed by a stray key/drag.
+    var onBubbleRevealed: (String, String?) -> Void = { _, _ in }
     var pageTurnEnabled: Bool = true
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -414,6 +415,8 @@ struct MangaReaderWebView: UIViewRepresentable {
             case "hoshiManga":
                 guard let body = message.body as? [String: Any] else { return }
                 switch body["event"] as? String {
+                case "bubbleRevealed":
+                    parent.onBubbleRevealed(body["text"] as? String ?? "", body["blockId"] as? String)
                 case "selectedNothing":
                     parent.onTapOutside() // empty artwork tap
                 default:

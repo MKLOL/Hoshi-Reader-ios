@@ -223,6 +223,7 @@ struct MangaReaderView: View {
         .onDisappear {
             model.flushPendingBookmark()
             model.suspendStatistics()
+            model.usage?.close()
             model.cancelPreload() // stop warming adjacent pages once we're leaving the reader
             pageReadyTimeoutTask?.cancel()
             pageReadyTimeoutTask = nil
@@ -356,6 +357,7 @@ struct MangaReaderView: View {
                     }
                 },
                 onAskAi: { text, blockId in
+                    model.usage?.record(.translated, text: text, page: model.pageIndex + 1)
                     if let onAskAi {
                         onAskAi(text)
                     } else if uiTestingAiStubEnabled {
@@ -369,6 +371,7 @@ struct MangaReaderView: View {
                     }
                 },
                 onCopy: { text in
+                    model.usage?.record(.copied, text: text, page: model.pageIndex + 1)
                     UIPasteboard.general.string = text
                     if uiTestingEnabled {
                         uiTestCopyProbe = "copy=\(text)"
@@ -378,6 +381,7 @@ struct MangaReaderView: View {
                 tappableTopInset: mangaActionTopInset(for: geometry),
                 // Suppress hardware-keyboard ← / → and trackpad two-finger page turns while the
                 // crop overlay or go-to-page dialog is up so they aren't disturbed by a stray input.
+                onBubbleRevealed: { text, block in model.usage?.reveal(text: text, block: block, page: model.pageIndex + 1) },
                 pageTurnEnabled: !screenshotCropMode && !showGoToPageDialog
             )
             // One reused WebView (matches the Android single-WebView model).
@@ -423,6 +427,9 @@ struct MangaReaderView: View {
         .onChange(of: userConfig.mangaScanNonJapaneseText) { _, _ in
             model.closePopups()
             model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
+        }
+        .onChange(of: userConfig.mangaShowCopyButton) { _, _ in
+            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
         }
         .onChange(of: userConfig.mangaShowActionButtons) { _, _ in
             model.closePopups()
@@ -720,6 +727,7 @@ struct MangaReaderView: View {
     // MARK: Screenshot crop
 
     private func translateCrop(_ rect: MangaScreenshotCropRect) async {
+        model.usage?.record(.screenshot, page: model.pageIndex + 1)
         controller.clearRevealedBubbles()
         guard let crop = await controller.imageCropRect(for: rect),
               let imageFile = model.imageFile(forPageIndex: crop.pageIndex) else {

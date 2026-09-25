@@ -57,7 +57,8 @@ nonisolated enum MangaPageHtml {
         viewportCssHeight: Int,
         singleTapLookup: Bool = false,
         useNotoSansJpFont: Bool = false,
-        showActionButtons: Bool = true
+        showActionButtons: Bool = true,
+        showCopyButton: Bool = false
     ) -> String {
         // Each page is fitted with `object-fit: contain` into its share of the viewport, baked into
         // the CSS as definite px sizes (no vw/vh, no JS). In a two-page spread (`leftPage != nil`)
@@ -98,9 +99,12 @@ nonisolated enum MangaPageHtml {
         <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=5, user-scalable=yes">
         <style>
         \(css)
+        .translate-only .ocr-copy-btn { display: none; }
+        .translate-only .ocr-ai-btn { width: 48px; height: 48px; }
+        .translate-only .ocr-ai-btn svg { width: 30px; height: 30px; }
         </style>
         </head>
-        <body>
+        <body class="\(showCopyButton ? "" : "translate-only")">
         <div class="page">
         \(frames)
         </div>
@@ -1090,6 +1094,7 @@ nonisolated enum MangaPageHtml {
               // Reveal BEFORE the wrap fallback: the fallback fits from the computed
               // font-size, which only becomes the boosted reveal size once .revealed applies.
               box.classList.add('revealed');
+              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'bubbleRevealed', text: box.dataset.text || box.textContent, blockId: box.dataset.blockId || box.id});
               window.hoshiManga.tryWrapFallback(box);
               box.setAttribute('aria-pressed', 'true');
               window.hoshiManga.placeActions(box);

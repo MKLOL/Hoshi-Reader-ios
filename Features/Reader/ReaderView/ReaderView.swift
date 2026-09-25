@@ -638,7 +638,8 @@ struct ReaderView: View {
                     progress: viewModel.currentProgress
                 ),
                 backgroundColor: readerBackgroundColor,
-                foregroundColor: readerForegroundColor
+                foregroundColor: readerForegroundColor,
+                usage: viewModel.usage
             )
             .environment(userConfig)
             .preferredColorScheme(readerTheme)
@@ -743,6 +744,7 @@ struct ReaderView: View {
         }
         .onDisappear {
             viewModel.persistReadingTime()
+            viewModel.usage?.close()
             // Cancel any in-flight request when leaving the reader, as the manga reader does.
             aiController.dismiss()
             viewModel.sasayakiPlayer.teardown()

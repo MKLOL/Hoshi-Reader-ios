@@ -99,7 +99,9 @@ class ReaderViewModel {
     
     // stats
     var isTracking = false
-    var isPaused = false
+    var isPaused = false { didSet { usage?.reading(isTracking && !isPaused) } }
+    private(set) var usage: ReaderUsageSession?
+    private var lastUsagePosition: String?
     var lastTimestamp: Date = .now
     var lastCount: Int = 0
     private var readingTracker: MangaStatisticsTracker?
@@ -172,6 +174,7 @@ class ReaderViewModel {
             bookInfo = BookInfo(characterCount: 0, chapterInfo: [:])
         }
         
+        usage = ReaderUsageSession(book: book)
         if enableStatistics {
             loadStatistics()
         }
@@ -319,6 +322,9 @@ class ReaderViewModel {
     
     func saveBookmark(progress: Double) {
         persistBookmark(progress: progress)
+        let position = "\(index):\(currentCharacter)"
+        if let previous = lastUsagePosition, previous != position { usage?.record(.page, chapter: index + 1, character: currentCharacter) }
+        lastUsagePosition = position
         flushStats()
     }
     
@@ -378,6 +384,9 @@ class ReaderViewModel {
     
     func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool, autoPause: Bool) -> Int? {
         let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
+        usage?.record(.lookup, text: lookupResults.first.map { cxxStringToSwift($0.matched) } ?? selection.text,
+            term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
+            source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty, chapter: index + 1, character: currentCharacter)
         var dictionaryStyles: [String: String] = [:]
         for style in LookupEngine.shared.getStyles() {
             dictionaryStyles[cxxStringToSwift(style.dict_name)] = cxxStringToSwift(style.styles)
@@ -455,6 +464,7 @@ class ReaderViewModel {
     }
     
     func startTracking() {
+        usage?.reading(true)
         isTracking = true
         lastTimestamp = .now
         lastCount = currentCharacter
@@ -465,6 +475,7 @@ class ReaderViewModel {
         guard isTracking else { return }
         flushStats()
         readingTracker?.pause(currentPage: currentCharacter)
+        usage?.reading(false)
         isTracking = false
     }
     

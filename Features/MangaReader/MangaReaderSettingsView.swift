@@ -38,7 +38,8 @@ struct MangaReaderSettingsView: View {
             }
 
             Section {
-                Toggle("Show Copy / AI buttons", isOn: $userConfig.mangaShowActionButtons)
+                Toggle("Show translation button", isOn: $userConfig.mangaShowActionButtons)
+                Toggle("Show Copy button", isOn: $userConfig.mangaShowCopyButton)
             } footer: {
                 Text("Show quick actions after revealing a speech bubble. Turn this off if the buttons get in the way while reading.")
             }

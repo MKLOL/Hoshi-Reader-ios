@@ -34,6 +34,7 @@ nonisolated struct MangaPageRenderConfig: Hashable, Sendable {
     let useNotoSansJpFont: Bool
     let showActionButtons: Bool
     let selectionScript: String
+    var showCopyButton: Bool = false
 }
 
 /// LRU cache of generated manga-page HTML + a bounded set of warmed image files.
@@ -81,7 +82,8 @@ actor MangaPageRenderCache {
             viewportCssHeight: config.viewportCssHeight,
             singleTapLookup: config.singleTapLookup,
             useNotoSansJpFont: config.useNotoSansJpFont,
-            showActionButtons: config.showActionButtons
+            showActionButtons: config.showActionButtons,
+            showCopyButton: config.showCopyButton
         )
         insert(html, for: key)
         return html
