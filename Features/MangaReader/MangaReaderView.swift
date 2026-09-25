@@ -221,6 +221,7 @@ struct MangaReaderView: View {
             model.resumeStatistics()
         }
         .onDisappear {
+            model.closePopups()
             model.flushPendingBookmark()
             model.suspendStatistics()
             model.usage?.close()
@@ -233,6 +234,10 @@ struct MangaReaderView: View {
                 HttpSyncActiveBooks.close(syncId(for: metadata))
                 HttpSyncManager.shared.syncInBackground()
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { note in
+            guard let changed = note.object as? URL, changed.standardizedFileURL == model.bookRoot?.standardizedFileURL else { return }
+            model.reloadStatistics()
         }
         .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
             guard note.userInfo?["syncId"] as? String == syncId(for: metadata) else { return }
@@ -271,7 +276,7 @@ struct MangaReaderView: View {
                                     if let index = model.popups.firstIndex(where: { $0.id == popupId }) {
                                         model.closeChildPopups(parent: index)
                                     }
-                                    return model.handleTextSelection(
+                                    return await model.handleTextSelection(
                                         selection,
                                         maxResults: userConfig.maxResults,
                                         scanLength: userConfig.scanLength,
@@ -338,7 +343,7 @@ struct MangaReaderView: View {
                         uiTestSelectionProbe = uiTestProbeLabel(for: selection)
                     }
                     model.closePopups()
-                    return model.handleTextSelection(
+                    return await model.handleTextSelection(
                         selection,
                         maxResults: userConfig.maxResults,
                         scanLength: userConfig.scanLength,

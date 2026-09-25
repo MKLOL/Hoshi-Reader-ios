@@ -53,8 +53,8 @@ final class MangaReaderViewModel {
     private var resumeTracking = false
     private(set) var sessionCharacters = 0
     private(set) var textStatistics: [MangaTextStatistic] = []
-    var todayCharacters: Int { textStatistics.filter { $0.dateKey == MangaStatisticsTracker.dateKey(for: .now) }.reduce(0) { $0 + $1.charactersRead } }
-    var allTimeCharacters: Int { textStatistics.reduce(0) { $0 + $1.charactersRead } }
+    var todayCharacters: Int { textStatistics.filter { $0.dateKey == MangaStatisticsTracker.dateKey(for: .now) }.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } }
+    var allTimeCharacters: Int { textStatistics.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } }
 
 
     private var bookmarkSaveTask: Task<Void, Never>?
@@ -155,11 +155,17 @@ final class MangaReaderViewModel {
         let day = MangaStatisticsTracker.dateKey(for: .now)
         var row = textStatistics.first { $0.dateKey == day && $0.deviceId == device.id }
             ?? MangaTextStatistic(dateKey: day, deviceId: device.id, deviceName: device.name)
-        row.charactersRead += characters
-        row.lastModified = max(Int(Date().timeIntervalSince1970 * 1000), row.lastModified + 1)
+        row.charactersRead = StatisticsNumbers.adding(row.charactersRead, characters)
+        row.lastModified = max(Int(Date().timeIntervalSince1970 * 1000), StatisticsNumbers.nextStamp(row.lastModified))
         textStatistics = MangaTextStatistic.merged(textStatistics + [row])
-        sessionCharacters += characters
+        sessionCharacters = StatisticsNumbers.adding(sessionCharacters, characters)
         if let root = bookRoot { try? ReadingStatisticsStore.saveText(textStatistics, root: root) }
+    }
+
+    func reloadStatistics() {
+        guard let bookRoot else { return }
+        statistics?.mergeHistory(ReadingStatisticsStore.reading(root: bookRoot))
+        textStatistics = MangaTextStatistic.merged(textStatistics + ReadingStatisticsStore.text(root: bookRoot))
     }
 
     func persistStatistics() {
@@ -300,12 +306,19 @@ final class MangaReaderViewModel {
 
     // MARK: Dictionary lookup (reuses the shared engine + popup model)
 
-    func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool) -> Int? {
-        let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
+    private var lookupGeneration = 0
+    func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool) async -> Int? {
+        guard !Task.isCancelled else { return nil }
+        lookupGeneration += 1
+        let generation = lookupGeneration
+        let snapshot = await LookupEngine.shared.lookupAsync(selection.text, maxResults: maxResults, scanLength: scanLength)
+        guard !Task.isCancelled, lookupGeneration == generation else { return nil }
+        let lookupResults = snapshot.results
         usage?.record(.lookup, text: lookupResults.first.map { cxxStringToSwift($0.matched) } ?? selection.text,
             term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
             source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty, page: pageIndex + 1)
-        let dictionaryStyles = LookupEngine.shared.getStylesMap()
+        let dictionaryStyles = snapshot.styles
+        guard !lookupResults.isEmpty else { return nil }
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
@@ -326,12 +339,13 @@ final class MangaReaderViewModel {
                     return p
                 }
             }
-            return cxxStringToSwift(firstResult.matched).count
+            return cxxStringToSwift(firstResult.matched).unicodeScalars.count
         }
         return nil
     }
 
     func closePopups() {
+        lookupGeneration += 1
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices { popups[index].showPopup = false }
@@ -341,6 +355,7 @@ final class MangaReaderViewModel {
     }
 
     func closeChildPopups(parent: Int) {
+        lookupGeneration += 1
         var popupIds: Set<UUID> = []
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices.dropFirst(parent + 1) {

@@ -11,6 +11,10 @@ window.hoshiReader = {
     ttuRegex: /[0-9A-Za-z○◯々-〇〻ぁ-ゖゝ-ゞァ-ヺー０-９Ａ-Ｚａ-ｚｦ-ﾝ\p{Radical}\p{Unified_Ideograph}]/iu,
     activeCueId: null,
     cueWrappers: new Map(),
+    cueRanges: new Map(),
+    cueRubyElements: new Map(),
+    cueTargets: new Map(),
+    sasayakiCues: [],
     nodeStartOffsets: new WeakMap(),
     nodeStartRawOffsets: new WeakMap(),
 
@@ -62,21 +66,32 @@ window.hoshiReader = {
     
     scrollToTarget(target) {
         const rect = this.getRect(target);
-        
-        if (this.isVertical()) {
+        const vertical = this.isVertical();
+        if (vertical) {
             if (rect.left >= 0 && rect.right <= window.innerWidth) {
                 return false;
             }
-            
-            target.scrollIntoView({ block: 'start', inline: 'nearest' });
-            return true;
-        }
-        
-        if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
+        } else if (rect.top >= 0 && rect.bottom <= window.innerHeight) {
             return false;
         }
-        
-        target.scrollIntoView({ block: 'start', inline: 'nearest' });
+        if (typeof target.scrollIntoView === 'function') {
+            target.scrollIntoView({ block: 'start', inline: 'nearest' });
+        } else {
+            // A CSS Highlight target is a Range, not an Element. Align the first line to the
+            // leading edge in continuous mode, including negative horizontal scroll in vertical text.
+            const root = document.scrollingElement || document.documentElement;
+            if (vertical) {
+                const current = window.scrollX || root.scrollLeft;
+                const left = current + rect.right - window.innerWidth;
+                window.scrollTo({ left, top: window.scrollY, behavior: 'instant' });
+                root.scrollLeft = left;
+            } else {
+                const current = root.scrollTop || window.scrollY;
+                const top = current + rect.top;
+                window.scrollTo({ left: window.scrollX, top, behavior: 'instant' });
+                root.scrollTop = top;
+            }
+        }
         return true;
     },
     
@@ -193,10 +208,61 @@ window.hoshiReader = {
         }));
     },
     
+    supportsSasayakiRangeHighlights() {
+        return !!(window.CSS && CSS.highlights && window.Highlight);
+    },
+
+    cueNeedsWrapper(cue) {
+        return cue.ranges.some(segment => {
+            let element = segment.node.parentElement;
+            while (element && element !== document.body) {
+                const style = window.getComputedStyle(element);
+                const emphasis = style.webkitTextEmphasisStyle || style.textEmphasisStyle || 'none';
+                if (emphasis !== 'none') return true;
+                element = element.parentElement;
+            }
+            return false;
+        });
+    },
+
     applySasayakiCues(cues) {
+        const active = this.activeCueId;
         this.resetSasayakiCues();
-        
-        const cueRanges = this.collectSasayakiCueRanges(cues);
+        this.sasayakiCues = cues;
+        const cueRanges = this.collectSasayakiCueRanges([...cues].sort((a, b) => a.start - b.start));
+        const fallback = [];
+        for (const cue of cueRanges) {
+            if (!this.supportsSasayakiRangeHighlights() || this.cueNeedsWrapper(cue)) {
+                fallback.push(cue);
+                continue;
+            }
+            const ranges = [], rubies = [], targets = [];
+            for (const segment of cue.ranges) {
+                const ruby = segment.node.parentElement?.closest('ruby');
+                if (ruby) {
+                    if (!rubies.includes(ruby)) { rubies.push(ruby); targets.push(ruby); }
+                } else {
+                    const range = document.createRange();
+                    range.setStart(segment.node, segment.start);
+                    range.setEnd(segment.node, segment.end);
+                    ranges.push(range);
+                    targets.push(range);
+                }
+            }
+            this.cueRanges.set(cue.id, ranges);
+            this.cueRubyElements.set(cue.id, rubies);
+            this.cueTargets.set(cue.id, targets);
+        }
+        this.wrapSasayakiCueRanges(fallback);
+        this.buildNodeOffsets();
+        if (active) this.highlightSasayakiCue(active, false);
+    },
+
+    refreshSasayakiCues() {
+        if (this.sasayakiCues.length) this.applySasayakiCues(this.sasayakiCues);
+    },
+
+    wrapSasayakiCueRanges(cueRanges) {
         const range = document.createRange();
         for (let i = cueRanges.length - 1; i >= 0; i--) {
             const { id, ranges } = cueRanges[i];
@@ -221,43 +287,38 @@ window.hoshiReader = {
             this.cueWrappers.set(id, wrappers);
         }
         
-        this.buildNodeOffsets();
     },
-    
+
     highlightSasayakiCue(cueId, reveal) {
         this.clearSasayakiCue();
-        
-        const wrappers = this.cueWrappers.get(cueId);
-        if (!wrappers?.length) {
-            return null;
-        }
-        
+        const wrappers = this.cueWrappers.get(cueId) || [];
+        const targets = wrappers.length ? wrappers : this.cueTargets.get(cueId) || [];
+        if (!targets.length) return null;
         this.activeCueId = cueId;
         wrappers.forEach(wrapper => wrapper.classList.add('hoshi-sasayaki-active'));
-        
-        if (reveal && this.scrollToTarget(wrappers[0])) {
-            return this.calculateProgress();
-        }
-        
+        const ranges = this.cueRanges.get(cueId) || [];
+        if (ranges.length && this.supportsSasayakiRangeHighlights()) CSS.highlights.set('hoshi-sasayaki', new Highlight(...ranges));
+        (this.cueRubyElements.get(cueId) || []).forEach(ruby => ruby.classList.add('hoshi-sasayaki-ruby-active'));
+        if (reveal && this.scrollToTarget(targets[0])) return this.calculateProgress();
         return null;
     },
-    
+
     clearSasayakiCue() {
-        if (!this.activeCueId) {
-            return;
-        }
-        
-        const wrappers = this.cueWrappers.get(this.activeCueId) || [];
-        wrappers.forEach(wrapper => wrapper.classList.remove('hoshi-sasayaki-active'));
+        if (this.supportsSasayakiRangeHighlights()) CSS.highlights.delete('hoshi-sasayaki');
+        (this.cueWrappers.get(this.activeCueId) || []).forEach(wrapper => wrapper.classList.remove('hoshi-sasayaki-active'));
+        (this.cueRubyElements.get(this.activeCueId) || []).forEach(ruby => ruby.classList.remove('hoshi-sasayaki-ruby-active'));
         this.activeCueId = null;
     },
-    
+
     resetSasayakiCues() {
+        this.clearSasayakiCue();
         this.cueWrappers.forEach(wrappers => this.unwrap(wrappers));
         this.cueWrappers.clear();
-        this.activeCueId = null;
+        this.cueRanges.clear();
+        this.cueRubyElements.clear();
+        this.cueTargets.clear();
     },
-    
+
     unwrap(wrappers) {
         wrappers.forEach(wrapper => {
             const parent = wrapper.parentNode;

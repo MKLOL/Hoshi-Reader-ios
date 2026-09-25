@@ -143,7 +143,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     /// Right-to-left manga paging: a right swipe moves forward (matches MangaPageNavigation).
     var onNavigate: (NavigationDirection) -> Void
     /// A revealed OCR word was tapped for lookup — drives the shared PopupView.
-    var onTextSelected: (SelectionData) -> Int?
+    var onTextSelected: (SelectionData) async -> Int?
     /// Empty artwork tapped — dismiss any lookup popup.
     var onTapOutside: () -> Void
     /// A bubble's sparkles button was tapped — bubble text for the AI controller.
@@ -284,6 +284,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.selectionTask?.cancel()
         let controllerJS = webView.configuration.userContentController
         controllerJS.removeScriptMessageHandler(forName: "textSelected")
         controllerJS.removeScriptMessageHandler(forName: "hoshiManga")
@@ -311,6 +312,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler,
                              WKURLSchemeHandler, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+        var selectionTask: Task<Void, Never>?
         var parent: MangaReaderWebView
         var lastLoadToken = 0
         var allowedImagePaths: Set<String> = []
@@ -409,8 +411,9 @@ struct MangaReaderWebView: UIViewRepresentable {
                 let verticalBlock = body["verticalBlock"] as? Bool
                 let selection = SelectionData(text: text, sentence: sentence, rect: rect,
                                               normalizedOffset: normalizedOffset, verticalBlock: verticalBlock)
-                if let count = parent.onTextSelected(selection) {
-                    highlightSelection(count: count, in: message.webView)
+                selectionTask?.cancel()
+                selectionTask = Task {
+                    if let count = await parent.onTextSelected(selection), !Task.isCancelled { highlightSelection(count: count, in: message.webView) }
                 }
             case "hoshiManga":
                 guard let body = message.body as? [String: Any] else { return }
@@ -418,6 +421,7 @@ struct MangaReaderWebView: UIViewRepresentable {
                 case "bubbleRevealed":
                     parent.onBubbleRevealed(body["text"] as? String ?? "", body["blockId"] as? String)
                 case "selectedNothing":
+                    selectionTask?.cancel()
                     parent.onTapOutside() // empty artwork tap
                 default:
                     break

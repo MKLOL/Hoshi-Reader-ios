@@ -151,9 +151,6 @@ final class MangaAiController {
             return
         }
         let prompt = settings.promptText
-        // The lookup engine is synchronous and main-actor-friendly; capture the context up front so
-        // the background request closure stays free of UI state.
-        let lookup = Self.buildDictionaryLookup(query: trimmed)
 
         let requestGeneration = beginRequest()
         isShowingPretranslation = false
@@ -161,6 +158,8 @@ final class MangaAiController {
         task = Task {
             defer { self.finishRequest(generation: requestGeneration) }
             do {
+                let lookup = await Self.buildDictionaryLookup(query: trimmed)
+                guard self.isCurrentRequest(requestGeneration) else { return }
                 let response = try await CloudChat.complete(
                     provider: provider, apiKey: apiKey, model: model, prompt: prompt, bubbleText: trimmed
                 )
@@ -222,7 +221,7 @@ final class MangaAiController {
         }
 
         cancel()
-        _ = beginRequest()
+        let requestGeneration = beginRequest()
         isShowingPretranslation = true
         activeBackendName = "Pre-translated"
         state = .result(AiChatEntry(
@@ -231,9 +230,16 @@ final class MangaAiController {
             model: cachedModel,
             response: cachedResponse,
             timestampSeconds: Date().timeIntervalSinceReferenceDate,
-            dictionaryLookup: Self.buildDictionaryLookup(query: bubbleText),
+            dictionaryLookup: nil,
             debugInfo: "offline pre-translation"
         ))
+        task = Task {
+            defer { self.finishRequest(generation: requestGeneration) }
+            let lookup = await Self.buildDictionaryLookup(query: bubbleText)
+            guard self.isCurrentRequest(requestGeneration), case .result(var entry) = self.state else { return }
+            entry.dictionaryLookup = lookup
+            self.state = .result(entry)
+        }
         return true
     }
 
@@ -242,7 +248,6 @@ final class MangaAiController {
     /// unchanged), attaching a one-line tok/s telemetry footer to `debugInfo` like Android.
     private func askOnDevice(bubbleText trimmed: String, book: BookMetadata) {
         let prompt = settings.promptText
-        let lookup = Self.buildDictionaryLookup(query: trimmed)
 
         let requestGeneration = beginRequest()
         isShowingPretranslation = false
@@ -250,6 +255,8 @@ final class MangaAiController {
         task = Task { [offlineManager] in
             defer { self.finishRequest(generation: requestGeneration) }
             do {
+                let lookup = await Self.buildDictionaryLookup(query: trimmed)
+                guard self.isCurrentRequest(requestGeneration) else { return }
                 let result = try await offlineManager.translate(
                     instruction: prompt, japaneseText: trimmed
                 )
@@ -429,12 +436,13 @@ final class MangaAiController {
 
     /// Builds a compact dictionary lookup for `query`, trying the whole bubble then progressively
     /// narrower Japanese spans. Returns `nil` if nothing matched (or the engine isn't ready).
-    static func buildDictionaryLookup(query: String) -> AiChatDictionaryLookup? {
+    static func buildDictionaryLookup(query: String) async -> AiChatDictionaryLookup? {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         for candidate in candidateLookupQueries(trimmed) {
-            let results = LookupEngine.shared.lookup(candidate, maxResults: maxResults, scanLength: 16)
-            if let snapshot = toDictionaryLookup(results, query: candidate) {
+            let results = await LookupEngine.shared.lookupAsync(candidate, maxResults: maxResults, scanLength: 16)
+            guard !Task.isCancelled else { return nil }
+            if let snapshot = toDictionaryLookup(results.results, query: candidate) {
                 return snapshot
             }
         }

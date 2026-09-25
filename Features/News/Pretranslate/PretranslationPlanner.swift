@@ -24,7 +24,7 @@ nonisolated enum PretranslationPlanner {
         var sentences: [ReaderSentence] = []
         for (spine, item) in document.spine.items.enumerated() {
             guard let manifestItem = document.manifest.items[item.idref] else { continue }
-            let path = document.contentDirectory.appendingPathComponent(manifestItem.path)
+            guard let path = document.resourceURL(for: manifestItem.path) else { continue }
             guard let html = try? String(contentsOf: path, encoding: .utf8) else { continue }
             sentences += EpubSentenceSegmenter.segment(spine: spine, html: html).filter { !$0.text.trimmingCharacters(in: .whitespaces).isEmpty }
         }

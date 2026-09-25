@@ -26,6 +26,30 @@ final class ZoomPopupUITests: XCTestCase {
         saveScreenshot(app, name: "page-turn-at-fit-scale")
     }
 
+    func testTranslateOnlyBubbleAndStatisticsTabs() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture(aiStub: true, showCopy: false)
+        let box = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "日本語")).firstMatch
+        XCTAssertTrue(box.waitForExistence(timeout: 5))
+        box.tap()
+        let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Ask about this bubble")).firstMatch
+        XCTAssertTrue(translate.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Copy bubble text")).firstMatch.exists)
+        translate.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.waitForExistence(timeout: 5))
+        saveScreenshot(app, name: "translate-only-bubble")
+        app.terminate()
+        app.launch()
+        let statistics = app.buttons["Statistics"].firstMatch
+        XCTAssertTrue(statistics.waitForExistence(timeout: 5))
+        statistics.tap()
+        XCTAssertTrue(app.navigationBars["Statistics"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Today"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["Trends"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["Reading time (minutes)"].firstMatch.waitForExistence(timeout: 5))
+        saveScreenshot(app, name: "statistics-trends")
+    }
+
     private func waitForViewport(_ probe: XCUIElement, containing value: String) -> Bool {
         XCTWaiter.wait(for: [XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label CONTAINS %@", value), object: probe
@@ -374,9 +398,10 @@ final class ZoomPopupUITests: XCTestCase {
         add(attachment)
     }
 
-    private func launchZoomFixture(aiStub: Bool = false) throws -> XCUIApplication {
+    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
+        app.launchArguments += ["-mangaShowCopyButton", showCopy ? "YES" : "NO"]
         if aiStub {
             app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"
         }
@@ -391,6 +416,17 @@ final class ZoomPopupUITests: XCTestCase {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 6))
         sleep(2)
+        let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+        if probe.waitForExistence(timeout: 5), !probe.label.contains("page=1;") {
+            app.buttons["manga-options-menu"].tap()
+            app.buttons["Go to page"].tap()
+            let field = app.textFields.firstMatch
+            field.tap()
+            let oldValue = field.value as? String ?? ""
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + "1")
+            app.buttons["Go"].tap()
+            XCTAssertTrue(waitForViewport(probe, containing: "page=1;zoom=1.000"), probe.label)
+        }
         return app
     }
 

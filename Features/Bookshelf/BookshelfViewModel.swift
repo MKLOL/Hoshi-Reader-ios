@@ -95,7 +95,7 @@ class BookshelfViewModel {
         case .epub:
             guard let document = try? BookStorage.loadEpub(root),
                   let coverPath = findCoverInManifest(document: document) else { return nil }
-            let source = document.contentDirectory.appendingPathComponent(coverPath)
+            guard let source = document.resourceURL(for: coverPath) else { return nil }
             guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)),
                   (try? FileManager.default.copyItem(at: source, to: target)) != nil else { return nil }
             return FileNames.generatedCover
@@ -556,9 +556,8 @@ class BookshelfViewModel {
     private func finalizeImport(localURL: URL, bookFolder: URL, document: EPUBDocument) throws {
         do {
             var coverURL: String?
-            if let coverPath = findCoverInManifest(document: document) {
-                let coverSourceURL = document.contentDirectory.appendingPathComponent(coverPath)
-                let coverDestination = "Books/\(bookFolder.lastPathComponent)/\(URL(fileURLWithPath: coverPath).lastPathComponent)"
+            if let coverPath = findCoverInManifest(document: document), let coverSourceURL = document.resourceURL(for: coverPath) {
+                let coverDestination = "Books/\(bookFolder.lastPathComponent)/\(coverSourceURL.lastPathComponent)"
                 try BookStorage.copyFile(from: coverSourceURL, to: coverDestination)
                 coverURL = coverDestination
             }

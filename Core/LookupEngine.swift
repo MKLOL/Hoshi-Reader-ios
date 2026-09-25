@@ -9,9 +9,17 @@
 import Foundation
 import CHoshiDicts
 
-class LookupEngine {
+/// Native results own their materialized strings/vectors; no borrowed media buffers cross queues.
+nonisolated struct LookupSnapshot: @unchecked Sendable {
+    let results: [LookupResult]
+    let styles: [String: String]
+}
+
+nonisolated final class LookupEngine: @unchecked Sendable {
     static let shared = LookupEngine()
     
+    private let lock = NSRecursiveLock()
+    private let worker = DispatchQueue(label: "hoshi.dictionary.lookup", qos: .userInitiated)
     private var dictQuery: DictionaryQuery?
     private var deinflector: Deinflector?
     private var lookupEngine: Lookup?
@@ -21,6 +29,9 @@ class LookupEngine {
     }
     
     func buildQuery(termPaths: [URL], freqPaths: [URL], pitchPaths: [URL]) {
+        lock.lock(); defer { lock.unlock() }
+        // Destroy references into the old query before unmapping its dictionaries.
+        lookupEngine = nil
         dictQuery = DictionaryQuery()
         for path in termPaths {
             dictQuery?.add_term_dict(std.string(path.path(percentEncoded: false)))
@@ -35,10 +46,23 @@ class LookupEngine {
     }
     
     func lookup(_ str: String, maxResults: Int = 16, scanLength: Int = 16) -> [LookupResult] {
+        lock.lock(); defer { lock.unlock() }
         return Array(lookupEngine?.lookup(std.string(str), Int32(maxResults), scanLength) ?? [])
     }
     
+    func lookupAsync(_ text: String, maxResults: Int = 16, scanLength: Int = 16) async -> LookupSnapshot {
+        await withCheckedContinuation { continuation in
+            worker.async {
+                self.lock.lock(); defer { self.lock.unlock() }
+                continuation.resume(returning: LookupSnapshot(
+                    results: self.lookup(text, maxResults: maxResults, scanLength: scanLength),
+                    styles: self.getStylesMap()))
+            }
+        }
+    }
+
     func getStyles() -> [DictionaryStyle] {
+        lock.lock(); defer { lock.unlock() }
         return Array(dictQuery?.get_styles() ?? [])
     }
 
@@ -58,6 +82,7 @@ class LookupEngine {
     }
     
     func withMediaFile<T>(dictName: String, mediaPath: String, _ body: (Data) -> T) -> T {
+        lock.lock(); defer { lock.unlock() }
         // dictQuery is nil until buildQuery() runs (e.g. media fetch before any dictionary is built);
         // every other accessor optional-chains, so don't force-unwrap into a trap here.
         guard dictQuery != nil else { return body(Data()) }
@@ -66,7 +91,7 @@ class LookupEngine {
         guard size > 0, let ptr = UnsafeMutableRawPointer(mutating: view.data) else {
             return body(Data())
         }
-        let data = Data(bytesNoCopy: ptr, count: size, deallocator: .none)
+        let data = Data(bytes: ptr, count: size)
         return body(data)
     }
     

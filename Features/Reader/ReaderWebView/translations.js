@@ -180,6 +180,7 @@ window.hoshiTranslations = {
 
         // The DOM changed, so anything that caches node offsets has to be rebuilt.
         window.hoshiReader.buildNodeOffsets();
+        window.hoshiReader.refreshSasayakiCues?.();
         return this.buttons.length;
     },
 

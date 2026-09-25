@@ -62,6 +62,7 @@ struct SentenceReaderView: View {
             }
             .coordinateSpace(name: Self.rootSpace)
         }
+        .onDisappear { closePopups() }
         .task { await load() }
         .onChange(of: position) { _, new in
             translationExpanded = false
@@ -304,7 +305,7 @@ struct SentenceReaderView: View {
         let text = sentence.text as NSString
         guard tap.characterOffset < text.length else { return }
         let queryLength = min(Self.maxTapQueryChars, text.length - tap.characterOffset)
-        let query = text.substring(with: NSRange(location: tap.characterOffset, length: queryLength))
+        let query = text.substring(with: text.rangeOfComposedCharacterSequences(for: NSRange(location: tap.characterOffset, length: queryLength)))
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         let rect = tap.rect.offsetBy(dx: textFrame.minX, dy: textFrame.minY)
@@ -318,16 +319,19 @@ struct SentenceReaderView: View {
                 scalarOffset: scalarOffset
             )
         )
-        guard let matched = handleTextSelection(selection) else {
-            highlight = nil
-            return
+        let generation = lookupGeneration
+        Task {
+            guard generation == lookupGeneration else { return }
+            let matched = await handleTextSelection(selection)
+            guard lookupGeneration == generation + 1 else { return }
+            guard let matched else { highlight = nil; return }
+            // Lookup lengths count Unicode scalars; NSLayoutManager ranges use UTF-16.
+            let start = String.Index(utf16Offset: tap.characterOffset, in: sentence.text)
+            let end = sentence.text.unicodeScalars.index(start, offsetBy: matched, limitedBy: sentence.text.endIndex)
+                ?? sentence.text.endIndex
+            let utf16End = end.utf16Offset(in: sentence.text)
+            highlight = NSRange(location: tap.characterOffset, length: utf16End - tap.characterOffset)
         }
-        // `matched` counts Characters; the highlight range is UTF-16, like everything NSLayoutManager.
-        let start = String.Index(utf16Offset: tap.characterOffset, in: sentence.text)
-        let end = sentence.text.index(start, offsetBy: matched, limitedBy: sentence.text.endIndex)
-            ?? sentence.text.endIndex
-        let utf16End = end.utf16Offset(in: sentence.text)
-        highlight = NSRange(location: tap.characterOffset, length: utf16End - tap.characterOffset)
     }
 
     private func popupStack(screenSize: CGSize) -> some View {
@@ -349,7 +353,7 @@ struct SentenceReaderView: View {
                     if let index = popups.firstIndex(where: { $0.id == popupId }) {
                         closeChildPopups(parent: index)
                     }
-                    return handleTextSelection(selection)
+                    return await handleTextSelection(selection)
                 },
                 onTapOutside: {
                     if let index = popups.firstIndex(where: { $0.id == popupId }) {
@@ -372,20 +376,27 @@ struct SentenceReaderView: View {
     }
 
     /// The reader's lookup, minus the web view: same engine, same styles, same stacked popups.
-    private func handleTextSelection(_ selection: SelectionData) -> Int? {
-        let lookupResults = LookupEngine.shared.lookup(
+    @State private var lookupGeneration = 0
+    private func handleTextSelection(_ selection: SelectionData) async -> Int? {
+        guard !Task.isCancelled else { return nil }
+        lookupGeneration += 1
+        let generation = lookupGeneration
+        let snapshot = await LookupEngine.shared.lookupAsync(
             selection.text,
             maxResults: userConfig.maxResults,
             scanLength: userConfig.scanLength
         )
+        guard !Task.isCancelled, lookupGeneration == generation else { return nil }
+        let lookupResults = snapshot.results
         usage?.record(.lookup, text: lookupResults.first.map { cxxStringToSwift($0.matched) } ?? selection.text,
             term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
             source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty)
+        guard !lookupResults.isEmpty else { return nil }
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
             lookupResults: lookupResults,
-            dictionaryStyles: LookupEngine.shared.getStylesMap(),
+            dictionaryStyles: snapshot.styles,
             isVertical: false,
             isFullWidth: userConfig.popupFullWidth,
             clearSelection: false
@@ -402,7 +413,7 @@ struct SentenceReaderView: View {
         }
         // `String(firstResult.matched)` stops resolving in heavy files — the documented
         // CHoshiDicts interop fallback (see CxxStringInterop.swift).
-        return cxxStringToSwift(firstResult.matched).count
+        return cxxStringToSwift(firstResult.matched).unicodeScalars.count
     }
 
     /// What a tap anywhere outside the popup does: the reader's `onTapOutside`, minus the web view.
@@ -412,6 +423,7 @@ struct SentenceReaderView: View {
     }
 
     private func closePopups() {
+        lookupGeneration += 1
         guard !popups.isEmpty else { return }
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
@@ -422,6 +434,7 @@ struct SentenceReaderView: View {
     }
 
     private func closeChildPopups(parent: Int) {
+        lookupGeneration += 1
         var popupIds: Set<UUID> = []
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices.dropFirst(parent + 1) {

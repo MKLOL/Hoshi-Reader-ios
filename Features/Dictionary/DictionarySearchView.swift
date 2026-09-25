@@ -52,7 +52,7 @@ struct DictionarySearchView: View {
                     },
                     onTextSelected: {
                         closePopups()
-                        return handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: false, isFullWidth: false)
+                        return await handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: false, isFullWidth: false)
                     },
                     onTapOutside: closePopups
                 )
@@ -78,7 +78,7 @@ struct DictionarySearchView: View {
                             if let index = popups.firstIndex(where: { $0.id == popupId }) {
                                 closeChildPopups(parent: index)
                             }
-                            return handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: false, isFullWidth: false)
+                            return await handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: false, isFullWidth: false)
                         },
                         onTapOutside: {
                             if let index = popups.firstIndex(where: { $0.id == popupId }) {
@@ -111,16 +111,17 @@ struct DictionarySearchView: View {
         }
         .safeAreaInset(edge: .top) {
             DictionarySearchBar(text: $query, isFocused: $searchFocused) {
-                runLookup()
+                Task { await runLookup() }
             }
         }
         .onChange(of: shouldFocus) {
             searchFocused = true
         }
+        .onDisappear { closePopups() }
         .onAppear {
             if !didInitialQuery && !initialQuery.isEmpty {
                 query = initialQuery
-                runLookup()
+                Task { await runLookup() }
             }
             if initialAutofocus || didInitialQuery {
                 searchFocused = false
@@ -134,7 +135,7 @@ struct DictionarySearchView: View {
         }
     }
     
-    private func runLookup() {
+    private func runLookup() async {
         closePopups()
         
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -148,7 +149,10 @@ struct DictionarySearchView: View {
             return
         }
         
-        let results = LookupEngine.shared.lookup(trimmed, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength)
+        let generation = lookupGeneration
+        let snapshot = await LookupEngine.shared.lookupAsync(trimmed, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength)
+        guard !Task.isCancelled, generation == lookupGeneration, query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+        let results = snapshot.results
         if results.isEmpty {
             content = ""
             lookupEntries = []
@@ -156,12 +160,19 @@ struct DictionarySearchView: View {
             return
         }
         
-        constructHtml(results: results, styles: LookupEngine.shared.getStylesMap())
+        constructHtml(results: results, styles: snapshot.styles)
     }
     
-    private func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int,  isVertical: Bool, isFullWidth: Bool) -> Int? {
-        let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
-        let dictionaryStyles = LookupEngine.shared.getStylesMap()
+    @State private var lookupGeneration = 0
+    private func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int,  isVertical: Bool, isFullWidth: Bool) async -> Int? {
+        guard !Task.isCancelled else { return nil }
+        lookupGeneration += 1
+        let generation = lookupGeneration
+        let snapshot = await LookupEngine.shared.lookupAsync(selection.text, maxResults: maxResults, scanLength: scanLength)
+        guard !Task.isCancelled, lookupGeneration == generation else { return nil }
+        let lookupResults = snapshot.results
+        let dictionaryStyles = snapshot.styles
+        guard !lookupResults.isEmpty else { return nil }
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
@@ -186,12 +197,13 @@ struct DictionarySearchView: View {
             // `String(firstResult.matched)` stops resolving here ("no exact matches in call to
             // initializer") once the surrounding file gets heavy enough for the type-checker — the
             // documented CHoshiDicts interop fallback (see CxxStringInterop.swift).
-            return cxxStringToSwift(firstResult.matched).count
+            return cxxStringToSwift(firstResult.matched).unicodeScalars.count
         }
         return nil
     }
 
     private func closePopups() {
+        lookupGeneration += 1
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices {
@@ -203,6 +215,7 @@ struct DictionarySearchView: View {
     }
     
     private func closeChildPopups(parent: Int) {
+        lookupGeneration += 1
         var popupIds: Set<UUID> = []
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices.dropFirst(parent + 1) {

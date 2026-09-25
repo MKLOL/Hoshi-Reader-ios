@@ -21,9 +21,9 @@ final class NewsTabUITests: XCTestCase {
         // Sources finish loading at different times and the merged list re-sorts as they arrive,
         // which can scroll the row that was tapped out of the accessibility tree. Filtering to one
         // source keeps the row in place.
-        let watanoc = app.buttons["Watanoc"].firstMatch
-        XCTAssertTrue(watanoc.waitForExistence(timeout: 10), "no Watanoc source chip")
-        watanoc.tap()
+        let source = app.buttons["NHK Easier"].firstMatch
+        XCTAssertTrue(source.waitForExistence(timeout: 10), "no NHK Easier source chip")
+        source.tap()
 
         let wantToRead = app.buttons["Want to read"].firstMatch
         XCTAssertTrue(wantToRead.waitForExistence(timeout: 90), "no article appeared in the News tab")

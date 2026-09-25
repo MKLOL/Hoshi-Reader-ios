@@ -26,6 +26,6 @@ import CxxStdlib
 /// `String(cxxString)` overload doesn't resolve under this target's mixed C++ interop (see the
 /// file header); elsewhere `String(...)` is fine.
 @inline(__always)
-func cxxStringToSwift(_ cxxString: std.string) -> String {
+nonisolated func cxxStringToSwift(_ cxxString: std.string) -> String {
     String(cxxString)
 }

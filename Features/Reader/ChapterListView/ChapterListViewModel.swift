@@ -44,8 +44,7 @@ class ChapterListViewModel {
         items.flatMap { item -> [ChapterRow] in
             let row: [ChapterRow]
             if let index = findSpineIndex(for: item) {
-                let parts = item.item?.split(separator: "#", maxSplits: 1)
-                let fragment = (parts?.count ?? 0) > 1 ? String(parts![1]) : nil
+                let fragment = item.item.flatMap { URLComponents(string: $0)?.fragment }
                 row = [ChapterRow(
                     label: item.label,
                     spineIndex: index,
@@ -62,24 +61,21 @@ class ChapterListViewModel {
     }
     
     private func getCharacterCount(for item: EPUBTableOfContents) -> Int? {
-        guard let tocPath = item.item else {
+        guard let index = findSpineIndex(for: item),
+              let manifestItem = document.manifest.items[document.spine.items[index].idref] else {
             return nil
         }
-        let basePath = tocPath.components(separatedBy: "#").first ?? tocPath
-        return bookInfo.chapterInfo[basePath]?.currentTotal
+        return bookInfo.chapterInfo[manifestItem.path]?.currentTotal
     }
     
     private func findSpineIndex(for item: EPUBTableOfContents) -> Int? {
-        guard let tocPath = item.item else {
+        guard let tocPath = item.item, let target = document.resourceURL(for: tocPath) else {
             return nil
         }
-        let basePath = tocPath.components(separatedBy: "#").first ?? tocPath
         
         for (index, spineItem) in document.spine.items.enumerated() {
             if let manifestItem = document.manifest.items[spineItem.idref] {
-                if manifestItem.path == basePath ||
-                    manifestItem.path.hasSuffix(basePath) ||
-                    basePath.hasSuffix(manifestItem.path) {
+                if document.resourceURL(for: manifestItem.path) == target {
                     return index
                 }
             }

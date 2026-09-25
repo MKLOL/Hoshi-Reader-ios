@@ -13,6 +13,7 @@ import UIKit
 struct ScrollReaderWebView: UIViewRepresentable {
     let userConfig: UserConfig
     let bridge: WebViewBridge
+    let readAccessRoot: URL
     let textColor: String?
     let sasayakiTextColor: Color
     let sasayakiBackgroundColor: Color
@@ -21,7 +22,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
     var onSaveBookmark: (Double) -> Void
     var onInternalLink: (URL) -> Bool
     var onInternalJump: (Double) -> Void
-    var onTextSelected: ((SelectionData) -> Int?)
+    var onTextSelected: ((SelectionData) async -> Int?)
     var onTapOutside: (() -> Void)
     var onScroll: (() -> Void)
     var onProgressChanged: ((Double) -> Void)
@@ -37,6 +38,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(ReaderFontHandler(), forURLScheme: "hoshi-font")
         config.userContentController.add(context.coordinator, name: "textSelected")
         config.userContentController.add(context.coordinator, name: "restoreCompleted")
         config.userContentController.add(context.coordinator, name: "selectionState")
@@ -90,11 +92,9 @@ struct ScrollReaderWebView: UIViewRepresentable {
                     context.coordinator.pendingHighlights = highlights
                     context.coordinator.pendingSentenceAnchors = sentenceAnchors
                     context.coordinator.isRestoring = true
-                    if let appDirectory = try? BookStorage.getAppDirectory() {
-                        webView.scrollView.delegate = nil
-                        webView.alpha = 0
-                        webView.loadFileURL(url, allowingReadAccessTo: appDirectory)
-                    }
+                    webView.scrollView.delegate = nil
+                    webView.alpha = 0
+                    webView.loadFileURL(url, allowingReadAccessTo: readAccessRoot)
                 case .restoreProgress(let progress):
                     context.coordinator.pendingProgress = progress
                     context.coordinator.pendingFragment = nil
@@ -146,14 +146,14 @@ struct ScrollReaderWebView: UIViewRepresentable {
             context.coordinator.pendingHighlights = bridge.highlights
             context.coordinator.pendingSentenceAnchors = bridge.sentenceAnchors
             context.coordinator.isRestoring = true
-            guard let appDirectory = try? BookStorage.getAppDirectory() else { return }
             webView.scrollView.delegate = nil
             webView.alpha = 0
-            webView.loadFileURL(url, allowingReadAccessTo: appDirectory)
+            webView.loadFileURL(url, allowingReadAccessTo: readAccessRoot)
         }
     }
     
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.selectionTask?.cancel()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "restoreCompleted")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "selectionState")
@@ -161,6 +161,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, WKNavigationDelegate, UIGestureRecognizerDelegate, WKScriptMessageHandler, UIScrollViewDelegate {
+        var selectionTask: Task<Void, Never>?
         var parent: ScrollReaderWebView
         weak var webView: WKWebView?
         var currentURL: URL?
@@ -221,8 +222,9 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 let normalizedOffset = body["normalizedOffset"] as? Int
                 let selectionData = SelectionData(text: text, sentence: sentence, rect: rect, normalizedOffset: normalizedOffset)
                 
-                if let highlightCount = parent.onTextSelected(selectionData) {
-                    highlightSelection(count: highlightCount)
+                selectionTask?.cancel()
+                selectionTask = Task {
+                    if let count = await parent.onTextSelected(selectionData), !Task.isCancelled { highlightSelection(count: count) }
                 }
             }
         }
@@ -300,7 +302,8 @@ struct ScrollReaderWebView: UIViewRepresentable {
             }()
             
             var fontFaceCss = ""
-            if let fontURL = try? FontManager.shared.fontUrl(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting) {
+            if (try? FontManager.shared.fontUrl(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting)) != nil,
+               let fontURL = ReaderFontHandler.url(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting) {
                 fontFaceCss = """
                 @font-face {
                     font-family: '\(parent.userConfig.selectedFont)';
@@ -389,6 +392,14 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 -webkit-user-select: none;
             }
             \(sentenceButtonCss)
+            ::highlight(hoshi-sasayaki) {
+                color: var(--hoshi-sasayaki-text-color) !important;
+                background-color: var(--hoshi-sasayaki-background-color) !important;
+            }
+            ruby.hoshi-sasayaki-ruby-active, ruby.hoshi-sasayaki-ruby-active * {
+                color: var(--hoshi-sasayaki-text-color) !important;
+                background-color: var(--hoshi-sasayaki-background-color) !important;
+            }
             .hoshi-sasayaki-cue.hoshi-sasayaki-active {
                 color: var(--hoshi-sasayaki-text-color) !important;
                 background-color: var(--hoshi-sasayaki-background-color) !important;
@@ -499,9 +510,9 @@ struct ScrollReaderWebView: UIViewRepresentable {
                     return new Promise(resolve => setTimeout(resolve, 50));
                 }).then(() => {
                     window.hoshiReader.buildNodeOffsets();
-                    \(sasayakiSetupScript)
                     \(highlightsSetupScript)
                     \(translationsSetupScript)
+                    \(sasayakiSetupScript)
                     \(initialRestoreScript)
                 });
             })();
@@ -599,6 +610,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
         }
         
         func clearSelection() {
+            selectionTask?.cancel()
             guard let webView = webView else {
                 return
             }

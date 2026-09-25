@@ -63,8 +63,8 @@ nonisolated enum SentenceReaderLoader {
             let readable = item.linear && !isNavigation && !guideTocHrefs.contains(path)
             return SentenceChapterSource(
                 spineIndex: index,
-                url: readable ? document.contentDirectory.appendingPathComponent(path) : nil,
-                tocTitle: tocTitle(for: path, in: titles)
+                url: readable ? document.resourceURL(for: path) : nil,
+                tocTitle: titles.first(where: { document.resourceURL(for: $0.href) == document.resourceURL(for: path) })?.label
             )
         }
     }
@@ -102,10 +102,4 @@ nonisolated enum SentenceReaderLoader {
         return out
     }
 
-    /// The Chapters sheet's rule (`ChapterListViewModel.findSpineIndex`): an exact match first,
-    /// otherwise the TOC path and the manifest path may differ by a leading folder.
-    private static func tocTitle(for path: String, in titles: [(href: String, label: String)]) -> String? {
-        if let exact = titles.first(where: { $0.href == path }) { return exact.label }
-        return titles.first(where: { path.hasSuffix($0.href) || $0.href.hasSuffix(path) })?.label
-    }
 }

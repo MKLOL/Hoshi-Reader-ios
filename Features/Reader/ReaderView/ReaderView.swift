@@ -245,6 +245,7 @@ struct ReaderView: View {
                         ScrollReaderWebView(
                             userConfig: userConfig,
                             bridge: viewModel.bridge,
+                            readAccessRoot: viewModel.document.directory,
                             textColor: readerTextColor,
                             sasayakiTextColor: sasayakiTextColor,
                             sasayakiBackgroundColor: sasayakiBackgroundColor,
@@ -255,7 +256,7 @@ struct ReaderView: View {
                             onInternalJump: viewModel.syncProgressAfterLinkJump,
                             onTextSelected: {
                                 viewModel.closePopups()
-                                return viewModel.handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: userConfig.verticalWriting, isFullWidth: userConfig.popupFullWidth, autoPause: userConfig.sasayakiAutoPause)
+                                return await viewModel.handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: userConfig.verticalWriting, isFullWidth: userConfig.popupFullWidth, autoPause: userConfig.sasayakiAutoPause)
                             },
                             onTapOutside: viewModel.closePopups,
                             onScroll: {
@@ -298,6 +299,7 @@ struct ReaderView: View {
                             userConfig: userConfig,
                             viewSize: viewSize,
                             bridge: viewModel.bridge,
+                            readAccessRoot: viewModel.document.directory,
                             textColor: readerTextColor,
                             sasayakiTextColor: sasayakiTextColor,
                             sasayakiBackgroundColor: sasayakiBackgroundColor,
@@ -308,7 +310,7 @@ struct ReaderView: View {
                             onInternalJump: viewModel.syncProgressAfterLinkJump,
                             onTextSelected: {
                                 viewModel.closePopups()
-                                return viewModel.handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: userConfig.verticalWriting, isFullWidth: userConfig.popupFullWidth, autoPause: userConfig.sasayakiAutoPause)
+                                return await viewModel.handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: userConfig.verticalWriting, isFullWidth: userConfig.popupFullWidth, autoPause: userConfig.sasayakiAutoPause)
                             },
                             onTapOutside: viewModel.closePopups,
                             onPageTurn: {
@@ -363,7 +365,7 @@ struct ReaderView: View {
                                 if let index = viewModel.popups.firstIndex(where: { $0.id == popupId }) {
                                     viewModel.closeChildPopups(parent: index)
                                 }
-                                return viewModel.handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: false, isFullWidth: false, autoPause: userConfig.sasayakiAutoPause)
+                                return await viewModel.handleTextSelection($0, maxResults: userConfig.maxResults, scanLength: userConfig.scanLength, isVertical: false, isFullWidth: false, autoPause: userConfig.sasayakiAutoPause)
                             },
                             onTapOutside: {
                                 if let index = viewModel.popups.firstIndex(where: { $0.id == popupId }) {
@@ -738,11 +740,16 @@ struct ReaderView: View {
             viewModel.persistReadingTime()
             viewModel.isPaused = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { note in
+            guard let changed = note.object as? URL, changed.standardizedFileURL == viewModel.rootURL.standardizedFileURL else { return }
+            viewModel.reloadStatistics()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
             guard note.userInfo?["syncId"] as? String == syncId(for: viewModel.book) else { return }
             viewModel.reloadAfterHttpBookmark()
         }
         .onDisappear {
+            viewModel.closePopups()
             viewModel.persistReadingTime()
             viewModel.usage?.close()
             // Cancel any in-flight request when leaving the reader, as the manga reader does.

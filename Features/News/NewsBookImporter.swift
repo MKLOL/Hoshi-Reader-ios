@@ -59,9 +59,8 @@ enum NewsBookImporter {
             // Re-parse from the final location so manifest paths resolve against it.
             let placed = try BookStorage.loadEpub(bookFolder)
             var coverPath: String?
-            if let coverItem = placed.manifest.items.values.first(where: { $0.property?.contains("cover-image") == true }) {
-                let source = placed.contentDirectory.appendingPathComponent(coverItem.path)
-                let destination = "Books/\(folderName)/\(URL(fileURLWithPath: coverItem.path).lastPathComponent)"
+            if let coverItem = placed.manifest.items.values.first(where: { $0.property?.contains("cover-image") == true }), let source = placed.resourceURL(for: coverItem.path) {
+                let destination = "Books/\(folderName)/\(source.lastPathComponent)"
                 try BookStorage.copyFile(from: source, to: destination)
                 coverPath = destination
             }

@@ -17,7 +17,7 @@ struct BookProcessor {
             guard let manifestItem = document.manifest.items[item.idref] else {
                 continue
             }
-            let path = document.contentDirectory.appendingPathComponent(manifestItem.path)
+            guard let path = document.resourceURL(for: manifestItem.path) else { continue }
             if let content = try? String(contentsOf: path, encoding: .utf8) {
                 let count = content.filtered().count
                 chapterInfo[manifestItem.path] = BookInfo.ChapterInfo(spineIndex: index, currentTotal: total, chapterCount: count)

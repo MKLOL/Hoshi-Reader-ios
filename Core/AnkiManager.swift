@@ -119,23 +119,9 @@ class AnkiManager {
             errorMessage = "Failed to decode Anki response:\n\n\(rawString)"
             return
         }
-        availableDecks = response.decks.map(\.name)
-        availableNoteTypes = response.notetypes.map { AnkiNoteType(name: $0.name, fields: $0.fields.map(\.name)) }
-        
-        if let deck = availableDecks.first(where: { $0.caseInsensitiveCompare("Default") != .orderedSame }) {
-            selectedDeck = deck
-        } else {
-            selectedDeck = availableDecks.first
-        }
-        
-        if let noteType = availableNoteTypes.first {
-            selectedNoteType = noteType.name
-            fieldMappings.removeAll()
-        } else {
-            selectedNoteType = nil
-            fieldMappings.removeAll()
-        }
-        
+        applyFetchedOptions(decks: response.decks.map(\.name),
+                            noteTypes: response.notetypes.map { AnkiNoteType(name: $0.name, fields: $0.fields.map(\.name)) })
+
         save()
     }
     
@@ -153,29 +139,32 @@ class AnkiManager {
                 }
             }
             
-            availableDecks = decks
-            availableNoteTypes = noteTypes
-            
-            if let deck = decks.first(where: { $0.caseInsensitiveCompare("Default") != .orderedSame }) {
-                selectedDeck = deck
-            } else {
-                selectedDeck = decks.first
-            }
-            
-            if let noteType = noteTypes.first {
-                selectedNoteType = noteType.name
-                fieldMappings.removeAll()
-            } else {
-                selectedNoteType = nil
-                fieldMappings.removeAll()
-            }
-            
+            applyFetchedOptions(decks: decks, noteTypes: noteTypes)
+
             save()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
     
+    /// Keep the current selection and only discard mappings to fields that disappeared.
+    static func reconciledOptions(decks: [String], noteTypes: [AnkiNoteType], selectedDeck: String?,
+                                  selectedNoteType: String?, mappings: [String: String])
+        -> (deck: String?, model: String?, mappings: [String: String]) {
+        let deck = selectedDeck.flatMap { decks.contains($0) ? $0 : nil }
+            ?? decks.first(where: { $0.caseInsensitiveCompare("Default") != .orderedSame }) ?? decks.first
+        let model = noteTypes.first(where: { $0.name == selectedNoteType }) ?? noteTypes.first
+        let kept = model?.name == selectedNoteType ? mappings.filter { model?.fields.contains($0.key) == true } : [:]
+        return (deck, model?.name, kept)
+    }
+
+    private func applyFetchedOptions(decks: [String], noteTypes: [AnkiNoteType]) {
+        let result = Self.reconciledOptions(decks: decks, noteTypes: noteTypes, selectedDeck: selectedDeck,
+                                            selectedNoteType: selectedNoteType, mappings: fieldMappings)
+        availableDecks = decks; availableNoteTypes = noteTypes
+        selectedDeck = result.deck; selectedNoteType = result.model; fieldMappings = result.mappings
+    }
+
     func addNote(content: [String: String], context: MiningContext) async -> Bool {
         guard let deck = selectedDeck,
               let noteType = selectedNoteType else {

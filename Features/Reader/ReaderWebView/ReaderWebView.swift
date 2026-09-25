@@ -122,10 +122,43 @@ final class HoshiWKWebView: WKWebView {
     }
 }
 
+/// Fonts live outside a book. Serve only font-manager entries so a publication never needs
+/// permission to read the rest of Application Support (tokens, dictionaries and other books).
+final class ReaderFontHandler: NSObject, WKURLSchemeHandler {
+    static func url(name: String, verticalWriting: Bool) -> URL? {
+        var parts = URLComponents()
+        parts.scheme = "hoshi-font"
+        parts.host = "font"
+        parts.queryItems = [URLQueryItem(name: "name", value: name), URLQueryItem(name: "vertical", value: verticalWriting ? "1" : "0")]
+        return parts.url
+    }
+
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        guard let request = task.request.url,
+              let parts = URLComponents(url: request, resolvingAgainstBaseURL: false),
+              let name = parts.queryItems?.first(where: { $0.name == "name" })?.value,
+              let font = try? FontManager.shared.fontUrl(name: name, verticalWriting: parts.queryItems?.first(where: { $0.name == "vertical" })?.value != "0"),
+              let directory = try? BookStorage.getAppDirectory().appendingPathComponent("Fonts").standardizedFileURL.resolvingSymlinksInPath(),
+              font.standardizedFileURL.resolvingSymlinksInPath().path.hasPrefix(directory.path + "/"),
+              let data = try? Data(contentsOf: font, options: .mappedIfSafe) else {
+            task.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+        let response = HTTPURLResponse(url: request, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "font/otf", "Access-Control-Allow-Origin": "*"])!
+        task.didReceive(response)
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+}
+
 struct ReaderWebView: UIViewRepresentable {
     let userConfig: UserConfig
     let viewSize: CGSize
     let bridge: WebViewBridge
+    let readAccessRoot: URL
     let textColor: String?
     let sasayakiTextColor: Color
     let sasayakiBackgroundColor: Color
@@ -134,7 +167,7 @@ struct ReaderWebView: UIViewRepresentable {
     var onSaveBookmark: (Double) -> Void
     var onInternalLink: (URL) -> Bool
     var onInternalJump: (Double) -> Void
-    var onTextSelected: ((SelectionData) -> Int?)
+    var onTextSelected: ((SelectionData) async -> Int?)
     var onTapOutside: (() -> Void)
     var onPageTurn: (() -> Void)
     var onRestoreCompleted: (() -> Void)
@@ -149,6 +182,7 @@ struct ReaderWebView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(ReaderFontHandler(), forURLScheme: "hoshi-font")
         config.userContentController.add(context.coordinator, name: "textSelected")
         config.userContentController.add(context.coordinator, name: "restoreCompleted")
         config.userContentController.add(context.coordinator, name: "selectionState")
@@ -213,10 +247,8 @@ struct ReaderWebView: UIViewRepresentable {
                     context.coordinator.pendingSasayakiCues = sasayakiCues
                     context.coordinator.pendingHighlights = highlights
                     context.coordinator.pendingSentenceAnchors = sentenceAnchors
-                    if let appDirectory = try? BookStorage.getAppDirectory() {
-                        webView.alpha = 0
-                        webView.loadFileURL(url, allowingReadAccessTo: appDirectory)
-                    }
+                    webView.alpha = 0
+                    webView.loadFileURL(url, allowingReadAccessTo: readAccessRoot)
                 case .restoreProgress(let progress):
                     context.coordinator.pendingProgress = progress
                     context.coordinator.pendingFragment = nil
@@ -265,13 +297,13 @@ struct ReaderWebView: UIViewRepresentable {
             context.coordinator.pendingSasayakiCues = bridge.sasayakiCues
             context.coordinator.pendingHighlights = bridge.highlights
             context.coordinator.pendingSentenceAnchors = bridge.sentenceAnchors
-            guard let appDirectory = try? BookStorage.getAppDirectory() else { return }
             webView.alpha = 0
-            webView.loadFileURL(url, allowingReadAccessTo: appDirectory)
+            webView.loadFileURL(url, allowingReadAccessTo: readAccessRoot)
         }
     }
     
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.selectionTask?.cancel()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "restoreCompleted")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "selectionState")
@@ -279,6 +311,7 @@ struct ReaderWebView: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, WKNavigationDelegate, UIGestureRecognizerDelegate, WKScriptMessageHandler {
+        var selectionTask: Task<Void, Never>?
         var parent: ReaderWebView
         weak var webView: WKWebView?
         var currentURL: URL?
@@ -332,8 +365,9 @@ struct ReaderWebView: UIViewRepresentable {
                 let normalizedOffset = body["normalizedOffset"] as? Int
                 let selectionData = SelectionData(text: text, sentence: sentence, rect: rect, normalizedOffset: normalizedOffset)
                 
-                if let highlightCount = parent.onTextSelected(selectionData) {
-                    highlightSelection(count: highlightCount)
+                selectionTask?.cancel()
+                selectionTask = Task {
+                    if let count = await parent.onTextSelected(selectionData), !Task.isCancelled { highlightSelection(count: count) }
                 }
             }
         }
@@ -425,7 +459,8 @@ struct ReaderWebView: UIViewRepresentable {
             }()
             
             var fontFaceCss = ""
-            if let fontURL = try? FontManager.shared.fontUrl(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting) {
+            if (try? FontManager.shared.fontUrl(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting)) != nil,
+               let fontURL = ReaderFontHandler.url(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting) {
                 fontFaceCss = """
                 @font-face {
                     font-family: \(parent.userConfig.selectedFont);
@@ -490,6 +525,10 @@ struct ReaderWebView: UIViewRepresentable {
                 \(bottomPaddingCss)
                 \(gridCss)
             }
+            body * {
+                column-count: auto !important;
+                -webkit-column-count: auto !important;
+            }
             img.block-img {
                 max-width: \(imgWidth) !important;
                 max-height: \(imgHeight) !important;
@@ -522,6 +561,14 @@ struct ReaderWebView: UIViewRepresentable {
                 -webkit-user-select: none;
             }
             \(sentenceButtonCss)
+            ::highlight(hoshi-sasayaki) {
+                color: var(--hoshi-sasayaki-text-color) !important;
+                background-color: var(--hoshi-sasayaki-background-color) !important;
+            }
+            ruby.hoshi-sasayaki-ruby-active, ruby.hoshi-sasayaki-ruby-active * {
+                color: var(--hoshi-sasayaki-text-color) !important;
+                background-color: var(--hoshi-sasayaki-background-color) !important;
+            }
             .hoshi-sasayaki-cue.hoshi-sasayaki-active {
                 color: var(--hoshi-sasayaki-text-color) !important;
                 background-color: var(--hoshi-sasayaki-background-color) !important;
@@ -664,9 +711,9 @@ struct ReaderWebView: UIViewRepresentable {
                     return new Promise(resolve => setTimeout(resolve, 50));
                 }).then(() => {
                     window.hoshiReader.buildNodeOffsets();
-                    \(sasayakiSetupScript)
                     \(highlightsSetupScript)
                     \(translationsSetupScript)
+                    \(sasayakiSetupScript)
                     \(initialRestoreScript)
                 });
             })();
@@ -801,6 +848,7 @@ struct ReaderWebView: UIViewRepresentable {
         }
         
         func clearSelection() {
+            selectionTask?.cancel()
             guard let webView = webView else {
                 return
             }

@@ -403,7 +403,7 @@ precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
         self.assertIn("let visible = AiThinkingTextSanitizer.strip(response)", popup)
         self.assertIn("StructuredText(markdown: visible)", popup)
         self.assertIn("HoshiMarkdownStyle(useUniformTextSize:", popup)
-        self.assertIn("private struct HoshiMarkdownStyle: StructuredText.Style", popup)
+        self.assertIn("struct HoshiMarkdownStyle: StructuredText.Style", popup)
         # The reply sits on an opaque system-background card and uses primary-coloured text in
         # every Markdown node, so it stays legible over a white manga page in either colour
         # scheme (white-on-ultraThinMaterial was unreadable).
@@ -1280,7 +1280,7 @@ assertEqual(
         self.assertIn("var mangaShowActionButtons: Bool", config)
         self.assertIn('"mangaShowActionButtons"', config)
         self.assertIn("?? true", config[config.index("self.mangaShowActionButtons"):])
-        self.assertIn('Toggle("Show Copy / AI buttons"', settings)
+        self.assertIn('Toggle("Show translation button"', settings)
         self.assertIn("$userConfig.mangaShowActionButtons", settings)
         self.assertIn("let showActionButtons: Bool", cache)
         self.assertIn("showActionButtons: config.showActionButtons", cache)

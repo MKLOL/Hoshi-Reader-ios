@@ -31,6 +31,7 @@ window.hoshiHighlights = {
         
         this.wrapHighlight({ id, color, offset: rawStart, text });
         window.hoshiReader.buildNodeOffsets();
+        window.hoshiReader.refreshSasayakiCues?.();
         
         requestAnimationFrame(() => {
             document.body.style.transform = 'translateZ(0)';
@@ -113,6 +114,7 @@ window.hoshiHighlights = {
             this.wrapHighlight(h);
         }
         window.hoshiReader.buildNodeOffsets();
+        window.hoshiReader.refreshSasayakiCues?.();
     },
     
     removeHighlight(id) {
@@ -124,6 +126,7 @@ window.hoshiHighlights = {
         window.hoshiReader.unwrap(wrappers);
         this.wrappers.delete(id);
         window.hoshiReader.buildNodeOffsets();
+        window.hoshiReader.refreshSasayakiCues?.();
         
         requestAnimationFrame(() => {
             document.body.style.transform = 'translateZ(0)';

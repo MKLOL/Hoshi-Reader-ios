@@ -37,7 +37,7 @@ struct SasayakiMatcher {
                 continue
             }
 
-            let url = document.contentDirectory.appendingPathComponent(manifestItem.path)
+            guard let url = document.resourceURL(for: manifestItem.path) else { continue }
             guard let content = try? String(contentsOf: url, encoding: .utf8) else {
                 continue
             }

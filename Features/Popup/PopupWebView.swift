@@ -110,8 +110,8 @@ struct PopupWebView: UIViewRepresentable {
     var dictionaryStyles: [String: String] = [:]
     var lookupEntries: [[String: Any]] = []
     var onMine: (([String: String]) async -> Bool)? = nil
-    var onLookupRedirect: ((String) -> [[String: Any]])? = nil
-    var onTextSelected: ((SelectionData) -> Int?)? = nil
+    var onLookupRedirect: ((String) async -> [[String: Any]])? = nil
+    var onTextSelected: ((SelectionData) async -> Int?)? = nil
     var onTapOutside: (() -> Void)? = nil
     var onSwipeDismiss: (() -> Void)? = nil
     
@@ -191,6 +191,7 @@ struct PopupWebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
         if !context.coordinator.wasLoaded {
+            context.coordinator.redirectGeneration += 1
             context.coordinator.currentContent = content
             context.coordinator.wasLoaded = true
             let html = constructHtml(content: content)
@@ -204,6 +205,9 @@ struct PopupWebView: UIViewRepresentable {
     }
     
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.selectionTask?.cancel()
+        coordinator.active = false
+        coordinator.redirectGeneration += 1
         Task {
             await WordAudioPlayer.shared.stop(id: coordinator.id)
         }
@@ -219,6 +223,9 @@ struct PopupWebView: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKNavigationDelegate {
+        var selectionTask: Task<Void, Never>?
+        var redirectGeneration = 0
+        var active = true
         var parent: PopupWebView
         var currentContent: String = ""
         var wasLoaded: Bool = false
@@ -271,8 +278,10 @@ struct PopupWebView: UIViewRepresentable {
                 return (entries[index], nil)
             }
             if message.name == "lookupRedirect", let query = message.body as? String {
-                let redirected = parent.onLookupRedirect?(query) ?? []
-                guard !redirected.isEmpty else {
+                redirectGeneration += 1
+                let generation = redirectGeneration
+                let redirected = await parent.onLookupRedirect?(query) ?? []
+                guard active, generation == redirectGeneration, !Task.isCancelled, !redirected.isEmpty else {
                     return (0, nil)
                 }
                 // Replace the native entry store so the subsequent `getEntry` calls triggered by
@@ -289,10 +298,12 @@ struct PopupWebView: UIViewRepresentable {
                 UIApplication.shared.open(url)
             }
             else if message.name == "tapOutside" {
+                selectionTask?.cancel(); redirectGeneration += 1
                 parent.onTapOutside?()
                 message.webView?.evaluateJavaScript("window.hoshiSelection.clearSelection()")
             }
             else if message.name == "swipeDismiss" {
+                selectionTask?.cancel(); redirectGeneration += 1
                 parent.onSwipeDismiss?()
             }
             else if message.name == "textSelected" {
@@ -315,8 +326,11 @@ struct PopupWebView: UIViewRepresentable {
                 )
                 let selectionData = SelectionData(text: text, sentence: sentence, rect: rect)
                 
-                if let highlightCount = parent.onTextSelected?(selectionData) {
-                    message.webView?.evaluateJavaScript("window.hoshiSelection.highlightSelection(\(highlightCount))")
+                selectionTask?.cancel()
+                selectionTask = Task {
+                    if let count = await parent.onTextSelected?(selectionData), !Task.isCancelled {
+                        message.webView?.evaluateJavaScript("window.hoshiSelection.highlightSelection(\(count))", completionHandler: nil)
+                    }
                 }
             }
             else if message.name == "playWordAudio",

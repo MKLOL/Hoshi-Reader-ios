@@ -102,6 +102,7 @@ class ReaderViewModel {
     var isPaused = false { didSet { usage?.reading(isTracking && !isPaused) } }
     private(set) var usage: ReaderUsageSession?
     private var lastUsagePosition: String?
+    private var usageJumpPending = false
     var lastTimestamp: Date = .now
     var lastCount: Int = 0
     private var readingTracker: MangaStatisticsTracker?
@@ -243,7 +244,7 @@ class ReaderViewModel {
         guard let manifestItem = document.manifest.items[item.idref] else {
             return nil
         }
-        return document.contentDirectory.appendingPathComponent(manifestItem.path)
+        return document.resourceURL(for: manifestItem.path)
     }
     
     private var chapterRange: (start: Int, end: Int)? {
@@ -256,6 +257,12 @@ class ReaderViewModel {
     }
     
     func handleRestoreCompleted() {
+        if usageJumpPending {
+            let position = "\(index):\(currentCharacter)"
+            if lastUsagePosition != position { usage?.record(.page, source: "jump", chapter: index + 1, character: currentCharacter) }
+            lastUsagePosition = position
+            usageJumpPending = false
+        }
         if !sasayakiPlayer.hasAudio {
             sasayakiPlayer.restoreAudio()
         }
@@ -323,7 +330,10 @@ class ReaderViewModel {
     func saveBookmark(progress: Double) {
         persistBookmark(progress: progress)
         let position = "\(index):\(currentCharacter)"
-        if let previous = lastUsagePosition, previous != position { usage?.record(.page, chapter: index + 1, character: currentCharacter) }
+        if let previous = lastUsagePosition, previous != position {
+            usage?.record(.page, source: usageJumpPending ? "jump" : nil, chapter: index + 1, character: currentCharacter)
+        }
+        usageJumpPending = false
         lastUsagePosition = position
         flushStats()
     }
@@ -344,6 +354,7 @@ class ReaderViewModel {
             return false
         }
         
+        usageJumpPending = true
         recordPosition()
         flushStats()
         
@@ -364,7 +375,8 @@ class ReaderViewModel {
     }
     
     func syncProgressAfterLinkJump(_ progress: Double) {
-        persistBookmark(progress: progress)
+        usageJumpPending = true
+        saveBookmark(progress: progress)
         resetTrackingBaseline()
     }
     
@@ -382,18 +394,28 @@ class ReaderViewModel {
         return true
     }
     
-    func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool, autoPause: Bool) -> Int? {
-        let lookupResults = LookupEngine.shared.lookup(selection.text, maxResults: maxResults, scanLength: scanLength)
+    private var lookupGeneration = 0
+    func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool, autoPause: Bool) async -> Int? {
+        guard !Task.isCancelled else { return nil }
+        lookupGeneration += 1
+        let generation = lookupGeneration
+        if autoPause, sasayakiPlayer.isPlaying { sasayakiPlayer.togglePlayback(); wasPaused = true }
+        let snapshot = await LookupEngine.shared.lookupAsync(selection.text, maxResults: maxResults, scanLength: scanLength)
+        guard !Task.isCancelled, lookupGeneration == generation else { return nil }
+        let lookupResults = snapshot.results
         usage?.record(.lookup, text: lookupResults.first.map { cxxStringToSwift($0.matched) } ?? selection.text,
             term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
             source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty, chapter: index + 1, character: currentCharacter)
-        var dictionaryStyles: [String: String] = [:]
-        for style in LookupEngine.shared.getStyles() {
-            dictionaryStyles[cxxStringToSwift(style.dict_name)] = cxxStringToSwift(style.styles)
-        }
+        let dictionaryStyles = snapshot.styles
         var cue: SasayakiMatch? = nil
         if sasayakiPlayer.hasAudio, let offset = selection.normalizedOffset {
             cue = sasayakiPlayer.findCue(chapterIndex: index, offset: offset)
+        }
+        guard !lookupResults.isEmpty else {
+            if wasPaused, !popups.contains(where: { $0.showPopup }), !sasayakiPlayer.isPlaying {
+                sasayakiPlayer.togglePlayback(); wasPaused = false
+            }
+            return nil
         }
         let popup = PopupItem(
             showPopup: false,
@@ -408,14 +430,6 @@ class ReaderViewModel {
         popups.append(popup)
         
         if let firstResult = lookupResults.first {
-            if sasayakiPlayer.isPlaying {
-                if autoPause {
-                    sasayakiPlayer.togglePlayback()
-                    wasPaused = true
-                } else {
-                    wasPaused = false
-                }
-            }
             withAnimation(.default.speed(2.2)) {
                 popups = popups.map {
                     var p = $0
@@ -425,12 +439,14 @@ class ReaderViewModel {
                     return p
                 }
             }
-            return cxxStringToSwift(firstResult.matched).count
+            return cxxStringToSwift(firstResult.matched).unicodeScalars.count
         }
         return nil
     }
     
     func closePopups() {
+        lookupGeneration += 1
+        let generation = lookupGeneration
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices {
@@ -438,7 +454,7 @@ class ReaderViewModel {
             }
         } completion: {
             self.popups.removeAll { popupIds.contains($0.id) }
-            if self.popups.isEmpty {
+            if self.popups.isEmpty, self.lookupGeneration == generation {
                 if self.wasPaused, !self.sasayakiPlayer.isPlaying {
                     self.sasayakiPlayer.togglePlayback()
                 }
@@ -448,6 +464,7 @@ class ReaderViewModel {
     }
     
     func closeChildPopups(parent: Int) {
+        lookupGeneration += 1
         var popupIds: Set<UUID> = []
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices.dropFirst(parent + 1) {
@@ -536,6 +553,7 @@ class ReaderViewModel {
     }
     
     private func navigate(to position: Position, fragment: String? = nil) {
+        usageJumpPending = true
         flushStats()
         if position.index == index && fragment == nil {
             persistBookmark(progress: position.progress)
@@ -650,7 +668,8 @@ class ReaderViewModel {
             guard let manifestItem = document.manifest.items[spineItem.idref] else {
                 continue
             }
-            let chapterPath = normalizedFilePath(document.contentDirectory.appendingPathComponent(manifestItem.path))
+            guard let chapterURL = document.resourceURL(for: manifestItem.path) else { continue }
+            let chapterPath = normalizedFilePath(chapterURL)
             if chapterPath == targetPath {
                 return (spineIndex, normalizeFragment(url.fragment))
             }
@@ -660,8 +679,7 @@ class ReaderViewModel {
     }
     
     private func normalizedFilePath(_ url: URL) -> String {
-        let normalized = url.standardizedFileURL.resolvingSymlinksInPath().path
-        return normalized.removingPercentEncoding ?? normalized
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
     
     private func normalizeFragment(_ fragment: String?) -> String? {
@@ -690,6 +708,10 @@ class ReaderViewModel {
         if readingTracker != nil { flushStats() }
         readingTracker = MangaStatisticsTracker(title: document.title ?? "", initialStatistics: ReadingStatisticsStore.reading(root: rootURL), enabled: true, device: .current)
         if isTracking { readingTracker?.start(currentPage: currentCharacter) }
+    }
+
+    func reloadStatistics() {
+        readingTracker?.mergeHistory(ReadingStatisticsStore.reading(root: rootURL))
     }
 
     func persistReadingTime() {

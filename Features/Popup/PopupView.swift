@@ -145,7 +145,7 @@ struct PopupView: View {
     let coverURL: URL?
     let documentTitle: String?
     var clearSelection: Bool
-    var onTextSelected: ((SelectionData) -> Int?)?
+    var onTextSelected: ((SelectionData) async -> Int?)?
     var onTapOutside: (() -> Void)?
     var onSwipeDismiss: (() -> Void)?
     var onPause: (() -> Void)?
@@ -171,7 +171,7 @@ struct PopupView: View {
         coverURL: URL?,
         documentTitle: String?,
         clearSelection: Bool,
-        onTextSelected: ((SelectionData) -> Int?)? = nil,
+        onTextSelected: ((SelectionData) async -> Int?)? = nil,
         onTapOutside: (() -> Void)? = nil,
         onSwipeDismiss: (() -> Void)? = nil,
         onPause: (() -> Void)? = nil,
@@ -342,17 +342,18 @@ struct PopupView: View {
     /// term inside the glossary) and returns the converted entry dictionaries. Reuses the same
     /// ``LookupEngine`` + ``entryDict(from:)`` pipeline as the initial popup render so the redirected
     /// content is rendered identically by popup.js in place.
-    private func redirectLookup(query: String) -> [[String: Any]] {
+    private func redirectLookup(query: String) async -> [[String: Any]] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return []
         }
-        let results = LookupEngine.shared.lookup(
+        let snapshot = await LookupEngine.shared.lookupAsync(
             trimmed,
             maxResults: userConfig.maxResults,
             scanLength: trimmed.count
         )
-        return results.map { PopupView.entryDict(from: $0) }
+        guard !Task.isCancelled else { return [] }
+        return snapshot.results.map { PopupView.entryDict(from: $0) }
     }
 
     private func mineEntry(content: [String: String], sentence: String) async -> Bool {

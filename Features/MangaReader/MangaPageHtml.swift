@@ -635,6 +635,8 @@ nonisolated enum MangaPageHtml {
           }
           function setFs(px) { box.style.fontSize = px + 'px'; }
           function findMaxFitting(start) {
+            // Integer bounds make every floored midpoint advance, including fractional cqw sizes.
+            start = Math.floor(start);
             if (start < MIN_FS) start = MIN_FS;
             if (start > MAX_FS) start = MAX_FS;
             setFs(start);

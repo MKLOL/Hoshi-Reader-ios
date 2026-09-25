@@ -88,7 +88,7 @@ struct BookCover: View {
             
             if let progress {
                 HStack(spacing: 8) {
-                    ProgressView(value: progress)
+                    ProgressView(value: progress.isFinite ? min(1, max(0, progress)) : 0)
                         .tint(.secondary.opacity(0.4))
                     Text(pageLabel ?? String(format: "%.1f%%", progress * 100))
                         .font(.caption2)

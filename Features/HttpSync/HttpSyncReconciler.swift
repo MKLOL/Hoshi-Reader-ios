@@ -867,10 +867,11 @@ struct HttpSyncReconciler {
         if shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: remote.blob.shelfUpdatedAt, localShelvesUpdatedAt: localUpdatedAt) {
             let normalized = normalizeShelfName(remote.blob.shelfName)
             applyShelfPlacement(bookId: bookId, shelfName: normalized)
-            shelfState[syncId] = HttpSyncShelfPlacementRecord(
-                shelfName: normalized,
-                updatedAt: remote.blob.shelfUpdatedAt ?? meta.lastModified
-            )
+            if let stamp = remoteShelfPlacementStamp(shelfName: normalized, shelfUpdatedAt: remote.blob.shelfUpdatedAt, metadataModifiedAt: meta.lastModified) {
+                shelfState[syncId] = HttpSyncShelfPlacementRecord(shelfName: normalized, updatedAt: stamp)
+            } else {
+                shelfState.removeValue(forKey: syncId)
+            }
             return .applied
         }
         return .noop
@@ -1175,8 +1176,8 @@ struct HttpSyncReconciler {
     /// book, so we copy it up to the same place rather than inventing a second convention.
     private func epubCoverPath(document: EPUBDocument?, root: URL) -> String? {
         guard let document, let coverPath = findEpubCoverInManifest(document: document) else { return nil }
-        let source = document.contentDirectory.appendingPathComponent(coverPath)
-        let name = URL(fileURLWithPath: coverPath).lastPathComponent
+        guard let source = document.resourceURL(for: coverPath) else { return nil }
+        let name = source.lastPathComponent
         let shipped = root.appendingPathComponent(name)
         let fileManager = FileManager.default
         // A root-level copy that arrived inside the payload is origin content — keep using it.
@@ -1331,9 +1332,13 @@ struct HttpSyncReconciler {
                 if let remoteMetadata, remoteMetadata.hasShelfName,
                    shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: remoteMetadata.blob.shelfUpdatedAt, localShelvesUpdatedAt: uploadShelfUpdatedAt) {
                     uploadShelfName = normalizeShelfName(remoteMetadata.blob.shelfName)
-                    uploadShelfUpdatedAt = remoteMetadata.blob.shelfUpdatedAt ?? remoteMetadata.lastModified
+                    uploadShelfUpdatedAt = remoteShelfPlacementStamp(shelfName: uploadShelfName, shelfUpdatedAt: remoteMetadata.blob.shelfUpdatedAt, metadataModifiedAt: remoteMetadata.lastModified)
                     applyShelfPlacement(bookId: book.id, shelfName: uploadShelfName)
-                    shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: uploadShelfUpdatedAt!)
+                    if let stamp = uploadShelfUpdatedAt {
+                        shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: stamp)
+                    } else {
+                        shelfState.removeValue(forKey: book.syncId)
+                    }
                 }
 
                 // Bookmark — only if local is strictly newer than the server's.
