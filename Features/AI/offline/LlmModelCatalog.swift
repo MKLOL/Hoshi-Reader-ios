@@ -104,16 +104,28 @@ nonisolated enum LlmModelCatalog {
         templateKind: .chatML
     )
 
-    /// Smallest Qwen3.5 — lightweight option for low-RAM devices / quick checks.
+    /// Compact Qwen3.5 — lightweight option for low-RAM devices / quick checks.
     static let qwen35_2B = LlmModel(
         id: "qwen3.5-2b-q4km",
         displayName: "Qwen3.5 2B (lightweight)",
-        description: "Smallest Qwen3.5. ~1.3 GB, fast, good for low-RAM devices. Lower quality "
+        description: "Compact Qwen3.5. ~1.3 GB, fast, good for low-RAM devices. Lower quality "
             + "than the 4B/9B but still explains.",
         repo: "unsloth/Qwen3.5-2B-GGUF",
         fileName: "Qwen3.5-2B-Q4_K_M.gguf",
         approxSizeBytes: 1_280_835_840,
         contextLength: 32768,
+        templateKind: .chatML
+    )
+
+    /// Tiny option shared with Android for constrained devices and quick checks.
+    static let qwen35_0_8B = LlmModel(
+        id: "qwen3.5-0.8b-q4km",
+        displayName: "Qwen3.5 0.8B (tiny)",
+        description: "Tiny Qwen3.5 for quick checks and constrained devices. ~580 MB; lower quality than the larger models.",
+        repo: "bartowski/Qwen_Qwen3.5-0.8B-GGUF",
+        fileName: "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf",
+        approxSizeBytes: 580_000_000,
+        contextLength: 4096,
         templateKind: .chatML
     )
 
@@ -175,6 +187,7 @@ nonisolated enum LlmModelCatalog {
         qwen35_9B,
         qwen35_4B,
         qwen35_2B,
+        qwen35_0_8B,
         qwen7BQ4,
         qwen14BQ4,
         qwen1_5BQ4,

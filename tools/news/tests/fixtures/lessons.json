@@ -1,0 +1,30 @@
+{
+  "天気のニュース": {
+    "translation": "Weather news",
+    "words": [
+      {"surface": "天気", "reading": "てんき", "romaji": "tenki", "meaning": "weather"},
+      {"surface": "の", "reading": "の", "romaji": "no", "meaning": "links weather to news"},
+      {"surface": "ニュース", "reading": "ニュース", "romaji": "nyūsu", "meaning": "news"}
+    ],
+    "grammar": "A noun-phrase headline: A の B means B about or relating to A."
+  },
+  "今日は雨です。": {
+    "translation": "It's rainy today.",
+    "words": [
+      {"surface": "今日", "reading": "きょう", "romaji": "kyō", "meaning": "today"},
+      {"surface": "は", "reading": "は", "romaji": "wa", "meaning": "topic marker"},
+      {"surface": "雨", "reading": "あめ", "romaji": "ame", "meaning": "rain"},
+      {"surface": "です", "reading": "です", "romaji": "desu", "meaning": "is; polite copula"}
+    ],
+    "grammar": "は marks 今日 as the topic. Noun + です makes a polite statement."
+  },
+  "明日は晴れます。": {
+    "translation": "It will be sunny tomorrow.",
+    "words": [
+      {"surface": "明日", "reading": "あした", "romaji": "ashita", "meaning": "tomorrow"},
+      {"surface": "は", "reading": "は", "romaji": "wa", "meaning": "topic marker"},
+      {"surface": "晴れます", "reading": "はれます", "romaji": "haremasu", "meaning": "will be sunny; polite form of 晴れる"}
+    ],
+    "grammar": "晴れる becomes 晴れます in polite speech. Its nonpast form refers to the future here because of 明日."
+  }
+}

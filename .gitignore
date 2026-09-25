@@ -80,3 +80,8 @@ AuthKey_*.p8
 # Pre-translation working directories: the source .epub (copyrighted), multi-MB batch
 # request/response JSONL, and per-book checkpoints. All regenerable, none belongs in git.
 tools/pretranslate/work/
+
+# Local agent-authored news jobs
+.hoshi-news/
+
+.hoshi-sync-secret.env
