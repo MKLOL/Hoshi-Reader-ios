@@ -115,7 +115,7 @@ extension Notification.Name {
         reading(false); record(.closed, startedAt: openedAt); closed = true
     }
     func reveal(text: String, block: String?, page: Int) {
-        if let block, !revealed.insert(block).inserted { return }
+        if let block, !block.isEmpty, !revealed.insert(block).inserted { return }
         record(.revealed, text: text, page: page)
     }
     func record(_ type: UsageEventType, text: String? = nil, term: String? = nil, source: String? = nil,

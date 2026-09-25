@@ -65,10 +65,24 @@ nonisolated final class UsageParityTests: XCTestCase {
         session.reading(true)
         session.reveal(text: "猫", block: "p0b0", page: 1)
         session.reveal(text: "猫", block: "p0b0", page: 1)
+        session.reveal(text: "犬", block: "p0b1", page: 1)
+        session.reveal(text: "鳥", block: "p1b0", page: 2)
         session.close(); session.close(); session.record(.copied, text: "ignored")
         let snapshot = await log.read()
-        XCTAssertEqual(snapshot.events.filter { $0.type == .revealed }.count, 1)
+        XCTAssertEqual(snapshot.events.filter { $0.type == .revealed }.count, 3)
         XCTAssertEqual(snapshot.events.filter { $0.type == .closed }.count, 1)
         XCTAssertFalse(snapshot.events.contains { $0.type == .copied })
+    }
+    @MainActor func testUnidentifiedBubbleRevealsAreNotCollapsedTogether() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = UsageLog(directory: directory)
+        let book = BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, contentType: .mokuro)
+        let session = ReaderUsageSession(book: book, log: log)
+        session.reveal(text: "猫", block: "", page: 1)
+        session.reveal(text: "犬", block: "", page: 1)
+        session.reveal(text: "鳥", block: nil, page: 2)
+        let snapshot = await log.read()
+        XCTAssertEqual(snapshot.events.filter { $0.type == .revealed }.map(\.text), ["猫", "犬", "鳥"])
     }
 }

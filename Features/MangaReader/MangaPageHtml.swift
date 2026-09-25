@@ -1096,7 +1096,8 @@ nonisolated enum MangaPageHtml {
               // Reveal BEFORE the wrap fallback: the fallback fits from the computed
               // font-size, which only becomes the boosted reveal size once .revealed applies.
               box.classList.add('revealed');
-              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'bubbleRevealed', text: box.dataset.text || box.textContent, blockId: box.dataset.blockId || box.id});
+              var revealedText = box.querySelector('p');
+              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'bubbleRevealed', text: revealedText ? (revealedText.textContent || '') : '', blockId: box.dataset.hoshiBlock || ''});
               window.hoshiManga.tryWrapFallback(box);
               box.setAttribute('aria-pressed', 'true');
               window.hoshiManga.placeActions(box);
