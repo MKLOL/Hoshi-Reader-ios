@@ -17,7 +17,7 @@ struct EPUBParserErrorTests {
     
     // MARK: - Basic Error Tests
     
-    @Test("Handle broken archive")
+    @Test("Handle an EPUB packaged below an extra root directory")
     func handleBrokenArchive() {
         let url = library.path(for: .alicesAdventuresinWonderlandBrokenArchive)
         let parser = EPUBParser()
@@ -26,8 +26,10 @@ struct EPUBParserErrorTests {
             _ = try parser.parse(documentAt: url)
             Issue.record("Expected parsing to throw an error")
         } catch let error as EPUBParserError {
-            guard case .unzipFailed = error else {
-                Issue.record("Wrong error thrown, expected unzipFailed")
+            // This historical fixture is a valid ZIP (all CRCs pass), but every entry lives
+            // under Alice/. Extraction succeeds; EPUB's root META-INF/container.xml is missing.
+            guard case .containerMissing = error else {
+                Issue.record("Wrong error thrown, expected containerMissing")
                 return
             }
             #expect(error.errorDescription != nil)
@@ -216,7 +218,7 @@ struct EPUBParserErrorTests {
         
         // Test each error type with its corresponding broken file
         let errorTests: [(EPUBFile, String)] = [
-            (.alicesAdventuresinWonderlandBrokenArchive, "unzipFailed"),
+            (.alicesAdventuresinWonderlandBrokenArchive, "containerMissing"),
             (.theGeographyofBlissBrokenContainer, "containerMissing"),
             (.theProblemsofPhilosophyBrokenContent, "contentPathMissing"),
             (.theMetamorphosisBrokenToc, "tableOfContentsMissing")

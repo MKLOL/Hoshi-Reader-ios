@@ -132,7 +132,10 @@ public final class EPUBParser: EPUBParserProtocol {
             }
             let tableOfContentsElement = try contentService.tableOfContents(fileName)
 
-            tableOfContents = getTableOfContents(from: tableOfContentsElement)
+            guard let navigationURL = EPUBDocument.resolveResource(fileName, relativeTo: contentDirectory, root: directory) else {
+                throw EPUBParserError.tableOfContentsMissing
+            }
+            tableOfContents = EPUBDocument.resolveContents(getTableOfContents(from: tableOfContentsElement), navigationURL: navigationURL, contentDirectory: contentDirectory, root: directory)
             delegate?.parser(self, didFinishParsing: tableOfContents)
         } catch let error {
             // CRITICAL: Always notify delegate of failures for proper error handling

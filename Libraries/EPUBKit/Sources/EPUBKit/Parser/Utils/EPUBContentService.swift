@@ -64,6 +64,7 @@ protocol EPUBContentService {
 /// The service follows the EPUB Open Container Format (OCF) specification for locating
 /// the package document through the META-INF/container.xml file.
 class EPUBContentServiceImplementation: EPUBContentService {
+    private let rootDirectory: URL
 
     /// The parsed package document (OPF file).
     ///
@@ -131,6 +132,7 @@ class EPUBContentServiceImplementation: EPUBContentService {
     ///           `EPUBParserError.contentPathMissing` if the OPF path is not specified,
     ///           or XML parsing errors if the documents are malformed.
     required init(_ url: URL) throws {
+        rootDirectory = url
         // STEP 1: Locate the package document using OCF container.xml
         // This follows the EPUB Open Container Format specification which mandates
         // that the container.xml file in META-INF/ points to the OPF location
@@ -159,7 +161,9 @@ class EPUBContentServiceImplementation: EPUBContentService {
     func tableOfContents(_ fileName: String) throws -> AEXMLElement {
         // Construct the full path to the NCX file using the content directory as base
         // This ensures proper resolution of the relative path from the manifest
-        let path = contentDirectory.appendingPathComponent(fileName)
+        guard let path = EPUBDocument.resolveResource(fileName, relativeTo: contentDirectory, root: rootDirectory) else {
+            throw EPUBParserError.tableOfContentsMissing
+        }
         
         // Load and parse the NCX document
         // NCX files can be quite large for books with detailed navigation,
@@ -193,7 +197,9 @@ extension EPUBContentServiceImplementation {
     static private func getContentPath(from url: URL) throws -> URL {
         // STEP 1: Construct path to container.xml according to OCF specification
         // The OCF spec mandates this exact location and filename
-        let path = url.appendingPathComponent("META-INF/container.xml")
+        guard let path = EPUBDocument.resolveResource("META-INF/container.xml", relativeTo: url, root: url) else {
+            throw EPUBParserError.containerMissing
+        }
         
         // STEP 2: Attempt to load container.xml with graceful error handling
         // We use optional try to convert file system errors to our domain-specific error
@@ -216,7 +222,10 @@ extension EPUBContentServiceImplementation {
         
         // STEP 5: Return the complete absolute path to the package document
         // This combines the EPUB root with the relative OPF path from container.xml
-        return url.appendingPathComponent(content)
+        guard let path = EPUBDocument.resolveResource(content, relativeTo: url, root: url) else {
+            throw EPUBParserError.contentPathMissing
+        }
+        return path
     }
 
 }

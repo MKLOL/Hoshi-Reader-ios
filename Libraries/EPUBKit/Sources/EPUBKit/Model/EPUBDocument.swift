@@ -109,6 +109,48 @@ extension EPUBDocument {
         guard let coverId = metadata.coverId, let path = manifest.items[coverId]?.path else {
             return nil
         }
-        return contentDirectory.appendingPathComponent(path)
+        return resourceURL(for: path)
+    }
+
+    /// Resolves an EPUB href once, retaining literal plus and percent characters in filenames.
+    /// References and symlinks outside the extracted publication are never readable resources.
+    public func resourceURL(for href: String) -> URL? {
+        Self.resolveResource(href, relativeTo: contentDirectory, root: directory)
+    }
+
+    static func resolveResource(_ href: String, relativeTo base: URL, root: URL) -> URL? {
+        guard let parts = URLComponents(string: href.replacingOccurrences(of: "\\", with: "/")),
+              parts.scheme == nil, parts.host == nil, !parts.path.isEmpty else { return nil }
+        let root = root.standardizedFileURL.resolvingSymlinksInPath()
+        let path = parts.path
+        let start = path.hasPrefix("/") ? root : base
+        let candidate = start.appendingPathComponent(String(path.drop(while: { $0 == "/" })))
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard candidate.path.hasPrefix(root.path + "/") else { return nil }
+        return candidate
+    }
+
+    /// Navigation hrefs are relative to the navigation document, which can be nested below OPF.
+    static func resolveContents(_ item: EPUBTableOfContents, navigationURL: URL, contentDirectory: URL, root: URL) -> EPUBTableOfContents {
+        var resolved = item
+        if let href = item.item, let parts = URLComponents(string: href), parts.scheme == nil, parts.host == nil {
+            let target = parts.path.isEmpty ? navigationURL : resolveResource(href, relativeTo: navigationURL.deletingLastPathComponent(), root: root)
+            if let target {
+                let baseParts = contentDirectory.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+                let targetParts = target.pathComponents
+                let shared = zip(baseParts, targetParts).prefix(while: { $0.0 == $0.1 }).count
+                let path = (Array(repeating: "..", count: baseParts.count - shared) + targetParts.dropFirst(shared)).joined(separator: "/")
+                var components = URLComponents()
+                components.path = path
+                components.percentEncodedFragment = parts.percentEncodedFragment
+                resolved.item = components.string
+            } else {
+                resolved.item = nil
+            }
+        } else if item.item != nil {
+            resolved.item = nil
+        }
+        resolved.subTable = item.subTable?.map { resolveContents($0, navigationURL: navigationURL, contentDirectory: contentDirectory, root: root) }
+        return resolved
     }
 }

@@ -248,7 +248,8 @@ struct EPUBParserDelegateTests {
     }
     
     @Test("Delegate receives all error types", arguments: [
-        (EPUBFile.alicesAdventuresinWonderlandBrokenArchive, "unzipFailed"),
+        // The archive itself is valid; its extra Alice/ folder hides the EPUB root container.
+        (EPUBFile.alicesAdventuresinWonderlandBrokenArchive, "containerMissing"),
         (EPUBFile.theGeographyofBlissBrokenContainer, "containerMissing"),
         (EPUBFile.theProblemsofPhilosophyBrokenContent, "contentPathMissing"),
         (EPUBFile.theMetamorphosisBrokenToc, "tableOfContentsMissing")

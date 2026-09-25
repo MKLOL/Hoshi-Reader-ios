@@ -7,7 +7,6 @@
 //
 
 import Foundation
-import ZipArchive
 
 /// Protocol defining the interface for EPUB archive extraction operations.
 ///
@@ -22,61 +21,32 @@ protocol EPUBArchiveService {
     func unarchive(archive url: URL) throws -> URL
 }
 
-/// Concrete implementation of `EPUBArchiveService` using the Zip library.
-///
-/// This service handles the extraction of EPUB files, which are essentially ZIP archives
-/// containing structured XHTML content, metadata, and resources. According to the EPUB
-/// specification (Section 3.3), an EPUB file must be a ZIP-based OCF (Open Container Format)
-/// archive.
-///
-/// The service uses the Zip library to handle the extraction process and ensures that
-/// files with the `.epub` extension are recognized as valid ZIP archives.
+/// Stages each extraction independently so another parser cannot observe a partial archive.
+/// A first import retains the historical sibling directory used by the app's import flow.
+/// Existing directories are never replaced or trusted as evidence that an archive is valid.
 class EPUBArchiveServiceImplementation: EPUBArchiveService {
-
-    /// Initializes the archive service and registers the EPUB file extension.
-    ///
-    /// This ensures that the Zip library recognizes `.epub` files as valid ZIP archives
-    /// for extraction operations.
-    init() {
-    }
-
-    /// Extracts the contents of an EPUB archive to a temporary directory.
-    ///
-    /// The extraction process follows these steps:
-    /// 1. Validates that the file at the given URL exists
-    /// 2. Uses Zip.quickUnzipFile to extract all contents to a temporary directory
-    /// 3. Returns the URL of the extraction directory
-    ///
-    /// The temporary directory is managed by the system and will be cleaned up
-    /// automatically when no longer needed.
-    ///
-    /// - Parameter url: The file URL of the EPUB archive to extract.
-    /// - Returns: The URL of the temporary directory containing the extracted contents.
-    /// - Throws: `EPUBParserError.unzipFailed` wrapping the underlying extraction error.
-    /// Note Manhhao: This was updated to use ZipArchive instead. The previous Library had problems with handling permissions.
     func unarchive(archive url: URL) throws -> URL {
-        let destination: URL
-        let sourceDirectory = url.deletingLastPathComponent().path
-        
-        if FileManager.default.isWritableFile(atPath: sourceDirectory) {
-            destination = url.deletingPathExtension()
-        } else {
-            let tempDirectory = FileManager.default.temporaryDirectory
-            let fileName = url.deletingPathExtension().lastPathComponent
-            destination = tempDirectory.appendingPathComponent(fileName)
-        }
-        
-        if FileManager.default.fileExists(atPath: destination.path) {
-            return destination
-        }
-        
-        let success = SSZipArchive.unzipFile(atPath: url.path, toDestination: destination.path)
-        
-        if success {
-            return destination
-        } else {
-            throw EPUBParserError.unzipFailed(reason: NSError(domain: "SSZipArchive", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to unzip file at \(url.path)"]))
+        let fileManager = FileManager.default
+        let staging = fileManager.temporaryDirectory.appendingPathComponent("EPUB-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try ArchiveExtractor.unzip(url, to: staging)
+            let sourceDirectory = url.deletingLastPathComponent()
+            guard fileManager.isWritableFile(atPath: sourceDirectory.path) else { return staging }
+            let destination = URL(fileURLWithPath: url.deletingPathExtension().path, isDirectory: true)
+            // Parsing the same archive again must validate its bytes, and must not overwrite a
+            // previously imported book's bookmarks or other sidecars. Keep this extraction private.
+            guard !fileManager.fileExists(atPath: destination.path) else { return staging }
+            do {
+                try fileManager.moveItem(at: staging, to: destination)
+                return destination
+            } catch {
+                // A concurrent parser may have published its own complete extraction first.
+                if fileManager.fileExists(atPath: destination.path) { return staging }
+                throw error
+            }
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw EPUBParserError.unzipFailed(reason: error)
         }
     }
-
 }
