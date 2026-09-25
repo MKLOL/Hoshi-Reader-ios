@@ -3,7 +3,7 @@
 Android target: `8d099345` (0.11.17). iOS starting point: `0fc98d1`.
 The shared September 9 sync shortcut/zoom reset is the baseline. Earlier fork additions are also checked for missed ports.
 
-Each Android commit is accounted for below. Follow-up fixes are implemented with the feature they correct; release numbers and Android platform plumbing do not transfer to iOS.
+All 52 Android commits in the target range, including both merges, are accounted for below. Follow-up fixes are implemented with the feature they correct; release numbers and Android platform plumbing do not transfer to iOS.
 
 | Android commit | Date | Change | iOS disposition |
 | --- | --- | --- | --- |
@@ -29,6 +29,7 @@ Each Android commit is accounted for below. Follow-up fixes are implemented with
 | `ab74ab90` | 2026-09-21 | feat(podcasts): add authenticated NHK learning lessons | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
 | `0611f589` | 2026-09-21 | fix(news): keep headline furigana and upright digits in saved articles | Ported: headline ruby, upright Japanese digits, remembered cloud instructions; 18 news tests pass |
 | `88bd2ca4` | 2026-09-21 | feat(news): let the user write the pre-translation instructions | Ported: headline ruby, upright Japanese digits, remembered cloud instructions; 18 news tests pass |
+| `bfd78d89` | 2026-09-21 | merge news typesetting and custom prompts | Merge reviewed: constituent news changes are covered above; combined diff only reconciles the changelog. |
 | `d505d02e` | 2026-09-21 | fix(podcasts): list episodes over an hour and unknown lengths | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
 | `d5b181a5` | 2026-09-21 | fix(podcasts): remember where a seek landed, not where it left | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
 | `f29fd479` | 2026-09-21 | fix(podcasts): drop a replaced or rejected account's lessons and keep its marker off backups | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
@@ -40,18 +41,19 @@ Each Android commit is accounted for below. Follow-up fixes are implemented with
 | `f287d50d` | 2026-09-21 | feat(podcasts): show why a lesson, download or playback failed and whether the worker is up | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
 | `afbe936e` | 2026-09-21 | fix(podcasts): localize failure reasons, bound server text, and trust only what the server states | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
 | `8d32636a` | 2026-09-21 | fix(podcasts): collapse Unicode separators and control characters in server text | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
+| `7b4b73cd` | 2026-09-21 | merge statistics and reader updates with podcasts | Merge reviewed: constituent commits are covered above; combined navigation wires Statistics alongside News/Podcasts, covered by the native bookshelf Statistics route. |
 | `31dd71e8` | 2026-09-21 | test(statistics): compare canonical paths so macOS temp directories pass | Covered by iOS canonical-path migration and payload regression tests; Android test fixture-only fix. |
 | `d50731bb` | 2026-09-21 | chore: release 0.11.14 | No app port: release metadata |
 | `d8f787d9` | 2026-09-22 | feat(tools): add agent-authored news EPUB publisher | Ported tools/news and hoshi-news instructions; 19 isolated publisher tests pass. No publishing performed. |
-| `5399683b` | 2026-09-23 | feat(ai): expand the default manga tutor prompt | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
-| `f0bcfec5` | 2026-09-23 | feat(manga): hide the bubble Copy button by default and enlarge Translate | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
-| `d988d908` | 2026-09-23 | feat(statistics): log reader usage events for timeline reconstruction | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
-| `5fe395a2` | 2026-09-23 | feat(statistics): lead with a Today card and add 3-day-average trend charts | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
-| `c4b42a4a` | 2026-09-23 | feat(statistics): list only words looked up more than once on the Today card | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
-| `ba78936d` | 2026-09-23 | feat(statistics): move charts to a Trends tab and add per-bubble trends | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
-| `24d80938` | 2026-09-23 | fix(statistics): address review findings on the usage log and trends | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `5399683b` | 2026-09-23 | feat(ai): expand the default manga tutor prompt | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
+| `f0bcfec5` | 2026-09-23 | feat(manga): hide the bubble Copy button by default and enlarge Translate | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
+| `d988d908` | 2026-09-23 | feat(statistics): log reader usage events for timeline reconstruction | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
+| `5fe395a2` | 2026-09-23 | feat(statistics): lead with a Today card and add 3-day-average trend charts | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
+| `c4b42a4a` | 2026-09-23 | feat(statistics): list only words looked up more than once on the Today card | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
+| `ba78936d` | 2026-09-23 | feat(statistics): move charts to a Trends tab and add per-bubble trends | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
+| `24d80938` | 2026-09-23 | fix(statistics): address review findings on the usage log and trends | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
 | `2b15b3c9` | 2026-09-23 | chore: release 0.11.15 | No app port: release metadata |
-| `8f7ea378` | 2026-09-24 | fix(statistics): drop today's rows from the totals card | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 7 behavior tests pass |
+| `8f7ea378` | 2026-09-24 | fix(statistics): drop today's rows from the totals card | Ported: expanded tutor prompt, optional Copy button, private usage log, Today and Trends; 8 usage tests pass |
 | `12d283b5` | 2026-09-24 | feat(podcasts): filter the episode list by show | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
 | `cf9c3fbf` | 2026-09-24 | chore: release 0.11.16 | No app port: release metadata |
 | `1c9b9f12` | 2026-09-24 | feat(podcasts): show what the server is doing while a lesson is prepared | Ported: native iOS podcast catalogue, account isolation, downloads, playback and final server contract; 13 podcast tests pass |
@@ -82,14 +84,17 @@ The earlier Android history was checked against the existing iOS port, including
 
 Three independent reviewers completed the coverage/reader/news, statistics/usage/sync, and podcast reviews. All confirmed findings were fixed and regression-tested. These included EPUB extraction and resource containment, dictionary concurrency and Unicode offsets, Anki mapping refresh, statistics migration and deterministic merges, corrupt-statistics isolation, podcast account restoration, cancellation/retry races, and playback/audio ownership.
 
+Two additional independent reviewers then rechecked completeness and runtime behavior before the push to `main`. Their findings were fixed: manga reveal messages now carry the actual page/block ID and OCR text, so bubble totals and per-bubble trends count each bubble; opening sentence mode no longer closes the usage session or releases the active-book reservation. Reading-time updates continue while covered, pause in the background, and stop when the reader window closes. Closing that window also dismisses a nested sentence mode. The added regressions execute the production manga JavaScript and present the actual native reader/sentence views.
+
 Final validation on September 25, 2026:
 
 | Check | Result |
 | --- | --- |
-| iOS simulator XCTest suite | 74 passed: 6 feature parity, 18 news, 13 podcasts, 24 statistics, 6 real-server sync, 7 usage |
+| Release simulator build | Passed for arm64 and x86_64 with the final review fixes |
+| iOS simulator XCTest suite | 76 passed: 7 feature parity, 18 news, 13 podcasts, 24 statistics, 6 real-server sync, 8 usage |
 | Simulator UI checks | 4 passed: translation long press, repeated AI button, page-jump zoom/swipe, Translate-only bubble and statistics tabs; screenshots inspected |
 | EPUBKit package | 68 passed, including concurrent extraction and corrupt-archive regressions |
-| Source/behavior regressions (Python, Node, Swift) | 83 passed, 1 skipped because the legacy external whole-EPUB fixture is unavailable |
+| Source/behavior regressions (Python, Node, Swift) | 84 passed, 1 skipped because the legacy external whole-EPUB fixture is unavailable |
 | News publisher | 19 passed |
 | Local HTTP sync server | 15 passed |
 
