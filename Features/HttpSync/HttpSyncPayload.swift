@@ -39,6 +39,9 @@ nonisolated let httpSyncPayloadExcludedFiles: Set<String> = [
     "bookmark.json",            // synced as …/bookmark
     "ai_chat_log.json",         // synced as …/chat/…
     "metadata.json",            // per-device id + lastAccess; receiver makes its own
+    ".statistics_devices_v2",
+    ".legacy_manga_statistics.json",
+    ".http_sync_statistics_state.json",
     "statistics.json",          // mutates as the user reads
     "manga_statistics.json",    // mutates as the user reads manga
     "sasayaki_match.json",      // per-device audiobook alignment

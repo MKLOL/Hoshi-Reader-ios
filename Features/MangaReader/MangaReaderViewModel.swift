@@ -48,6 +48,13 @@ final class MangaReaderViewModel {
 
     /// Reading statistics tracker (page/time based). `nil` until the book loads.
     private(set) var statistics: MangaStatisticsTracker?
+    private var pagesRead = 0
+    private var resumeTracking = false
+    private(set) var sessionCharacters = 0
+    private(set) var textStatistics: [MangaTextStatistic] = []
+    var todayCharacters: Int { textStatistics.filter { $0.dateKey == MangaStatisticsTracker.dateKey(for: .now) }.reduce(0) { $0 + $1.charactersRead } }
+    var allTimeCharacters: Int { textStatistics.reduce(0) { $0 + $1.charactersRead } }
+
 
     private var bookmarkSaveTask: Task<Void, Never>?
     private var pendingBookmarkPage: Int?
@@ -109,85 +116,53 @@ final class MangaReaderViewModel {
     // MARK: Statistics
 
     private func setUpStatistics(title: String, root: URL, userConfig: UserConfig) {
-        let initial = BookStorage.loadMangaStatistics(root: root) ?? []
-        var tracker = MangaStatisticsTracker(
-            title: title,
-            initialStatistics: initial,
-            enabled: userConfig.enableStatistics
-        )
-        // Respect the autostart mode: `on` starts tracking immediately on open; `pageTurn` starts
-        // on the first page turn (handled in `recordPageTurnForStatistics`); `off` never auto-starts
-        // (the user starts it manually from the stats sheet's play button).
-        if userConfig.enableStatistics, userConfig.statisticsAutostartMode == .on {
-            tracker.start(currentPage: pageIndex + 1)
-        }
-        statistics = tracker
-    }
-
-    /// Re-syncs the tracker with `userConfig.enableStatistics` when it changes while the reader is
-    /// open. The tracker captures `enabled` at construction, so flipping the toggle from the stats
-    /// sheet (or Settings) would otherwise do nothing until the book is reopened. Re-inits with a
-    /// fresh `enabled` and starts tracking immediately when turned on; persists/drops the in-memory
-    /// tracker when turned off.
-    func updateStatisticsEnabled(_ enabled: Bool, title: String, autostartMode: StatisticsAutostartMode) {
-        // Already in the requested state — nothing to do.
-        if let tracker = statistics, tracker.enabled == enabled { return }
-        guard let bookRoot else { return }
-
-        if enabled {
-            let initial = BookStorage.loadMangaStatistics(root: bookRoot) ?? []
-            var tracker = MangaStatisticsTracker(
-                title: title,
-                initialStatistics: initial,
-                enabled: true
-            )
-            // Enabling live from the sheet honours the autostart mode, matching open-time behaviour.
-            if autostartMode == .on {
-                tracker.start(currentPage: pageIndex + 1)
-            }
-            statistics = tracker
-        } else {
-            // Flush whatever was accumulated before tearing the tracker down.
-            persistStatistics()
-            statistics = nil
-        }
+        statistics = MangaStatisticsTracker(title: title, initialStatistics: ReadingStatisticsStore.reading(root: root), enabled: true, device: .current)
+        textStatistics = ReadingStatisticsStore.text(root: root)
+        statistics?.start(currentPage: pagesRead)
     }
 
     func toggleStatisticsTracking() {
-        guard var tracker = statistics, tracker.enabled else { return }
-        if tracker.isTracking {
-            tracker.pause(currentPage: pageIndex + 1)
-        } else {
-            tracker.start(currentPage: pageIndex + 1)
-        }
-        statistics = tracker
+        guard let tracker = statistics else { return }
+        if tracker.isTracking { statistics?.pause(currentPage: pagesRead) }
+        else { statistics?.start(currentPage: pagesRead) }
         persistStatistics()
     }
 
-    /// Records a real page turn for statistics. Must be called only from the actual page-turn path
-    /// (gated on an actual page-index change in the view), never from `renderCurrentPage` — that
-    /// also runs on initial appear and on rotation, which would make `.pageturn` autostart trigger
-    /// on open/rotation rather than on the first true page turn (mirrors the EPUB reader, which only
-    /// starts/updates stats on a real scroll/page-turn event).
-    func recordPageTurnForStatistics(autostartMode: StatisticsAutostartMode) {
-        guard var tracker = statistics, tracker.enabled else { return }
-        // Page-turn autostart: a page turn starts tracking on the first turn. In `off` mode a page
-        // turn must not auto-start (the user controls it manually); `on` mode is already tracking.
-        if autostartMode == .pageturn {
-            tracker.startForPageTurnIfNeeded(currentPage: pageIndex + 1)
-        }
-        tracker.update(currentPage: pageIndex + 1)
-        statistics = tracker
+    func suspendStatistics() {
+        resumeTracking = statistics?.isTracking == true
+        statistics?.pause(currentPage: pagesRead)
+        persistStatistics()
+        if let root = bookRoot { HttpReadingStatisticsSync.shared.schedule(root: root, delay: .milliseconds(1500)) }
     }
 
-    /// Flushes accumulated stats and persists today's bucket to the manga sidecar.
-    func persistStatistics() {
-        guard let bookRoot, var tracker = statistics, tracker.enabled else { return }
-        tracker.update(currentPage: pageIndex + 1)
-        if let toPersist = tracker.statisticsForPersistence() {
-            try? BookStorage.save(toPersist, inside: bookRoot, as: FileNames.mangaStatistics)
+    func resumeStatistics() {
+        if resumeTracking { statistics?.start(currentPage: pagesRead) }
+        resumeTracking = false
+    }
+
+    private func recordTurn(to index: Int) {
+        guard statistics?.isTracking == true, index > pageIndex, let book else { return }
+        pagesRead += index - pageIndex
+        let characters = book.pages[pageIndex..<index].reduce(0) { sum, page in
+            sum + page.textBoxes.reduce(0) { $0 + $1.lines.reduce(0) { $0 + $1.filter { !$0.isWhitespace }.utf16.count } }
         }
-        statistics = tracker
+        let device = ReadingDevice.current
+        let day = MangaStatisticsTracker.dateKey(for: .now)
+        var row = textStatistics.first { $0.dateKey == day && $0.deviceId == device.id }
+            ?? MangaTextStatistic(dateKey: day, deviceId: device.id, deviceName: device.name)
+        row.charactersRead += characters
+        row.lastModified = max(Int(Date().timeIntervalSince1970 * 1000), row.lastModified + 1)
+        textStatistics = MangaTextStatistic.merged(textStatistics + [row])
+        sessionCharacters += characters
+        if let root = bookRoot { try? ReadingStatisticsStore.saveText(textStatistics, root: root) }
+    }
+
+    func persistStatistics() {
+        guard let bookRoot else { return }
+        statistics?.update(currentPage: pagesRead)
+        if let rows = statistics?.statisticsForPersistence() {
+            try? ReadingStatisticsStore.save(rows, root: bookRoot)
+        }
     }
 
     // MARK: Rendering
@@ -280,6 +255,7 @@ final class MangaReaderViewModel {
             let start = Self.spreadStart(pageIndex)
             let target = direction == .forward ? start + 2 : start - 2
             guard target >= 0, target < book.pages.count else { return }
+            recordTurn(to: target)
             goToPage(target)
             return
         }
@@ -288,12 +264,14 @@ final class MangaReaderViewModel {
             pageCount: pageCount,
             direction: direction
         ) else { return }
+        recordTurn(to: target)
         goToPage(target)
     }
 
     func goToPage(_ index: Int) {
         guard index != pageIndex, (0..<pageCount).contains(index) else { return }
         // The view observes pageIndex to drive the directional page-turn slide and re-render.
+        persistStatistics()
         pageIndex = index
     }
 

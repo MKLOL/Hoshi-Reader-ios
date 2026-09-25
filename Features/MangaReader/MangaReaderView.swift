@@ -207,18 +207,22 @@ struct MangaReaderView: View {
         .onChange(of: model.pageIndex) { oldIndex, newIndex in
             beginPageTurn(from: oldIndex, to: newIndex)
         }
-        .onChange(of: userConfig.enableStatistics) { _, enabled in
-            // Apply the stats toggle live (e.g. the sheet's "Enable" button) instead of only on
-            // the next reader open.
-            model.updateStatisticsEnabled(
-                enabled,
-                title: model.title ?? "",
-                autostartMode: userConfig.statisticsAutostartMode
-            )
+        .task(id: model.isReady) {
+            guard model.isReady else { return }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(10)) } catch { break }
+                model.persistStatistics()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            model.suspendStatistics()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            model.resumeStatistics()
         }
         .onDisappear {
             model.flushPendingBookmark()
-            model.persistStatistics()
+            model.suspendStatistics()
             model.cancelPreload() // stop warming adjacent pages once we're leaving the reader
             pageReadyTimeoutTask?.cancel()
             pageReadyTimeoutTask = nil
@@ -460,7 +464,6 @@ struct MangaReaderView: View {
         // Real page turn: this only fires on an actual page-index change (driven by
         // `onChange(of: model.pageIndex)`), so `.pageturn` autostart and the stats update happen
         // here — not in `renderCurrentPage`, which also runs on initial appear and on rotation.
-        model.recordPageTurnForStatistics(autostartMode: userConfig.statisticsAutostartMode)
         slideGeneration += 1
         let generation = slideGeneration
         let direction: NavigationDirection = newIndex >= oldIndex ? .forward : .backward

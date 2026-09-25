@@ -102,10 +102,10 @@ class ReaderViewModel {
     var isPaused = false
     var lastTimestamp: Date = .now
     var lastCount: Int = 0
-    var stats: [Statistics] = []
-    var sessionStatistics: Statistics
-    var todaysStatistics: Statistics
-    var allTimeStatistics: Statistics
+    private var readingTracker: MangaStatisticsTracker?
+    var sessionStatistics: Statistics { readingTracker?.session ?? Self.getDefaultStatistic(title: document.title ?? "") }
+    var todaysStatistics: Statistics { readingTracker?.today ?? Self.getDefaultStatistic(title: document.title ?? "") }
+    var allTimeStatistics: Statistics { readingTracker?.allTime ?? Self.getDefaultStatistic(title: document.title ?? "") }
     let enableStatistics: Bool
     let autostartStatistics: Bool
     
@@ -171,10 +171,6 @@ class ReaderViewModel {
         } else {
             bookInfo = BookInfo(characterCount: 0, chapterInfo: [:])
         }
-        
-        sessionStatistics = Self.getDefaultStatistic(title: document.title ?? "")
-        todaysStatistics = Self.getDefaultStatistic(title: document.title ?? "")
-        allTimeStatistics = Self.getDefaultStatistic(title: document.title ?? "")
         
         if enableStatistics {
             loadStatistics()
@@ -462,44 +458,24 @@ class ReaderViewModel {
         isTracking = true
         lastTimestamp = .now
         lastCount = currentCharacter
+        readingTracker?.start(currentPage: currentCharacter)
     }
     
     func stopTracking() {
         guard isTracking else { return }
         flushStats()
+        readingTracker?.pause(currentPage: currentCharacter)
         isTracking = false
     }
     
     // https://github.com/ttu-ttu/ebook-reader/blob/2703b50ec52b2e4f70afcab725c0f47dd8a66bf4/apps/web/src/lib/components/book-reader/book-reading-tracker/book-reading-tracker.svelte#L72
     func updateStats() {
-        let currentDateKey = Self.formattedDate(date: .now)
-        if todaysStatistics.dateKey != currentDateKey {
-            if let index = stats.firstIndex(where: { $0.dateKey == todaysStatistics.dateKey }) {
-                stats[index] = todaysStatistics
-            } else {
-                stats.append(todaysStatistics)
-            }
-            todaysStatistics = stats.first(where: { $0.dateKey == currentDateKey }) ?? Self.getDefaultStatistic(title: document.title ?? "")
-        }
-        
-        let now: Date = .now
-        let timeDiff = Date.now.timeIntervalSince(lastTimestamp)
-        let charDiff = currentCharacter - lastCount
-        let finalCharDiff = charDiff < 0 && abs(charDiff) > sessionStatistics.charactersRead ? -sessionStatistics.charactersRead : charDiff;
-        let lastStatisticModified = Int(Date.now.timeIntervalSince1970 * 1000)
-        guard timeDiff > 0 else {
-            return
-        }
-        
-        updateStatistic(to: &sessionStatistics, timeDiff: timeDiff, characterDiff: finalCharDiff, lastStatisticModified: lastStatisticModified)
-        updateStatistic(to: &todaysStatistics, timeDiff: timeDiff, characterDiff: finalCharDiff, lastStatisticModified: lastStatisticModified)
-        updateStatistic(to: &allTimeStatistics, timeDiff: timeDiff, characterDiff: finalCharDiff, lastStatisticModified: lastStatisticModified)
-        
-        lastTimestamp = now
-        lastCount = currentCharacter
+        guard isTracking, !isPaused else { return }
+        readingTracker?.update(currentPage: currentCharacter)
     }
-    
+
     func resetTrackingBaseline() {
+        readingTracker?.resetBaseline(currentPage: currentCharacter)
         lastCount = currentCharacter
         lastTimestamp = .now
     }
@@ -691,42 +667,25 @@ class ReaderViewModel {
     }
     
     // https://github.com/ttu-ttu/ebook-reader/blob/2703b50ec52b2e4f70afcab725c0f47dd8a66bf4/apps/web/src/lib/components/book-reader/book-reading-tracker/book-reading-tracker.svelte#L722
-    private func updateStatistic(to: inout Statistics, timeDiff: Double, characterDiff: Int, lastStatisticModified: Int) {
-        to.readingTime += timeDiff
-        to.charactersRead = max(to.charactersRead + characterDiff, 0)
-        to.lastReadingSpeed = to.readingTime > 0 ? Int((Double(to.charactersRead) / to.readingTime) * 3600.0) : 0
-        to.maxReadingSpeed = max(to.maxReadingSpeed, to.lastReadingSpeed)
-        to.minReadingSpeed = to.minReadingSpeed != 0 ? min(to.minReadingSpeed, to.lastReadingSpeed) : to.lastReadingSpeed
-        if characterDiff != 0 {
-            to.altMinReadingSpeed = to.altMinReadingSpeed != 0 ? min(to.altMinReadingSpeed, to.lastReadingSpeed) : to.lastReadingSpeed
-        }
-        to.lastStatisticModified = lastStatisticModified
-    }
-    
     private func saveStats() {
-        if let index = stats.firstIndex(where: { $0.dateKey == todaysStatistics.dateKey }) {
-            stats[index] = todaysStatistics
-        } else {
-            stats.append(todaysStatistics)
+        if let rows = readingTracker?.statisticsForPersistence() {
+            try? ReadingStatisticsStore.save(rows, root: rootURL)
         }
-        
-        stats = Self.deduplicateStatistics(stats)
-        try? BookStorage.save(stats, inside: rootURL, as: FileNames.statistics)
         scheduleAutoExport()
     }
-    
+
     private func loadStatistics() {
-        stats = Self.deduplicateStatistics(BookStorage.loadStatistics(root: rootURL) ?? [])
-        todaysStatistics = stats.first(where: { $0.dateKey == Self.formattedDate(date: .now) }) ?? Self.getDefaultStatistic(title: document.title ?? "")
-        allTimeStatistics = Self.getDefaultStatistic(title: document.title ?? "")
-        
-        for stat in stats {
-            allTimeStatistics.readingTime += stat.readingTime
-            allTimeStatistics.charactersRead += stat.charactersRead
-            allTimeStatistics.lastReadingSpeed = allTimeStatistics.readingTime > 0 ? Int((Double(allTimeStatistics.charactersRead) / allTimeStatistics.readingTime) * 3600.0) : 0
-        }
+        // Flush the live session before replacing the tracker after a sync.
+        if readingTracker != nil { flushStats() }
+        readingTracker = MangaStatisticsTracker(title: document.title ?? "", initialStatistics: ReadingStatisticsStore.reading(root: rootURL), enabled: true, device: .current)
+        if isTracking { readingTracker?.start(currentPage: currentCharacter) }
     }
-    
+
+    func persistReadingTime() {
+        flushStats()
+        HttpReadingStatisticsSync.shared.schedule(root: rootURL, delay: .milliseconds(1500))
+    }
+
     /// The current chapter's pre-translated sentences, as JSON for `hoshiTranslations.apply`.
     ///
     /// `nil` when the book has no blob, when the reader setting is off, or when this chapter has

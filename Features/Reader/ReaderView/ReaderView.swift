@@ -734,6 +734,7 @@ struct ReaderView: View {
             guard viewModel.isTracking else {
                 return
             }
+            viewModel.persistReadingTime()
             viewModel.isPaused = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
@@ -741,6 +742,7 @@ struct ReaderView: View {
             viewModel.reloadAfterHttpBookmark()
         }
         .onDisappear {
+            viewModel.persistReadingTime()
             // Cancel any in-flight request when leaving the reader, as the manga reader does.
             aiController.dismiss()
             viewModel.sasayakiPlayer.teardown()

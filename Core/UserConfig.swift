@@ -425,12 +425,11 @@ class UserConfig {
             .flatMap(AudioPlaybackMode.init) ?? .interrupt
         self.customCSS = defaults.string(forKey: "customCSS") ?? ""
         
-        self.enableStatistics = defaults.object(forKey: "enableStatistics") as? Bool ?? false
+        self.enableStatistics = true
         self.statisticsEnableSync = defaults.object(forKey: "statisticsEnableSync") as? Bool ?? false
         self.statisticsSyncMode = defaults.string(forKey: "statisticsSyncMode")
             .flatMap(StatisticsSyncMode.init) ?? .merge
-        self.statisticsAutostartMode = defaults.string(forKey: "statisticsAutostartMode")
-            .flatMap(StatisticsAutostartMode.init) ?? .off
+        self.statisticsAutostartMode = .on
         
         self.enableSasayaki = defaults.object(forKey: "enableSasayaki") as? Bool ?? false
         self.sasayakiAutoScroll = defaults.object(forKey: "sasayakiAutoScroll") as? Bool ?? true

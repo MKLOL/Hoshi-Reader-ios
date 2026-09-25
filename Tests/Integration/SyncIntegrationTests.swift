@@ -194,7 +194,6 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         let settings = HttpSyncSettingsStore.shared
         settings.baseURL = baseURL
         settings.token = token
-        settings.enabled = true
         settings.lastSyncedAt = nil
         XCTAssertTrue(settings.isConfigured, "settings must accept the loopback test server")
     }

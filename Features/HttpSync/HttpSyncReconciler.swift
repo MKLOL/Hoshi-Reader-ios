@@ -350,6 +350,7 @@ struct HttpSyncReconciler {
         // server paginates, when equal timestamps straddle a page, or when an older client stored a
         // bad cursor. The durable per-key identity ledger below gives retries their speed without
         // sacrificing the complete remote snapshot needed for reconciliation.
+        var statisticsMetas: [String: HttpSyncKvKeyMeta] = [:]
         var payloadManifests: [HttpSyncKvKeyMeta] = []
         /// EPUB manifests import through the same pass, but with the `epub.*` key pair.
         var epubManifests: [HttpSyncKvKeyMeta] = []
@@ -363,6 +364,10 @@ struct HttpSyncReconciler {
         ))
         do {
             try await transport.listAll(prefix: SyncKeys.allBooksPrefix, since: nil) { meta in
+                if meta.key.hasSuffix("/statistics") || meta.key.hasSuffix("/manga_statistics") {
+                    statisticsMetas[meta.key] = meta
+                    return
+                }
                 guard let parsed = parseBookKey(meta.key) else {
                     markHandled(meta)
                     return
@@ -594,6 +599,15 @@ struct HttpSyncReconciler {
                 result.errors.append("\(parsed.syncId): \(errorText(error))")
                 markUnhandled(meta)
             }
+        }
+
+        for (id, root) in rootsBySyncId where !deletedSyncIds.contains(id) && !pendingTombstoneSyncIds.contains(id) {
+            do {
+                try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas)
+                for key in ["books/\(id)/statistics", "books/\(id)/manga_statistics"] {
+                    if let meta = statisticsMetas[key] { markHandled(meta) }
+                }
+            } catch { result.errors.append("Statistics \(id): \(errorText(error))") }
         }
 
         // Plain loop, not `.filter{}.count`: a @MainActor closure into a stdlib generic carries a

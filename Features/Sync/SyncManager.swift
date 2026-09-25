@@ -101,7 +101,7 @@ class SyncManager {
         async let fetchedStats: [Statistics]? = fetchStats(fileId: statsFileId)
         async let fetchedAudioBook: TtuAudioBook? = fetchAudioBook(fileId: audioBookFileId)
         
-        let localStats = syncStats ? BookStorage.loadStatistics(root: url) : nil
+        let localStats = syncStats ? ReadingStatisticsStore.collapsed(ReadingStatisticsStore.reading(root: url)) : nil
         let playbackData = syncAudioBook ? BookStorage.loadSasayakiPlayback(root: url) : nil
         
         let ttuProgress = try await fetchedProgress
@@ -115,7 +115,7 @@ class SyncManager {
             if syncStats {
                 let mergedStats = mergeStatistics(localStatistics: localStats ?? [], externalStatistics: ttuStats ?? [], syncMode: statsSyncMode)
                 if !mergedStats.isEmpty {
-                    try? BookStorage.save(mergedStats, inside: url, as: FileNames.statistics)
+                    try? ReadingStatisticsStore.applyDayTotals(mergedStats, root: url, replace: statsSyncMode == .replace)
                 }
             }
             if syncAudioBook, let ttuAudioBook {

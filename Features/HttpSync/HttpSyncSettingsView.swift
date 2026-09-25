@@ -38,9 +38,9 @@ struct HttpSyncSettingsView: View {
             }
 
             Section {
-                Toggle("Auto-sync while reading", isOn: $store.enabled)
+                Label("Reading progress syncs automatically", systemImage: "arrow.triangle.2.circlepath")
             } footer: {
-                Text("When on, page turns and new translation replies are pushed to the server automatically. \"Sync now\" works either way.")
+                Text("Page turns, reading statistics and translation replies sync whenever a server and token are configured.")
             }
 
             Section {

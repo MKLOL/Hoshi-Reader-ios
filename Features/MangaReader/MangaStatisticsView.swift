@@ -39,29 +39,16 @@ struct MangaStatisticsView: View {
                     }
                 }
 
-                if !userConfig.enableStatistics {
-                    Section {
-                        HStack {
-                            Text("Statistics are off.")
-                            Spacer()
-                            Button("Enable") {
-                                userConfig.enableStatistics = true
-                            }
-                            .buttonStyle(.borderedProminent)
-                        }
-                    } footer: {
-                        Text("Statistics can also be toggled in Settings → Advanced → Statistics.")
-                    }
-                } else if let statistics {
-                    autostartSection
+                if let statistics {
                     statisticsSection(
                         title: "Session",
                         stat: statistics.session,
+                        characters: model.sessionCharacters,
                         isTracking: statistics.isTracking,
                         showToggle: true
                     )
-                    statisticsSection(title: "Today", stat: statistics.today)
-                    statisticsSection(title: "All Time", stat: statistics.allTime)
+                    statisticsSection(title: "Today", stat: statistics.today, characters: model.todayCharacters)
+                    statisticsSection(title: "All Time", stat: statistics.allTime, characters: model.allTimeCharacters)
                 }
             }
             .monospacedDigit()
@@ -83,15 +70,17 @@ struct MangaStatisticsView: View {
     private func statisticsSection(
         title: String,
         stat: Statistics,
+        characters: Int,
         isTracking: Bool = false,
         showToggle: Bool = false
     ) -> some View {
         Section {
-            statRow("Pages Read", "\(stat.charactersRead.formatted(.number.grouping(.never)))")
-            statRow("Pace", "\(stat.lastReadingSpeed.formatted(.number.grouping(.never))) pages / h")
+            statRow("Characters Read", characters.formatted())
+            statRow("Pages Read", "\(stat.charactersRead.formatted())")
+            statRow("Pace", "\(stat.lastReadingSpeed.formatted()) pages / h")
             statRow("Reading Time", Duration.seconds(stat.readingTime).formatted())
             if showToggle {
-                statRow("Pages Remaining", "\(remainingPages.formatted(.number.grouping(.never)))")
+                statRow("Pages Remaining", "\(remainingPages.formatted())")
                 statRow(
                     "Time to Finish",
                     Duration.seconds(secondsRemaining(speed: stat.lastReadingSpeed)).formatted()
@@ -109,22 +98,6 @@ struct MangaStatisticsView: View {
                     .foregroundStyle(.primary)
                 }
             }
-        }
-    }
-
-    /// Autostart selector — mirrors Android, which reads `statisticsAutostartMode` per reader.
-    /// Off = never auto-track, Page Turn = start on the first page turn, On = start on open.
-    @ViewBuilder
-    private var autostartSection: some View {
-        @Bindable var userConfig = userConfig
-        Section {
-            Picker("Autostart", selection: $userConfig.statisticsAutostartMode) {
-                ForEach(StatisticsAutostartMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-        } footer: {
-            Text("When to begin tracking automatically. You can also start or pause from the Session controls.")
         }
     }
 

@@ -276,6 +276,10 @@ struct BookshelfView: View {
     
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            NavigationLink { StatisticsOverviewView() } label: { Image(systemName: "chart.bar") }
+                .accessibilityLabel("Statistics")
+        }
         if isSelecting {
             ToolbarItem(placement: .topBarLeading) {
                 Button("Done") {

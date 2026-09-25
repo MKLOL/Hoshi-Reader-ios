@@ -58,9 +58,7 @@ final class HttpSyncSettingsStore {
     }
 
     /// Whether HTTP sync auto-push hooks are wired up. "Sync now" works regardless.
-    var enabled: Bool {
-        didSet { defaults.set(enabled, forKey: Keys.enabled) }
-    }
+    var enabled: Bool { isConfigured }
 
     var syncMode: HttpSyncMode {
         didSet { defaults.set(syncMode.rawValue, forKey: Keys.syncMode) }
@@ -110,7 +108,6 @@ final class HttpSyncSettingsStore {
         } else {
             self.baseURL = Self.defaultBaseURL
         }
-        self.enabled = defaults.bool(forKey: Keys.enabled)
         self.syncMode = HttpSyncMode(rawValue: defaults.string(forKey: Keys.syncMode) ?? "") ?? .manual
         self.lastSyncedAt = defaults.string(forKey: Keys.lastSyncedAt)
     }

@@ -138,6 +138,8 @@ final class HttpSyncManager {
         let transport = HttpSyncWriteTrackingTransport(
             base: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
         )
+        do { try await HttpReadingStatisticsSync.shared.pushLocalChanges(transport: transport) }
+        catch { lastError = error.localizedDescription; lastErrors = [error.localizedDescription]; return }
         let mapChanges: HttpSyncMapChanges
         if let preflight {
             mapChanges = preflight
@@ -296,6 +298,22 @@ final class HttpSyncManager {
     /// Reader-open gate: finish the cheap bookmark-map pull before either reader loads its
     /// sidecar, so an upgraded/still-running client cannot re-save a stale in-memory position.
     func syncBookmarksBeforeReading(book: BookMetadata) async {
+        // An unstructured task keeps the late bookmark pull alive after the opening budget.
+        // A structured task group would wait for URLSession cancellation before returning.
+        let gate = ReadingOpenGate()
+        await withCheckedContinuation { continuation in
+            gate.continuation = continuation
+            Task { await self.pullBookmarksBeforeReading(book: book); gate.finish() }
+            Task { try? await Task.sleep(for: .milliseconds(1500)); gate.finish() }
+        }
+    }
+
+    private final class ReadingOpenGate {
+        var continuation: CheckedContinuation<Void, Never>?
+        func finish() { let pending = continuation; continuation = nil; pending?.resume() }
+    }
+
+    private func pullBookmarksBeforeReading(book: BookMetadata) async {
         guard settings.enabled, settings.isConfigured else { return }
         let changes = await exchangeMapsOnly()
         guard changes?.needsBootstrap == true else { return }

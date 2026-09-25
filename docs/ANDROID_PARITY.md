@@ -12,19 +12,19 @@ Each Android commit is accounted for below. Follow-up fixes are implemented with
 | `387e8c84` | 2026-09-10 | fix: restore fitted manga swipes and show current news | Ported: current sources, dated ordering, dedupe, OCR overflow containment |
 | `66705e69` | 2026-09-12 | docs: keep the validation handoff short and clarify the Watanoc default | Documentation: reviewed with related feature |
 | `595167fc` | 2026-09-12 | chore: release 0.11.10 | No app port: release metadata |
-| `30d538d5` | 2026-09-12 | feat(statistics): track reading time automatically and list it per book | Pending review/port |
+| `30d538d5` | 2026-09-12 | feat(statistics): track reading time automatically and list it per book | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
 | `1f3fce8b` | 2026-09-12 | chore: release 0.11.11 | No app port: release metadata |
-| `034dbc82` | 2026-09-12 | feat(statistics): count the characters of manga text read | Pending review/port |
+| `034dbc82` | 2026-09-12 | feat(statistics): count the characters of manga text read | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
 | `b9519803` | 2026-09-12 | chore: release 0.11.12 | No app port: release metadata |
-| `08349cad` | 2026-09-12 | fix(statistics): read the same totals everywhere and reload on every change | Pending review/port |
-| `34182480` | 2026-09-12 | feat(statistics): Statistics screens with streak, heatmap, per-book detail | Pending review/port |
-| `ac997538` | 2026-09-12 | feat(sync): merge reading statistics between devices over HTTP sync | Pending review/port |
-| `641e6163` | 2026-09-12 | style(statistics): drop seconds from hour-long durations and group digits in the manga sheet | Pending review/port |
-| `f0311968` | 2026-09-12 | fix(statistics): sync stale-check by stamp, Drive options back, lazy book rows | Pending review/port |
-| `22f52731` | 2026-09-12 | fix(sync): deterministic statistics tie-break, no idle GETs, scheduler edge cases | Pending review/port |
-| `93ad8e4d` | 2026-09-12 | fix(statistics): survive clock skew and reader hand-offs without losing a session | Pending review/port |
-| `3f6cfc9d` | 2026-09-12 | perf(reader): open manga and books without waiting on the sync server | Pending review/port |
-| `c75b955b` | 2026-09-12 | feat(statistics): keep reading statistics per device | Pending review/port |
+| `08349cad` | 2026-09-12 | fix(statistics): read the same totals everywhere and reload on every change | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `34182480` | 2026-09-12 | feat(statistics): Statistics screens with streak, heatmap, per-book detail | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `ac997538` | 2026-09-12 | feat(sync): merge reading statistics between devices over HTTP sync | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `641e6163` | 2026-09-12 | style(statistics): drop seconds from hour-long durations and group digits in the manga sheet | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `f0311968` | 2026-09-12 | fix(statistics): sync stale-check by stamp, Drive options back, lazy book rows | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `22f52731` | 2026-09-12 | fix(sync): deterministic statistics tie-break, no idle GETs, scheduler edge cases | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `93ad8e4d` | 2026-09-12 | fix(statistics): survive clock skew and reader hand-offs without losing a session | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `3f6cfc9d` | 2026-09-12 | perf(reader): open manga and books without waiting on the sync server | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
+| `c75b955b` | 2026-09-12 | feat(statistics): keep reading statistics per device | Ported: automatic tracking, device rows, statistics UI/sync and opening budget; 9 behavior tests pass |
 | `9ac6464c` | 2026-09-13 | chore: release 0.11.13 | No app port: release metadata |
 | `ab74ab90` | 2026-09-21 | feat(podcasts): add authenticated NHK learning lessons | Pending review/port |
 | `0611f589` | 2026-09-21 | fix(news): keep headline furigana and upright digits in saved articles | Pending review/port |
