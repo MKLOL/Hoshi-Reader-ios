@@ -58,12 +58,15 @@ struct PopupLayout {
     /// WITHOUT scrolling, and a phone-tuned popupHeight setting (default 170pt) is tiny on a
     /// 1210pt screen.
     var preferTallPopup = false
+    var customWidth = false
+    var customHeight = false
 
     // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
     // user's configured max. A definition panel that filled most of the page was overwhelming and
     // sat on top of the surrounding art.
-    private var cappedMaxWidth: CGFloat { min(maxWidth, screenSize.width * 0.58) }
+    private var cappedMaxWidth: CGFloat { max(1, min(maxWidth, customWidth ? screenSize.width - screenBorderPadding * 2 : screenSize.width * 0.58)) }
     private var cappedMaxHeight: CGFloat {
+        if customHeight { return max(1, min(maxHeight, screenSize.height - topInset - bottomInset - screenBorderPadding * 2)) }
         if preferTallPopup {
             return max(1, min(max(maxHeight, screenSize.height * 0.32), screenSize.height * 0.42))
         }
@@ -212,14 +215,16 @@ struct PopupView: View {
         var result = PopupLayout(
             selectionRect: selectionData.rect,
             screenSize: screenSize,
-            maxWidth: CGFloat(userConfig.popupWidth),
-            maxHeight: CGFloat(userConfig.popupHeight),
+            maxWidth: userConfig.dictionaryCard.normalized.width ?? CGFloat(userConfig.popupWidth),
+            maxHeight: userConfig.dictionaryCard.normalized.height ?? CGFloat(userConfig.popupHeight),
             isVertical: isVertical,
             isFullWidth: isFullWidth,
             topInset: topInset,
             bottomInset: bottomInset
         )
         result.preferTallPopup = UIDevice.current.userInterfaceIdiom == .pad
+        result.customWidth = userConfig.dictionaryCard.normalized.width != nil
+        result.customHeight = userConfig.dictionaryCard.normalized.height != nil
         
         guard result.width.isFinite,
               result.height.isFinite,
@@ -293,6 +298,7 @@ struct PopupView: View {
                             clearSelection: clearSelection,
                             dictionaryStyles: dictionaryStyles,
                             lookupEntries: lookupEntries,
+                            cardStyle: userConfig.dictionaryCard,
                             onMine: { content in
                                 await mineEntry(content: content, sentence: selectionData.sentence)
                             },
@@ -320,6 +326,7 @@ struct PopupView: View {
                             clearSelection: clearSelection,
                             dictionaryStyles: dictionaryStyles,
                             lookupEntries: lookupEntries,
+                            cardStyle: userConfig.dictionaryCard,
                             onMine: { content in
                                 await mineEntry(content: content, sentence: selectionData.sentence)
                             },

@@ -1,6 +1,66 @@
 import XCTest
 
 final class ZoomPopupUITests: XCTestCase {
+    @MainActor func testPopupCardsLivePreview() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
+        app.launch()
+        XCUIDevice.shared.orientation = .portrait
+        app.buttons["Settings"].firstMatch.tap()
+        let editor = app.buttons["settings-popup-cards"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap()
+        let dictionary = app.segmentedControls["card-type"].buttons["Dictionary"]
+        let translation = app.segmentedControls["card-type"].buttons["Translation"]
+        let reset = app.buttons["card-reset"]
+        func reveal(_ element: XCUIElement) {
+            let controls = app.descendants(matching: .any)["card-controls"].firstMatch
+            controls.swipeUp()
+            for _ in 0..<3 where !element.isHittable { controls.swipeUp() }
+        }
+        reveal(reset); reset.tap()
+        let word = app.webViews.staticTexts["本"].firstMatch
+        XCTAssertTrue(app.webViews.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "book; volume")).firstMatch.waitForExistence(timeout: 10))
+        let originalHeight = word.frame.height
+        saveScreenshot(app, name: "reader-dictionary-default")
+        app.buttons["card-full-preview"].tap()
+        XCTAssertTrue(word.waitForExistence(timeout: 10)); XCTAssertTrue(word.isHittable)
+        saveScreenshot(app, name: "reader-dictionary-default-full")
+        app.navigationBars["Card preview"].buttons["Done"].tap()
+        let font = app.sliders["card-font"]
+        reveal(font); font.adjust(toNormalizedSliderPosition: 0.4)
+        XCTAssertGreaterThan(word.frame.height, originalHeight * 1.3, app.debugDescription)
+        saveScreenshot(app, name: "reader-dictionary-adjusted")
+        app.buttons["card-full-preview"].tap()
+        XCTAssertTrue(word.waitForExistence(timeout: 10))
+        XCTAssertTrue(word.isHittable)
+        saveScreenshot(app, name: "reader-dictionary-adjusted-full")
+        app.navigationBars["Card preview"].buttons["Done"].tap()
+        translation.tap()
+        reveal(reset); reset.tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "I like reading books.")).firstMatch.waitForExistence(timeout: 5))
+        saveScreenshot(app, name: "reader-translation-default")
+        app.buttons["card-full-preview"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "I like reading books.")).firstMatch.waitForExistence(timeout: 5))
+        saveScreenshot(app, name: "reader-translation-default-full")
+        app.navigationBars["Card preview"].buttons["Done"].tap()
+        reveal(font); font.adjust(toNormalizedSliderPosition: 0.4)
+        app.buttons["card-full-preview"].tap()
+        XCTAssertTrue(app.navigationBars["Card preview"].waitForExistence(timeout: 5))
+        saveScreenshot(app, name: "reader-translation-adjusted-full")
+        app.navigationBars["Card preview"].buttons["Done"].tap()
+        reveal(reset); reset.tap()
+        dictionary.tap()
+        XCTAssertGreaterThan(word.frame.height, originalHeight * 1.3)
+        app.terminate(); app.launch()
+        app.buttons["Settings"].firstMatch.tap()
+        app.buttons["settings-popup-cards"].tap()
+        XCTAssertTrue(word.waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(word.frame.height, originalHeight * 1.3, "Dictionary overrides survive relaunch")
+        reveal(reset); reset.tap()
+    }
+
     func testPageJumpResetsZoomAndAllowsTheNextSwipe() throws {
         continueAfterFailure = false
         let app = try launchZoomFixture()
@@ -392,7 +452,14 @@ final class ZoomPopupUITests: XCTestCase {
 
     /// Attaches a full-screen screenshot to the test result (kept even when the test passes).
     private func saveScreenshot(_ app: XCUIApplication, name: String) {
-        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        let screenshot = XCUIScreen.main.screenshot()
+        if name.hasPrefix("reader-") {
+            let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("build/cards-screenshots/" + UIDevice.current.name.replacingOccurrences(of: " ", with: "-"))
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? screenshot.pngRepresentation.write(to: directory.appendingPathComponent(name + ".png"))
+        }
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

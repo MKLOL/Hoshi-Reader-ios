@@ -167,6 +167,11 @@ struct BookshelfView: View {
                         }
                         .foregroundStyle(.primary)
                         
+                        NavigationLink {
+                            PopupCardsView(userConfig: userConfig)
+                        } label: {
+                            Label("Popup Cards", systemImage: "rectangle.on.rectangle")
+                        }.accessibilityIdentifier("settings-popup-cards")
                         Section {
                             Link(destination: URL(string: "https://github.com/Manhhao/Hoshi-Reader/issues")!) {
                                 Label("Report an Issue", systemImage: "exclamationmark.bubble")

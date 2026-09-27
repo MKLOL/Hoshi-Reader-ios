@@ -109,6 +109,8 @@ struct PopupWebView: UIViewRepresentable {
     var clearSelection: Bool
     var dictionaryStyles: [String: String] = [:]
     var lookupEntries: [[String: Any]] = []
+    var cardStyle = PopupCardStyle()
+    var isPreview = false
     var onMine: (([String: String]) async -> Bool)? = nil
     var onLookupRedirect: ((String) async -> [[String: Any]])? = nil
     var onTextSelected: ((SelectionData) async -> Int?)? = nil
@@ -190,6 +192,8 @@ struct PopupWebView: UIViewRepresentable {
     
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        webView.pageZoom = cardStyle.normalized.scale ?? 1
+        context.coordinator.applyTypography(webView)
         if !context.coordinator.wasLoaded {
             context.coordinator.redirectGeneration += 1
             context.coordinator.currentContent = content
@@ -244,7 +248,13 @@ struct PopupWebView: UIViewRepresentable {
             entries ?? parent.lookupEntries
         }
         
+        func applyTypography(_ webView: WKWebView) {
+            let scale = parent.cardStyle.normalized.fontScale ?? 1
+            webView.evaluateJavaScript("document.documentElement.style.setProperty('--hoshi-popup-font-scale', '\(scale)')")
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            applyTypography(webView)
             webView.callAsyncJavaScript(
                 """
                 window.dictionaryStyles = dictionaryStyles;
@@ -264,6 +274,7 @@ struct PopupWebView: UIViewRepresentable {
         }
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) async -> (Any?, String?) {
+            if parent.isPreview && message.name != "getEntry" { return (false, nil) }
             if message.name == "mineEntry", let content = message.body as? [String: String] {
                 return (await parent.onMine?(content) ?? false, nil)
             }
@@ -293,6 +304,7 @@ struct PopupWebView: UIViewRepresentable {
         }
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard !parent.isPreview else { return }
             if message.name == "openLink", let urlString = message.body as? String,
                let url = URL(string: urlString) {
                 UIApplication.shared.open(url)
@@ -318,11 +330,13 @@ struct PopupWebView: UIViewRepresentable {
                     return
                 }
                 let adjustedInset = message.webView?.scrollView.adjustedContentInset ?? .zero
+                // DOM rectangles are CSS pixels; pageZoom changes their size in UIKit points.
+                let zoom = message.webView?.pageZoom ?? 1
                 let rect = CGRect(
-                    x: parent.position.x + x + adjustedInset.left,
-                    y: parent.position.y + y + adjustedInset.top,
-                    width: w,
-                    height: h
+                    x: parent.position.x + x * zoom + adjustedInset.left,
+                    y: parent.position.y + y * zoom + adjustedInset.top,
+                    width: w * zoom,
+                    height: h * zoom
                 )
                 let selectionData = SelectionData(text: text, sentence: sentence, rect: rect)
                 
@@ -350,7 +364,9 @@ struct PopupWebView: UIViewRepresentable {
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <style>\(Self.popupCss)</style>
+            <style>\(Self.popupCss)
+            body { font-size: calc(16px * var(--hoshi-popup-font-scale, 1)); }
+            </style>
             <script>\(Self.selectionJs)</script>
             <script>\(Self.popupJs)</script>
         </head>

@@ -258,32 +258,9 @@ struct AppearanceView: View {
                 }
                 
                 Section("Popup") {
-                    VStack {
-                        HStack {
-                            Text("Width")
-                            Spacer()
-                            Text("\(userConfig.popupWidth)")
-                                .fontWeight(.semibold)
-                        }
-                        Slider(value: .init(
-                            get: { Double(userConfig.popupWidth) },
-                            set: { userConfig.popupWidth = Int($0) }
-                        ), in: 100...700, step: 10)
-                        
-                        HStack {
-                            Text("Height")
-                            Spacer()
-                            Text("\(userConfig.popupHeight)")
-                                .fontWeight(.semibold)
-                        }
-                        Slider(value: .init(
-                            get: { Double(userConfig.popupHeight) },
-                            set: { userConfig.popupHeight = Int($0) }
-                        ), in: 100...500, step: 10)
-                    }
-                    
-                    Toggle("Full-width", isOn: Bindable(userConfig).popupFullWidth)
-                    
+                    NavigationLink("Popup Cards") { PopupCardsView(userConfig: userConfig) }
+                    Toggle("Full-width dictionary", isOn: Bindable(userConfig).popupFullWidth)
+
                     Toggle("Swipe to Dismiss", isOn: Bindable(userConfig).popupSwipeToDismiss)
                     if userConfig.popupSwipeToDismiss {
                         VStack {

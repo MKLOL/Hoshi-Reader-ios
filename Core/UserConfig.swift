@@ -232,6 +232,13 @@ class UserConfig {
         didSet { UserDefaults.standard.set(mangaShowActionButtons, forKey: "mangaShowActionButtons") }
     }
 
+    var dictionaryCard: PopupCardStyle {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(dictionaryCard.normalized), forKey: "dictionaryCardStyle") }
+    }
+    var translationCard: PopupCardStyle {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(translationCard.normalized), forKey: "translationCardStyle") }
+    }
+
     var popupWidth: Int {
         didSet { UserDefaults.standard.set(popupWidth, forKey: "popupWidth") }
     }
@@ -411,6 +418,8 @@ class UserConfig {
         self.mangaShowCopyButton = defaults.bool(forKey: "mangaShowCopyButton")
         self.mangaShowActionButtons = defaults.object(forKey: "mangaShowActionButtons") as? Bool ?? true
 
+        self.dictionaryCard = defaults.data(forKey: "dictionaryCardStyle").flatMap { try? JSONDecoder().decode(PopupCardStyle.self, from: $0) }?.normalized ?? .init()
+        self.translationCard = defaults.data(forKey: "translationCardStyle").flatMap { try? JSONDecoder().decode(PopupCardStyle.self, from: $0) }?.normalized ?? .init()
         self.popupWidth = defaults.object(forKey: "popupWidth") as? Int ?? 240
         self.popupHeight = defaults.object(forKey: "popupHeight") as? Int ?? 170
         self.popupFullWidth = defaults.object(forKey: "popupFullWidth") as? Bool ?? false

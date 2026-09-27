@@ -27,6 +27,8 @@ struct MangaAiPopupView: View {
     let book: BookMetadata
     let userConfig: UserConfig
     var coverURL: URL?
+    var previewEntry: AiChatEntry?
+    var inlinePreview = false
 
     @State private var settings = AiChatSettingsStore.shared
     @State private var showHistory = false
@@ -35,17 +37,20 @@ struct MangaAiPopupView: View {
     @State private var zoomedScreenshot: UIImage?
 
     var body: some View {
+        Group {
+        if inlinePreview { card } else {
         GeometryReader { geometry in
             let isPad = UIDevice.current.userInterfaceIdiom == .pad
             let sideMargin: CGFloat = isPad ? 36 : 16
-            let maxCardWidth: CGFloat = isPad ? 680 : 520
-            let width = min(maxCardWidth, max(1, geometry.size.width - sideMargin * 2))
+            let defaults = PopupCardGeometry.translationDefaults(in: geometry.size, isPad: isPad)
+            let maxCardWidth = defaults.width
+            let width = min(userConfig.translationCard.normalized.width ?? maxCardWidth, max(1, geometry.size.width - sideMargin * 2))
             let availableHeight = max(
                 1,
                 geometry.size.height - geometry.safeAreaInsets.top - geometry.safeAreaInsets.bottom - sideMargin * 2
             )
-            let targetHeight = max(isPad ? 520 : 320, geometry.size.height * (isPad ? 0.84 : 0.78))
-            let height = min(availableHeight, targetHeight)
+            let targetHeight = defaults.height
+            let height = min(availableHeight, userConfig.translationCard.normalized.height ?? targetHeight)
 
             ZStack {
                 // Dim + tap-to-dismiss backdrop.
@@ -65,7 +70,10 @@ struct MangaAiPopupView: View {
                 }
             }
         }
+        }
+        }
         .onAppear {
+            guard previewEntry == nil else { return }
             // Opened from the reader's "Chat history" menu item → start in the history list.
             if controller.state == .browsingHistory { showHistory = true }
             reloadHistory()
@@ -76,6 +84,7 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private var card: some View {
+        ScaledCardContent(scale: userConfig.translationCard.normalized.scale ?? 1) {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
@@ -95,6 +104,8 @@ struct MangaAiPopupView: View {
             .scrollBounceBehavior(.basedOnSize)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        }
+        .environment(\.cardFontScale, userConfig.translationCard.normalized.fontScale ?? 1)
         .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.12), lineWidth: 1))
         .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
@@ -106,7 +117,7 @@ struct MangaAiPopupView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Text(headerTitle)
-                .font(.headline)
+                .modifier(CardFont(style: .headline))
             Spacer()
             // Selection in the reply is off (see `responseText`), so offer a one-tap copy.
             if !showHistory, case .result(let entry) = controller.state {
@@ -151,10 +162,12 @@ struct MangaAiPopupView: View {
             .accessibilityLabel("Close translation")
         }
         .padding(16)
+        .disabled(previewEntry != nil)
     }
 
     /// The card title reflects the actual backend selected for this request.
     private var headerTitle: String {
+        if previewEntry != nil { return "Pre-translated" }
         if showHistory || controller.state == .browsingHistory { return "Translation history" }
         return controller.state.isOnDevice ? "On-device translation" : controller.activeBackendName
     }
@@ -163,6 +176,7 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private var currentBody: some View {
+        if let previewEntry { entryView(previewEntry) } else {
         switch controller.state {
         case .idle:
             EmptyView()
@@ -178,7 +192,7 @@ struct MangaAiPopupView: View {
                     controller.askLive()
                 } label: {
                     Label("Ask ChatGPT instead", systemImage: "sparkles")
-                        .font(.subheadline)
+                        .modifier(CardFont(style: .subheadline))
                 }
                 .buttonStyle(.bordered)
                 .padding(.top, 4)
@@ -192,6 +206,8 @@ struct MangaAiPopupView: View {
         }
     }
 
+    }
+
     /// Loading state. For the on-device path it shows "Translating on-device…" plus the live reply
     /// forming + a live tok/s counter (observed from `OfflineLlmManager.generationProgress`). The
     /// cloud path names the provider actually receiving the request.
@@ -203,14 +219,14 @@ struct MangaAiPopupView: View {
                 ProgressView()
                 VStack(alignment: .leading, spacing: 2) {
                     Text(onDevice ? "Translating on-device…" : "Asking \(controller.activeBackendName)…")
-                        .font(.subheadline)
+                        .modifier(CardFont(style: .subheadline))
                         .foregroundStyle(.secondary)
                     // Live tok/s while the on-device model generates, including hidden thinking
                     // tokens so private reasoning progress is visible without showing its text.
                     if let progress, progress.totalTokens > 0 {
                         Text(String(format: "⚡ %.1f tok/s · %d answer tokens · %d thinking tokens",
                                     progress.tokensPerSecond, progress.tokens, progress.thinkingTokens))
-                            .font(.caption2)
+                            .modifier(CardFont(style: .caption2))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -234,7 +250,7 @@ struct MangaAiPopupView: View {
         responseText(entry.response)
         if let debug = entry.debugInfo, !debug.isEmpty {
             Text(debug)
-                .font(.caption2)
+                .modifier(CardFont(style: .caption2))
                 .foregroundStyle(.secondary)
         }
     }
@@ -242,7 +258,7 @@ struct MangaAiPopupView: View {
     @ViewBuilder
     private func errorBody(_ message: String) -> some View {
         Text(message)
-            .font(.subheadline)
+            .modifier(CardFont(style: .subheadline))
             .foregroundStyle(.red)
         // The "missing API key" failure already points at Settings; retrying would fail the same
         // way, so only offer Retry for other errors.
@@ -255,7 +271,7 @@ struct MangaAiPopupView: View {
 
     private func bubbleHeader(_ text: String) -> some View {
         Text(text)
-            .font(.subheadline)
+            .modifier(CardFont(style: .subheadline))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -266,7 +282,7 @@ struct MangaAiPopupView: View {
     private var historyBody: some View {
         if historyEntries.isEmpty {
             Text("No translation history for this manga yet.")
-                .font(.subheadline)
+                .modifier(CardFont(style: .subheadline))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 24)
@@ -290,6 +306,7 @@ struct MangaAiPopupView: View {
     private func responseText(_ response: String) -> some View {
         let visible = AiThinkingTextSanitizer.strip(response)
         StructuredText(markdown: visible)
+            .modifier(CardFont(style: .body))
             .textual.structuredTextStyle(
                 HoshiMarkdownStyle(useUniformTextSize: settings.useUniformMarkdownTextSize)
             )
@@ -357,7 +374,7 @@ private struct ScreenshotThumbnail: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(alignment: .bottomTrailing) {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
-                .font(.caption2)
+                .modifier(CardFont(style: .caption2))
                 .padding(5)
                 .background(.ultraThinMaterial, in: Circle())
                 .padding(6)
