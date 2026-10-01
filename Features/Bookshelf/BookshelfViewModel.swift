@@ -27,6 +27,8 @@ class BookshelfViewModel {
     private var bookProgress: [UUID: Double] = [:]
     /// "p. X / Y" page labels for mokuro books, keyed by book id. EPUB books are absent.
     private var bookPageLabel: [UUID: String] = [:]
+    private(set) var pretranslatedBookIds: Set<UUID> = []
+    private var translationsTask: Task<Void, Never>?
     
     func loadBooks() {
         do {
@@ -34,8 +36,27 @@ class BookshelfViewModel {
             backfillMissingCovers()
             loadBookProgress()
             loadShelves()
+            loadTranslationBadges()
         } catch {
             showError(message: error.localizedDescription)
+        }
+    }
+
+    private func loadTranslationBadges() {
+        translationsTask?.cancel()
+        let ids = Set(books.map(\.id))
+        pretranslatedBookIds.formIntersection(ids)
+        guard let directory = try? BookStorage.getBooksDirectory() else { return }
+        let inputs = books.compactMap { book -> BookTranslationAvailability.Book? in
+            guard let folder = book.folder, let identity = syncId(for: book) else { return nil }
+            return .init(id: book.id, root: directory.appendingPathComponent(folder), syncId: identity)
+        }
+        translationsTask = Task { [weak self] in
+            let available = await Task.detached(priority: .utility) {
+                BookTranslationAvailability.shared.load(inputs)
+            }.value
+            guard !Task.isCancelled else { return }
+            self?.pretranslatedBookIds = available
         }
     }
 

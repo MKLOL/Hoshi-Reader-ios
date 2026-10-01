@@ -53,7 +53,7 @@ final class MangaReaderViewModel {
     private var resumeTracking = false
     private(set) var sessionCharacters = 0
     private(set) var textStatistics: [MangaTextStatistic] = []
-    var todayCharacters: Int { textStatistics.filter { $0.dateKey == MangaStatisticsTracker.dateKey(for: .now) }.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } }
+    var todayCharacters: Int { statistics?.textTotal(textStatistics) ?? 0 }
     var allTimeCharacters: Int { textStatistics.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } }
 
 
@@ -255,7 +255,8 @@ final class MangaReaderViewModel {
             useNotoSansJpFont: userConfig.mangaUseNotoSansJpFont,
             showActionButtons: userConfig.mangaShowActionButtons,
             selectionScript: Self.selectionScript,
-            showCopyButton: userConfig.mangaShowCopyButton
+            showCopyButton: userConfig.mangaShowCopyButton,
+            enlargeSmallText: userConfig.mangaEnlargeSmallText
         )
     }
 

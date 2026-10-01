@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import os
 import subprocess
@@ -46,14 +47,16 @@ class ServerProcess:
 
 
 def call(base: str, method: str, path: str, body: bytes | None = None, content_type: str | None = None,
-         token: str | None = TOKEN) -> tuple[int, dict, bytes]:
+         token: str | None = TOKEN, headers: dict | None = None) -> tuple[int, dict, bytes]:
     request = urllib.request.Request(base + path, data=body, method=method)
     if token is not None:
         request.add_header("Authorization", f"Bearer {token}")
     if content_type:
         request.add_header("Content-Type", content_type)
+    for name, value in (headers or {}).items():
+        request.add_header(name, value)
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, dict(response.headers), response.read()
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers), error.read()
@@ -77,6 +80,78 @@ class SyncTestServerContract(unittest.TestCase):
 
     def setUp(self) -> None:
         self.assertEqual(200, call_json(self.base, "POST", "/_test/reset")[0])
+
+    def test_single_byte_ranges_and_if_range_preserve_the_representation(self):
+        path = "/v1/kv/books/range/payload.zip"
+        body = b"0123456789"
+        _, _, raw = call(self.base, "PUT", path, body)
+        etag = json.loads(raw)["etag"]
+        for requested, expected, content_range in (
+            ("bytes=3-", b"3456789", "bytes 3-9/10"),
+            ("bytes=2-5", b"2345", "bytes 2-5/10"),
+            ("bytes=-3", b"789", "bytes 7-9/10"),
+            ("bytes=8-99", b"89", "bytes 8-9/10"),
+        ):
+            status, headers, chunk = call(self.base, "GET", path,
+                                           headers={"Range": requested, "If-Range": etag})
+            self.assertEqual(206, status)
+            self.assertEqual(expected, chunk)
+            self.assertEqual(content_range, headers["Content-Range"])
+            self.assertEqual(str(len(chunk)), headers["Content-Length"])
+            self.assertEqual(etag, headers["ETag"])
+        for validator in ("sha256:changed", "W/" + etag):
+            status, headers, chunk = call(self.base, "GET", path,
+                                           headers={"Range": "bytes=3-", "If-Range": validator})
+            self.assertEqual(200, status)
+            self.assertEqual(body, chunk)
+            self.assertNotIn("Content-Range", headers)
+        status, headers, _ = call(self.base, "HEAD", path, headers={"Range": "bytes=3-"})
+        self.assertEqual(200, status)
+        self.assertEqual("10", headers["Content-Length"])
+
+    def test_unsatisfiable_ranges_report_total_and_invalid_ranges_are_ignored(self):
+        path = "/v1/kv/books/range/payload.zip"
+        call(self.base, "PUT", path, b"0123456789")
+        for requested in ("bytes=10-", "bytes=20-30", "bytes=8-3", "bytes=-0"):
+            status, headers, _ = call(self.base, "GET", path, headers={"Range": requested})
+            self.assertEqual(416, status)
+            self.assertEqual("bytes */10", headers["Content-Range"])
+        for requested in ("nonsense", "bytes=1-2,4-5", "bytes=-"):
+            status, _, body = call(self.base, "GET", path, headers={"Range": requested})
+            self.assertEqual(200, status)
+            self.assertEqual(b"0123456789", body)
+
+    def test_interrupted_download_reports_actual_bytes_and_can_resume(self):
+        path = "/v1/kv/books/range/payload.zip"
+        call(self.base, "PUT", path, b"0123456789")
+        self.assertEqual(200, call_json(self.base, "POST", "/_test/download_next", {
+            "pathPrefix": path, "disconnectAfter": 4,
+        })[0])
+        with self.assertRaises(http.client.IncompleteRead) as caught:
+            call(self.base, "GET", path)
+        self.assertEqual(b"0123", caught.exception.partial)
+        status, _, remainder = call(self.base, "GET", path, headers={"Range": "bytes=4-"})
+        self.assertEqual(206, status)
+        self.assertEqual(b"456789", remainder)
+        _, log = call_json(self.base, "GET", "/_test/requests")
+        downloads = [r for r in log["requests"] if r["method"] == "GET"]
+        self.assertEqual([4, 6], [r["size"] for r in downloads])
+        self.assertEqual([None, "bytes=4-"], [r["range"] for r in downloads])
+
+    def test_download_faults_are_validated_finite_and_resettable(self):
+        path = "/v1/kv/books/range/payload.zip"
+        call(self.base, "PUT", path, b"0123456789")
+        for bad in ({"disconnectAfter": -1}, {"disconnectAfter": True}, {"count": 0},
+                    {"ignoreRange": "yes"}, {"chunkDelay": -1}, {"chunkDelay": True}, {"chunkDelay": float("nan")}, {"etag": "bad\r\nheader"}, {"contentRange": 3}):
+            self.assertEqual(400, call_json(self.base, "POST", "/_test/download_next",
+                                          {"pathPrefix": path, **bad})[0])
+        call_json(self.base, "POST", "/_test/download_next", {"pathPrefix": path, "ignoreRange": True})
+        self.assertEqual(200, call(self.base, "GET", path, headers={"Range": "bytes=3-"})[0])
+        self.assertEqual(206, call(self.base, "GET", path, headers={"Range": "bytes=3-"})[0])
+        call_json(self.base, "POST", "/_test/download_next", {"pathPrefix": path, "ignoreRange": True})
+        call_json(self.base, "POST", "/_test/reset")
+        call(self.base, "PUT", path, b"0123456789")
+        self.assertEqual(206, call(self.base, "GET", path, headers={"Range": "bytes=3-"})[0])
 
     # -- auth / validation -----------------------------------------------------------------
 

@@ -17,6 +17,7 @@ struct BackupView: View {
     @State private var target = ""
     @State private var isLoading = false
     @State private var loadingString = ""
+    @State private var operation: Task<Void, Never>?
     
     var body: some View {
         List {
@@ -62,12 +63,17 @@ struct BackupView: View {
                 restoreFolder(from: url, to: target)
             }
         }
+        .disabled(isLoading)
         .overlay {
             if isLoading {
                 LoadingOverlay(loadingString)
             }
         }
         .navigationTitle("Backup")
+        .onDisappear {
+            // The document mover owns the exported file until its completion/cancellation callback.
+            if !isExporting { operation?.cancel(); operation = nil; cleanup() }
+        }
     }
     
     private func backupFolder(folder: String) {
@@ -77,7 +83,8 @@ struct BackupView: View {
             isLoading = false
             return
         }
-        Task.detached {
+        operation?.cancel()
+        operation = Task.detached {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let archiveName = "\(folder)_\(formatter.string(from: Date())).hoshi"
@@ -92,7 +99,9 @@ struct BackupView: View {
                 return
             }
             
+            guard !Task.isCancelled else { try? FileManager.default.removeItem(at: tempURL); return }
             await MainActor.run {
+                guard !Task.isCancelled else { try? FileManager.default.removeItem(at: tempURL); return }
                 exportURL = tempURL
                 isLoading = false
                 isExporting = true
@@ -116,7 +125,8 @@ struct BackupView: View {
             url.stopAccessingSecurityScopedResource()
             return
         }
-        Task.detached {
+        operation?.cancel()
+        operation = Task.detached {
             defer { url.stopAccessingSecurityScopedResource() }
             let fm = FileManager.default
             // Unzip into a temp staging dir FIRST and only swap it into place if it fully succeeds.
@@ -131,7 +141,7 @@ struct BackupView: View {
             let staged = (try? fm.contentsOfDirectory(atPath: staging.path(percentEncoded: false))) ?? []
             let extractedSomething = staged.contains { !$0.hasPrefix(".") && $0 != "__MACOSX" }
             let restored: Bool
-            if ok && extractedSomething {
+            if ok && extractedSomething && !Task.isCancelled {
                 do {
                     try replaceRestoredFolder(staging: staging, destination: destination, fileManager: fm)
                     restored = true
@@ -146,16 +156,19 @@ struct BackupView: View {
                 if restored {
                     DictionaryManager.shared.loadDictionaries()
                     DictionaryManager.shared.rebuildLookupQuery()
+                    NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil)
                 }
             }
         }
     }
 }
 
-nonisolated private func replaceRestoredFolder(staging: URL, destination: URL, fileManager fm: FileManager) throws {
+nonisolated func replaceRestoredFolder(staging: URL, destination: URL, fileManager fm: FileManager) throws {
+    try Task.checkCancellation()
     try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
     let movedDestination = try moveExistingDestinationAside(destination: destination, fileManager: fm)
     do {
+        try Task.checkCancellation()
         try fm.moveItem(at: staging, to: destination)
         if let movedDestination {
             try? fm.removeItem(at: movedDestination)

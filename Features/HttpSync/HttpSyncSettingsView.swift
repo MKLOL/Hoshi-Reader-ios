@@ -17,6 +17,9 @@ struct HttpSyncSettingsView: View {
     @State private var manager = HttpSyncManager.shared
     @State private var tokenField: String = ""
     @State private var showErrorDetails = false
+    @State private var interrupted = HttpSyncDownloadCache.Summary()
+    @State private var cleaning = false
+    @State private var starting = false
 
     var body: some View {
         Form {
@@ -45,22 +48,41 @@ struct HttpSyncSettingsView: View {
 
             Section {
                 Button {
-                    Task { await manager.syncNow() }
+                    starting = true
+                    Task { await manager.syncNow(); starting = false }
                 } label: {
                     HStack {
                         Text("Sync now")
                         Spacer()
-                        if manager.isSyncing { ProgressView() }
+                        if manager.isSyncing || starting { ProgressView() }
                     }
                 }
-                .disabled(manager.isSyncing || !store.isConfigured)
+                .disabled(manager.isSyncing || starting || !store.isConfigured)
 
                 if manager.isSyncing, let progress = manager.progress {
-                    HttpSyncProgressView(progress: progress)
+                    HttpSyncProgressView(progress: progress, transfer: manager.transferProgress)
+                }
+                if manager.isSyncing || starting {
+                    Button("Cancel sync", role: .cancel) { manager.cancelSync() }
                 }
             } footer: {
                 statusFooter
             }
+
+            Section {
+                LabeledContent("Unused transfers", value: "\(interrupted.count)")
+                LabeledContent("Storage", value: ByteCountFormatter.string(fromByteCount: interrupted.bytes, countStyle: .file))
+                Button("Remove unused transfers", role: .destructive) {
+                    cleaning = true
+                    Task {
+                        _ = await manager.cleanInterruptedDownloads()
+                        interrupted = await manager.interruptedDownloadSummary()
+                        cleaning = false
+                    }
+                }
+                .disabled(cleaning || interrupted.count == 0)
+            } header: { Text("Interrupted downloads") }
+              footer: { Text("Interrupted books resume on the next sync. Active transfers are kept; unused transfers older than a week are removed automatically.") }
 
             if !manager.lastErrors.isEmpty {
                 Section {
@@ -77,6 +99,10 @@ struct HttpSyncSettingsView: View {
         .navigationTitle("HTTP Sync")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { tokenField = store.token }
+        .task { interrupted = await manager.interruptedDownloadSummary() }
+        .onChange(of: manager.isSyncing) { _, _ in
+            Task { interrupted = await manager.interruptedDownloadSummary() }
+        }
     }
 
     @ViewBuilder
@@ -94,6 +120,7 @@ struct HttpSyncSettingsView: View {
 
 struct HttpSyncProgressView: View {
     let progress: HttpSyncProgress
+    var transfer: HttpSyncTransferProgress? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -101,6 +128,10 @@ struct HttpSyncProgressView: View {
                 ProgressView(value: fraction)
             } else {
                 ProgressView().progressViewStyle(.linear)
+            }
+            if let transfer {
+                if let fraction = transfer.fraction { ProgressView(value: fraction) }
+                Text(transfer.label).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
             Text(progress.message)
                 .font(.subheadline)

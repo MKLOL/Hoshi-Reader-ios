@@ -12,8 +12,11 @@
 //
 
 import SwiftUI
+import Combine
 
 struct MangaStatisticsView: View {
+    @State private var now = Date.now
+    @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     let model: MangaReaderViewModel
     let userConfig: UserConfig
     @Environment(\.dismiss) private var dismiss
@@ -51,6 +54,8 @@ struct MangaStatisticsView: View {
                     statisticsSection(title: "All Time", stat: statistics.allTime, characters: model.allTimeCharacters)
                 }
             }
+            .id(ReadingDay.date(at: now, resetHour: resetHour))
+            .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now = $0 }
             .monospacedDigit()
             .onAppear {
                 // Refresh the snapshot so the displayed reading time reflects elapsed session time.

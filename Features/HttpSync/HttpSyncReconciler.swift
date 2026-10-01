@@ -148,6 +148,7 @@ struct HttpSyncReconciler {
         onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void = { _ in }
     ) async -> HttpSyncResult {
         var result = HttpSyncResult()
+        guard !Task.isCancelled else { return result }
 
         await onProgress(HttpSyncProgress(
             message: "Preparing sync",
@@ -156,10 +157,12 @@ struct HttpSyncReconciler {
         let inbound = await pullChangedKeys(sinceCursor: sinceCursor, into: &result, onProgress: onProgress)
         // A partial/failed listing is not a safe snapshot of the server. Do not push local state
         // against it: that could overwrite remote changes the failed listing never revealed.
+        guard !Task.isCancelled else { return result }
         if inbound.listingSucceeded {
             await pushAllLocal(into: &result, onProgress: onProgress)
         }
 
+        guard !Task.isCancelled else { return result }
         await onProgress(HttpSyncProgress(message: "Finishing sync", detail: "Saving the sync cursor."))
         result.newLastSyncedAt = safeNewCursor(currentCursor: sinceCursor, inbound: inbound)
         if result.newLastSyncedAt == sinceCursor { result.newLastSyncedAt = nil }
@@ -411,6 +414,7 @@ struct HttpSyncReconciler {
         var deletedSyncIds: Set<String> = []
         var placementMetadataKeys: [(ParsedBookKey, HttpSyncKvKeyMeta)] = []
         for (parsed, meta) in metadataKeys {
+            guard !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             do {
                 guard let remote = try await fetchRemoteMetadata(key: meta.key) else {
                     throw HttpSyncError("Metadata at \(meta.key): missing.")
@@ -484,6 +488,7 @@ struct HttpSyncReconciler {
             }
         }
         for (index, entry) in allManifests.enumerated() {
+            guard !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             let (meta, format) = entry
             guard let parsed = parseBookKey(meta.key) else { continue }
             await onProgress(HttpSyncProgress(
@@ -541,6 +546,7 @@ struct HttpSyncReconciler {
         // Pass 4: metadata shelf placement now that local roots exist.
         let shelfSnapshot = ShelfSnapshot.load()
         for (index, pair) in placementMetadataKeys.enumerated() {
+            guard !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             let (parsed, meta) = pair
             await onProgress(HttpSyncProgress(
                 message: "Applying bookshelf folders",
@@ -566,6 +572,7 @@ struct HttpSyncReconciler {
 
         // Pass 5: bookmarks and chats now find their local roots.
         for (index, pair) in bookmarksAndChats.enumerated() {
+            guard !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             let (parsed, meta) = pair
             await onProgress(HttpSyncProgress(
                 message: "Applying remote reading data",
@@ -602,6 +609,7 @@ struct HttpSyncReconciler {
         }
 
         for (id, root) in rootsBySyncId where !deletedSyncIds.contains(id) && !pendingTombstoneSyncIds.contains(id) {
+            guard !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             do {
                 try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas)
                 for key in ["books/\(id)/statistics", "books/\(id)/manga_statistics"] {
@@ -704,6 +712,8 @@ struct HttpSyncReconciler {
         } catch {
             throw HttpSyncError("Bookmark at \(meta.key): malformed JSON.")
         }
+        try Task.checkCancellation()
+        guard blob.isValid else { throw HttpSyncError("Bookmark at \(meta.key): invalid position or timestamp.") }
         let local = BookStorage.loadBookmark(root: root)
         var localModified: String? = nil
         if let lm = local?.lastModified { localModified = rfc3339(from: lm) }
@@ -1257,6 +1267,7 @@ struct HttpSyncReconciler {
                 shelfState.removeValue(forKey: syncId)
             }
             for (syncId, record) in pendingDeleted where !liveLocalSyncIds.contains(syncId) {
+            guard !Task.isCancelled else { return }
                 await onProgress(HttpSyncProgress(
                     message: "Uploading deleted book markers",
                     detail: record.title
@@ -1302,6 +1313,7 @@ struct HttpSyncReconciler {
         }
 
         for (index, book) in localBooks.enumerated() {
+            guard !Task.isCancelled else { return }
             do {
                 await onProgress(HttpSyncProgress(
                     message: "Uploading local book state",

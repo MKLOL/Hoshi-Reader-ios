@@ -91,8 +91,20 @@ nonisolated extension Statistics {
     static func merged(_ entries: [Statistics]) -> [Statistics] {
         var result: [String: Statistics] = [:]
         for entry in entries where entry.readingTime.isFinite && entry.readingTime >= 0 && entry.charactersRead >= 0 {
-            if let old = result[entry.key], old.lastStatisticModified > entry.lastStatisticModified ||
-                (old.lastStatisticModified == entry.lastStatisticModified && !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16)) { continue }
+            if let old = result[entry.key] {
+                if old.lastStatisticModified > entry.lastStatisticModified { continue }
+                if old.lastStatisticModified == entry.lastStatisticModified {
+                    // Old clients strip unknown fields. Otherwise-identical rows keep the richer
+                    // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
+                    if old.tieBreak == entry.tieBreak {
+                        let oldHours = old.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
+                        let newHours = entry.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
+                        let oldKeys = old.readingTimeByHour.keys.sorted().map { "\($0)=\(old.readingTimeByHour[$0]!)" }.joined(separator: ",")
+                        let newKeys = entry.readingTimeByHour.keys.sorted().map { "\($0)=\(entry.readingTimeByHour[$0]!)" }.joined(separator: ",")
+                        if oldHours > newHours || (oldHours == newHours && !oldKeys.utf16.lexicographicallyPrecedes(newKeys.utf16)) { continue }
+                    } else if !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16) { continue }
+                }
+            }
             result[entry.key] = entry
         }
         return result.values.sorted { $0.key < $1.key }
@@ -101,6 +113,7 @@ nonisolated extension Statistics {
         var total = empty(title: title, day: day)
         for entry in merged(entries) {
             total.readingTime = StatisticsNumbers.adding(total.readingTime, entry.readingTime)
+            total.readingTimeByHour = ReadingDay.sumHours([total.readingTimeByHour, entry.readingTimeByHour])
             total.charactersRead = StatisticsNumbers.adding(total.charactersRead, entry.charactersRead)
             total.lastStatisticModified = max(total.lastStatisticModified, entry.lastStatisticModified)
             if entry.minReadingSpeed > 0 { total.minReadingSpeed = total.minReadingSpeed == 0 ? entry.minReadingSpeed : min(total.minReadingSpeed, entry.minReadingSpeed) }
@@ -207,6 +220,13 @@ extension Notification.Name {
             if own?.readingTime == time && own?.charactersRead == count { continue }
             var row = total
             row.readingTime = time; row.charactersRead = count
+            if !total.readingTimeByHour.isEmpty && others.allSatisfy({ abs($0.readingTime - $0.readingTimeByHour.values.reduce(0, +)) < 0.001 }) {
+                row.readingTimeByHour = total.readingTimeByHour.mapValues { $0 }
+                for (hour, seconds) in otherTotals.readingTimeByHour {
+                    row.readingTimeByHour[hour] = max(0, (row.readingTimeByHour[hour] ?? 0) - seconds)
+                }
+            } else { row.readingTimeByHour = own?.readingTimeByHour ?? [:] }
+            if row.readingTimeByHour.values.reduce(0, +) > time + 0.001 { row.readingTimeByHour = [:] }
             row.lastReadingSpeed = StatisticsNumbers.speed(count: count, seconds: time)
             row.deviceId = device.id; row.deviceName = device.name
             row.lastStatisticModified = max(total.lastStatisticModified, StatisticsNumbers.nextStamp(own?.lastStatisticModified ?? 0))

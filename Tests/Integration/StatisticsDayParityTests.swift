@@ -1,0 +1,229 @@
+import XCTest
+import CryptoKit
+@testable import Hoshi_Reader
+
+nonisolated final class StatisticsDayParityTests: XCTestCase {
+    private var calendar: Calendar { var value = Calendar(identifier: .gregorian); value.timeZone = .current; return value }
+    private func date(_ day: String, _ hour: Int = 0, _ minute: Int = 0) -> Date {
+        calendar.date(bySettingHour: hour, minute: minute, second: 0, of: ReadingDay.parse(day, calendar: calendar)!)!
+    }
+    private func row(_ day: String, seconds: Double, count: Int = 10, hours: [String: Double] = [:], device: String = "phone", stamp: Int = 1) -> Statistics {
+        var result = Statistics.empty(title: "Fixture", day: day, device: ReadingDevice(id: device, name: device))
+        result.readingTime = seconds; result.charactersRead = count; result.readingTimeByHour = hours; result.lastStatisticModified = stamp
+        return result
+    }
+    private func directory() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+    func testNewSettingsDefaultToThreeAndMidnightRemainsAValidChoice() {
+        let suite = "StatisticsDayParityTests." + UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(ReadingDay.resetHour(defaults: defaults), 3)
+        defaults.set(0, forKey: ReadingDay.resetKey)
+        XCTAssertEqual(ReadingDay.resetHour(defaults: defaults), 0)
+        defaults.set(24, forKey: ReadingDay.resetKey)
+        XCTAssertEqual(ReadingDay.resetHour(defaults: defaults), 23)
+        XCTAssertEqual(ReadingDay.date(at: date("2026-10-01", 2, 59), resetHour: 3), date("2026-09-30"))
+        XCTAssertEqual(ReadingDay.date(at: date("2026-10-01", 3), resetHour: 3), date("2026-10-01"))
+    }
+    func testLegacyJSONAndAndroidHourEvidenceRoundTripWithoutLosingFields() throws {
+        let legacy = Data(#"{"title":"Fixture","dateKey":"2026-10-01","readingTime":600,"charactersRead":10}"#.utf8)
+        XCTAssertTrue(try JSONDecoder().decode(Statistics.self, from: legacy).readingTimeByHour.isEmpty)
+        let exact = row("2026-10-01", seconds: 600, hours: ["2026-10-01T01:00": 600])
+        let encoded = try JSONEncoder().encode(exact)
+        let decoded = try JSONDecoder().decode(Statistics.self, from: encoded)
+        XCTAssertEqual(decoded, exact)
+        XCTAssertEqual(ReadingDay.days(reading: [decoded], resetHour: 3).first?.date, date("2026-09-30"))
+        XCTAssertEqual(ReadingDay.streakHistory([decoded], resetHour: 3).days.first?.date, date("2026-09-30"))
+    }
+    func testEqualStampOlderClientsCannotStripMoreCompleteTimingEvidence() {
+        let exact = row("2026-10-01", seconds: 600, hours: ["2026-10-01T01:00": 600])
+        var stripped = exact; stripped.readingTimeByHour = [:]
+        XCTAssertEqual(Statistics.merged([exact, stripped]), [exact])
+        XCTAssertEqual(Statistics.merged([stripped, exact]), [exact])
+        var newer = stripped; newer.lastStatisticModified = 2
+        XCTAssertEqual(Statistics.merged([exact, newer]), [newer])
+    }
+    @MainActor func testAllBookHistoryDeviceLastReadAndTrendsUseOneReadingDay() {
+        let rows = [row("2026-09-30", seconds: 600, count: 100, hours: ["2026-09-30T22:00": 600]),
+                    row("2026-10-01", seconds: 900, count: 150, hours: ["2026-10-01T01:00": 900])]
+        let book = BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, contentType: .epub)
+        let summary = BookReadingSummary(book: book, reading: rows, mangaText: [], finished: false, resetHour: 3)
+        XCTAssertEqual(summary.days.count, 1)
+        XCTAssertEqual(summary.days[0].date, date("2026-09-30"))
+        XCTAssertEqual(summary.days[0].seconds, 1500)
+        XCTAssertEqual(summary.days[0].characters, 250)
+        XCTAssertEqual(summary.devices.first?.lastRead, date("2026-09-30"))
+        let points = ReadingTrends.series(values: [summary.days[0].date: 25], days: 1, now: date("2026-10-01", 1), resetHour: 3)
+        XCTAssertEqual(points[0].date, date("2026-09-30")); XCTAssertEqual(points[0].value, 25)
+        let overview = StatisticsOverview(); overview.books = [summary]
+        XCTAssertEqual(overview.days[0].seconds, 1500)
+        XCTAssertEqual(StatisticsMath.streak(overview.streakHistory.days, goalMinutes: 25, now: date("2026-10-01", 1), resetHour: 3).current, 1)
+        XCTAssertEqual(StatisticsMath.streak(overview.streakHistory.days, goalMinutes: 26, now: date("2026-10-01", 1), resetHour: 3).current, 0)
+    }
+    func testLegacyStreakIsOptimisticButDisplayedTotalsAreNeverDuplicated() {
+        let legacy = row("2026-10-01", seconds: 600, count: 19)
+        let history = ReadingDay.streakHistory([legacy], resetHour: 3)
+        XCTAssertTrue(history.estimated)
+        XCTAssertEqual(history.days.map(\.date), [date("2026-09-30"), date("2026-10-01")])
+        XCTAssertEqual(StatisticsMath.streak(history.days, goalMinutes: 10, now: date("2026-10-01", 4), resetHour: 3).current, 2)
+        let totals = ReadingDay.days(reading: [legacy], resetHour: 3)
+        XCTAssertEqual(totals.count, 1); XCTAssertEqual(totals[0].seconds, 600); XCTAssertEqual(totals[0].characters, 19)
+        XCTAssertFalse(ReadingDay.streakHistory([legacy], resetHour: 0).estimated)
+        XCTAssertEqual(ReadingDay.streakHistory([legacy], resetHour: 0).days.count, 1)
+    }
+    func testPartialUnknownTimingAndMangaCharactersKeepTotalsWithLargestRemainderRounding() {
+        let reading = [row("2026-10-01", seconds: 90, count: 3, hours: ["2026-10-01T01:00": 30, "2026-10-01T04:00": 30])]
+        let text = [MangaTextStatistic(dateKey: "2026-10-01", charactersRead: 7, deviceId: "phone")]
+        let days = ReadingDay.days(reading: reading, text: text, resetHour: 3)
+        XCTAssertEqual(days.map(\.seconds), [30, 60])
+        XCTAssertEqual(days.map(\.characters), [2, 5])
+        XCTAssertEqual(days.reduce(0) { $0 + $1.characters }, 7)
+        XCTAssertEqual(ReadingDay.days(reading: reading, resetHour: 3).map(\.characters), [1, 2])
+        let noTime = ReadingDay.days(reading: [], text: text, resetHour: 3)
+        XCTAssertEqual(noTime[0].date, date("2026-10-01")); XCTAssertEqual(noTime[0].characters, 7)
+    }
+    func testMidnightResetKeepsCalendarRowsAndMalformedHoursCannotInflateTotals() {
+        let crossing = row("2026-10-01", seconds: 60, hours: ["2026-09-30T23:00": 30, "2026-10-01T00:00": 30])
+        XCTAssertEqual(ReadingDay.days(reading: [crossing], resetHour: 0).map(\.date), [date("2026-10-01")])
+        let malformed = row("2026-10-01", seconds: 60, hours: ["2026-10-01T01:00": 600, "invalid": 30, "2020-01-01T01:00": 50])
+        let days = ReadingDay.days(reading: [malformed], resetHour: 3)
+        XCTAssertEqual(days.reduce(0) { $0 + $1.seconds }, 60)
+        XCTAssertEqual(days.map(\.date), [date("2026-09-30")])
+    }
+    func testTrackerRecordsBothHoursAcrossMidnightAndReadsLiveResetSetting() {
+        let start = date("2026-09-30", 23, 59), end = date("2026-10-01", 0, 1)
+        var tracker = MangaStatisticsTracker(title: "Fixture", initialStatistics: [], enabled: true, now: start, device: ReadingDevice(id: "phone", name: "Phone"))
+        tracker.start(currentPage: 0, now: start); tracker.pause(currentPage: 2, now: end)
+        let saved = tracker.statisticsForPersistence()!
+        XCTAssertEqual(saved.first { $0.dateKey == "2026-10-01" }?.readingTimeByHour, ["2026-09-30T23:00": 60, "2026-10-01T00:00": 60])
+        XCTAssertEqual(tracker.dayTotal(at: end, resetHour: 3).readingTime, 120)
+        XCTAssertEqual(tracker.dayTotal(at: date("2026-10-01", 3), resetHour: 3).readingTime, 0)
+        XCTAssertEqual(tracker.dayTotal(at: date("2026-10-01", 3), resetHour: 0).readingTime, 120)
+        XCTAssertEqual(tracker.allTime.readingTime, 120)
+        let text = [MangaTextStatistic(dateKey: "2026-10-01", charactersRead: 12, deviceId: "phone")]
+        XCTAssertEqual(tracker.textTotal(text, at: end, resetHour: 3), 12)
+        XCTAssertEqual(tracker.textTotal(text, at: date("2026-10-01", 3), resetHour: 3), 0)
+    }
+    func testISOHistoryKeepsGregorianDatesUnderOtherSystemCalendars() {
+        var buddhist = Calendar(identifier: .buddhist); buddhist.timeZone = calendar.timeZone
+        let expected = date("2026-10-01")
+        XCTAssertEqual(ReadingDay.parse("2026-10-01", calendar: buddhist), expected)
+        XCTAssertEqual(ReadingDay.key(expected, calendar: buddhist), "2026-10-01")
+        XCTAssertEqual(ReadingDay.hour("2026-10-01T01:00", calendar: buddhist)?.date, expected)
+        XCTAssertEqual(ReadingDay.days(reading: [row("2026-10-01", seconds: 60, hours: ["2026-10-01T01:00": 60])], resetHour: 3, calendar: buddhist).first?.date, date("2026-09-30"))
+    }
+    func testDSTBoundariesUseCalendarDaysAndRepeatedHourKeepsElapsedSeconds() {
+        var eastern = Calendar(identifier: .gregorian); eastern.timeZone = TimeZone(identifier: "America/New_York")!
+        let spring = ReadingDay.parse("2026-03-07", calendar: eastern)!, springNext = eastern.date(byAdding: .day, value: 1, to: spring)!
+        XCTAssertEqual(ReadingDay.boundary(on: springNext, resetHour: 3, calendar: eastern).timeIntervalSince(ReadingDay.boundary(on: spring, resetHour: 3, calendar: eastern)), 23 * 3600)
+        let fall = ReadingDay.parse("2026-10-31", calendar: eastern)!, fallNext = eastern.date(byAdding: .day, value: 1, to: fall)!
+        XCTAssertEqual(ReadingDay.boundary(on: fallNext, resetHour: 3, calendar: eastern).timeIntervalSince(ReadingDay.boundary(on: fall, resetHour: 3, calendar: eastern)), 25 * 3600)
+        let parser = ISO8601DateFormatter()
+        let start = parser.date(from: "2026-11-01T05:00:00Z")!, end = parser.date(from: "2026-11-01T07:00:00Z")!
+        XCTAssertEqual(ReadingDay.hours(from: start, to: end, calendar: eastern), ["2026-11-01T01:00": 7200])
+    }
+    @MainActor func testUsageTodayAndTrendCountsReadBothCalendarFilesAndChangeWithReset() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let log = UsageLog(directory: root)
+        func event(_ type: UsageEventType, _ time: Date, started: Date? = nil) -> UsageEvent {
+            UsageEvent(at: Int64(time.timeIntervalSince1970 * 1000), utcOffset: "+00:00", type: type, session: "s", bookTitle: "Fixture", startedAt: started.map { Int64($0.timeIntervalSince1970 * 1000) })
+        }
+        log.append(event(.lookup, date("2026-09-30", 23, 59)))
+        log.append(event(.lookup, date("2026-10-01", 1)))
+        log.append(event(.stopped, date("2026-10-01", 1), started: date("2026-09-30", 23, 59)))
+        let model = UsageStatisticsModel()
+        await model.reload(resetHour: 3, now: date("2026-10-01", 2), log: log)
+        XCTAssertEqual(model.today.date, date("2026-09-30")); XCTAssertEqual(model.today.lookups, 2)
+        XCTAssertEqual(model.today.spans.first?.seconds, 3660)
+        XCTAssertEqual(model.values(\.lookups)[date("2026-09-30")], 2)
+        await model.reload(resetHour: 0, now: date("2026-10-01", 2), log: log)
+        XCTAssertEqual(model.today.date, date("2026-10-01")); XCTAssertEqual(model.today.lookups, 1)
+        XCTAssertEqual(model.today.spans.first?.seconds, 3600)
+        XCTAssertEqual(model.values(\.lookups)[date("2026-09-30")], 1)
+    }
+    func testUsageHistoryResolvesSessionsOnceAndSplitsClosedAndInterruptedSpansAtReset() {
+        func event(_ type: UsageEventType, _ at: Date, session: String = "closed", word: String? = nil) -> UsageEvent {
+            UsageEvent(at: Int64(at.timeIntervalSince1970 * 1000), utcOffset: "+00:00", type: type, session: session,
+                       bookTitle: "Fixture", contentType: "manga", term: word, source: "page", outcome: "found")
+        }
+        let events = [
+            event(.started, date("2026-09-30", 2, 59)),
+            event(.lookup, date("2026-09-30", 23, 59), word: "猫"),
+            event(.lookup, date("2026-10-01", 1), word: "猫"),
+            event(.lookup, date("2026-10-01", 3), word: "犬"),
+            event(.stopped, date("2026-10-01", 3, 1)), // No startedAt: resolve from the prior day's start.
+            event(.started, date("2026-10-01", 3, 10), session: "interrupted"),
+            event(.page, date("2026-10-01", 3, 12), session: "interrupted")
+        ]
+        let first = date("2026-09-30"), second = date("2026-10-01")
+        let days = UsageDay.summarize(Array(events.reversed()), dates: [first, second], calendar: calendar, resetHour: 3)
+        XCTAssertEqual(days[first]?.lookups, 2); XCTAssertEqual(days[second]?.lookups, 1)
+        XCTAssertEqual(days[first]?.repeated.first?.word, "猫"); XCTAssertEqual(days[first]?.repeated.first?.count, 2)
+        XCTAssertTrue(days[second]!.repeated.isEmpty)
+        XCTAssertEqual(days[first]?.spans.map(\.seconds), [24 * 3600])
+        XCTAssertEqual(days[second]?.spans.map(\.seconds), [60, 120])
+        XCTAssertEqual(days[first]?.firstActivity, date("2026-09-30", 3))
+        XCTAssertEqual(days[second]?.pages, 1)
+        XCTAssertEqual(days[second]?.lastActivity, date("2026-10-01", 3, 12))
+    }
+    @MainActor func testExchangedHourEvidenceConvergesAndMissingTabletHistoryRecovers() async throws {
+        let phone = try directory(), tablet = try directory(); defer { try? FileManager.default.removeItem(at: phone); try? FileManager.default.removeItem(at: tablet) }
+        let original = [row("2026-09-30", seconds: 600, hours: ["2026-09-30T22:00": 600]), row("2026-10-01", seconds: 900, hours: ["2026-10-01T01:00": 900])]
+        try ReadingStatisticsStore.save(original, root: phone, scheduleSync: false)
+        let kv = DayParityKV(), sync = HttpReadingStatisticsSync(), key = "books/fixture/statistics"
+        try await sync.exchange(root: phone, syncId: "fixture", transport: kv)
+        let metadata = await kv.metadata(key)!
+        try await sync.exchange(root: tablet, syncId: "fixture", transport: kv, listing: [key: metadata])
+        func verify() {
+            let saved = ReadingStatisticsStore.reading(root: tablet)
+            XCTAssertEqual(saved, original)
+            XCTAssertEqual(ReadingDay.days(reading: saved, resetHour: 3).map(\.seconds), [1500])
+            XCTAssertFalse(ReadingDay.streakHistory(saved, resetHour: 3).estimated)
+        }
+        verify()
+        try FileManager.default.removeItem(at: tablet.appendingPathComponent(FileNames.statistics))
+        try await sync.exchange(root: tablet, syncId: "fixture", transport: kv, listing: [key: metadata])
+        verify()
+        let requests = await kv.requests
+        try await sync.exchange(root: tablet, syncId: "fixture", transport: kv, listing: [key: metadata])
+        let after = await kv.requests; XCTAssertEqual(after, requests)
+    }
+    @MainActor func testSameSizeSameStampRemoteEditAndListingAbsenceCannotLoseHistory() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let kv = DayParityKV(), sync = HttpReadingStatisticsSync(), key = "books/fixture/statistics"
+        let first = row("2026-10-01", seconds: 600)
+        try ReadingStatisticsStore.save([first], root: root, scheduleSync: false)
+        try await sync.exchange(root: root, syncId: "fixture", transport: kv)
+        let before = await kv.metadata(key)!
+        let updated = row("2026-10-01", seconds: 900, stamp: 2)
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(ReadingStatisticsBlob(syncId: "fixture", entries: [updated])))
+        let after = await kv.metadata(key)!
+        XCTAssertEqual(before.size, after.size); XCTAssertEqual(before.lastModified, after.lastModified); XCTAssertNotEqual(before.etag, after.etag)
+        try await sync.exchange(root: root, syncId: "fixture", transport: kv, listing: [key: after])
+        XCTAssertEqual(ReadingStatisticsStore.reading(root: root).first?.readingTime, 900)
+        let peer = row("2026-09-30", seconds: 300, device: "tablet")
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(ReadingStatisticsBlob(syncId: "fixture", entries: [updated, peer])))
+        try await sync.exchange(root: root, syncId: "fixture", transport: kv, listing: [:])
+        XCTAssertEqual(Statistics.total(ReadingStatisticsStore.reading(root: root)).readingTime, 1200)
+    }
+}
+
+private actor DayParityKV: HttpSyncKvTransport {
+    private var bodies: [String: Data] = [:]
+    var requests = 0
+    func metadata(_ key: String) -> HttpSyncKvKeyMeta? {
+        bodies[key].map { HttpSyncKvKeyMeta(key: key, lastModified: "2026-10-01T00:00:00Z", etag: "sha256:" + SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined(), size: $0.count) }
+    }
+    func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse { requests += 1; bodies[key] = body; return metadata(key)! }
+    func get(key: String) async throws -> HttpSyncKvFetched? {
+        requests += 1
+        return bodies[key].map { HttpSyncKvFetched(body: $0, contentType: "application/json", lastModified: "2026-10-01T00:00:00Z", etag: metadata(key)!.etag!) }
+    }
+    func putFile(key: String, contentType: String, fileURL: URL) async throws -> HttpSyncKvWriteResponse { try await put(key: key, contentType: contentType, body: Data(contentsOf: fileURL)) }
+    func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? { nil }
+    func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList { HttpSyncKvList(keys: bodies.keys.compactMap(metadata)) }
+    func delete(key: String) async throws { bodies[key] = nil }
+}

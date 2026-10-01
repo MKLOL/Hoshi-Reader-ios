@@ -225,6 +225,9 @@ class UserConfig {
         didSet { UserDefaults.standard.set(mangaScanNonJapaneseText, forKey: "mangaScanNonJapaneseText") }
     }
 
+    var mangaEnlargeSmallText: Bool {
+        didSet { UserDefaults.standard.set(mangaEnlargeSmallText, forKey: "mangaEnlargeSmallText") }
+    }
     var mangaShowCopyButton: Bool {
         didSet { UserDefaults.standard.set(mangaShowCopyButton, forKey: "mangaShowCopyButton") }
     }
@@ -415,6 +418,7 @@ class UserConfig {
         self.mangaSingleTapLookup = defaults.object(forKey: "mangaSingleTapLookup") as? Bool ?? false
         self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false
         self.mangaScanNonJapaneseText = defaults.object(forKey: "mangaScanNonJapaneseText") as? Bool ?? false
+        self.mangaEnlargeSmallText = defaults.object(forKey: "mangaEnlargeSmallText") as? Bool ?? true
         self.mangaShowCopyButton = defaults.bool(forKey: "mangaShowCopyButton")
         self.mangaShowActionButtons = defaults.object(forKey: "mangaShowActionButtons") as? Bool ?? true
 

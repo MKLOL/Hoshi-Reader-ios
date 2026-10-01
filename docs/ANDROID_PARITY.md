@@ -1,4 +1,33 @@
-# Android → iOS parity (September 2026)
+# Android → iOS parity (October 2026)
+
+Android target: `2cf591e0`, including 0.11.18–0.12.0 and the subsequent podcast transcript, sync, and reading-day fixes. iOS starting point: `980619f`. The September audit below remains the baseline.
+
+| Android changes | iOS behavior |
+| --- | --- |
+| `0d6524f4` | Original podcast recording with timed Japanese transcript; tap a timestamp to play there, tap a word to pause and open the reader's dictionary, following highlight, optional English, independent lesson/original resume positions. Bounded transcript validation precedes the background audio download. |
+| `a773b55e`, `5092583b`, `2cf591e0` | 1–120-minute streak goal and adjustable reading-day boundary, default 3am. Today, history, heatmaps, per-book/device days, reader sheets and usage/trends share the boundary. Android-compatible hourly evidence allows recalculation; uncertain old history receives optimistic streak credit without inflating displayed reading totals. |
+| `ca507c53`, `a88f3917` | Statistics preserve richer hourly evidence, compare ETags, re-read local changes around network awaits, and recover missing local history before an unchanged-sync fast return. Manual sync waits for an older background pass before making a fresh check. Server URL drafts and account-scoped cursors remain correct while editing. |
+| `0977fa16`, `78b17dca`, `0f6b3f80` | OS-owned background book downloads, durable resume checkpoints and verified archive reuse; MB/s and per-file ETA; cancellation; inactive interrupted-download cleanup; lazy pretranslation badges on novels, manga and collapsed shelves. |
+| `a15a0388`, `3231c87b` | Enlarge Small Text toggle for manga and a solo Translate action about 30% larger in area than a paired action. Existing native popup sizing and action clearance already provide the earlier tablet behavior. |
+| `7fed544a` | Live dictionary/translation card controls were already ported in iOS `980619f`. |
+| `a88f3917` remaining safety fixes | Strict AnkiConnect success/media responses and cancellation before backup restoration commits. Existing iOS atomic sidecars, content-derived media names, canonical Unicode equality, 64-bit TTU IDs, native literal filename handling and single EPUB parsing already supply the corresponding behavior. |
+| Android release/build/BOOX internals | APK signing/updating, WorkManager/UIDT plumbing and Android density policies do not transfer to iOS. iOS uses Foundation background URLSession/AVPlayer. The release regression gate is ported to `ship.sh` with a disposable simulator. |
+
+## Current verification
+
+Run `python3 tools/test_ios_parity.py` for the full regression gate with Xcode, Node.js and the pretranslation tool's `regex` Python dependency available. For an isolated Python setup, create `build/parity-python` with `python3 -m venv build/parity-python`, install `regex>=2024.5.15` there, then activate it before invoking the gate or `ship.sh`.
+
+The gate creates and deletes its own iPhone simulator, runs the KV server's contract tests, and runs all hosted XCTest cases against the real local server plus the existing Python/Swift/JavaScript regressions. It then requires the clickable podcast transcript UI scenario to pass. `ship.sh` invokes this gate before a version bump or archive. Direct integration-runner use requires an explicitly selected disposable simulator; missing prerequisites and omitted critical scenarios fail the gate.
+
+The new suites cover transcript validation and staged publication, actual authenticated background transcript/audio downloads, playback identities and seeks, native glyph taps and dictionary context, reading-day/DST and legacy data reconstruction, statistics recovery, book-transfer resume, badges, manga sizing, Anki responses and restore cancellation. A dedicated podcast XCUITest uses synthetic local content and exercises the actual timestamp, dictionary, English and follow controls.
+
+The complete gate passed: 19 KV-server contract tests, 92 regression checks (including the hosted runner), 132 hosted XCTest cases, and the required podcast UI scenario, with no failures or skips. The transcript UI scenario also passed separately on an iPad simulator; screenshots were inspected for both phone and tablet. Three agents reviewed different feature areas and cross-reviewed the implementation. Their download identity/account-isolation, retry, near-end seeking, restore notification, and test-gate findings were fixed before the final run.
+
+Physical-device suspension/relaunch and lock-screen audio still require a device check; simulator results do not claim to verify those OS conditions. Book downloads use the durable background session; multipart uploads retain the existing foreground session and brief background execution allowance.
+
+---
+
+# September 2026 baseline
 
 Android target: `8d099345` (0.11.17). iOS starting point: `0fc98d1`.
 The shared September 9 sync shortcut/zoom reset is the baseline. Earlier fork additions are also checked for missed ports.

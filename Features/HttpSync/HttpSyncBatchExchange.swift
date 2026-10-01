@@ -60,6 +60,9 @@ nonisolated struct HttpSyncMapChanges: Sendable {
     var uploadedBookmarks = 0
     var downloadedBookmarks = 0
     var observedLegacyEtags: [String: String] = [:]
+    // Reuse the map preflight's metadata to recover a lost local sidecar even when the
+    // library map is unchanged. Converged statistics still need no per-book requests.
+    var statisticsMetadata: [String: HttpSyncKvKeyMeta] = [:]
 }
 
 /// A logical bookmark map is physically sharded by installation. Each client only overwrites its
@@ -142,8 +145,8 @@ final class HttpSyncBatchState {
         let blob: HttpSyncBookmarkBlob
         do { blob = try decoder.decode(HttpSyncBookmarkBlob.self, from: fetched.body) }
         catch { throw HttpSyncError("Bookmark at \(key): malformed JSON.") }
-        guard let date = parseRfc3339(blob.lastModified) else {
-            throw HttpSyncError("Bookmark at \(key): invalid lastModified.")
+        guard blob.isValid, let date = parseRfc3339(blob.lastModified) else {
+            throw HttpSyncError("Bookmark at \(key): invalid position or lastModified.")
         }
         let remote = HttpSyncBookmarkMapEntry(
             etag: fetched.etag.isEmpty ? sha256Etag(fetched.body) : fetched.etag,
@@ -198,10 +201,14 @@ final class HttpSyncBatchState {
             return (meta.key, etag)
         }
         let legacyKeyEtags = Dictionary(uniqueKeysWithValues: legacyPairs)
+        let statisticsMetadata = Dictionary(uniqueKeysWithValues: listing.keys.filter {
+            $0.key.hasPrefix("books/") && ($0.key.hasSuffix("/statistics") || $0.key.hasSuffix("/manga_statistics"))
+        }.map { ($0.key, $0) })
         guard let booksMeta = listing.keys.first(where: { $0.key == httpSyncBooksMapKey }) else {
             return HttpSyncMapChanges(
                 needsBootstrap: true,
-                observedLegacyEtags: legacyKeyEtags
+                observedLegacyEtags: legacyKeyEtags,
+                statisticsMetadata: statisticsMetadata
             )
         }
         let bookmarkMetas = listing.keys.filter {
@@ -210,7 +217,8 @@ final class HttpSyncBatchState {
         guard !bookmarkMetas.isEmpty else {
             return HttpSyncMapChanges(
                 needsBootstrap: true,
-                observedLegacyEtags: legacyKeyEtags
+                observedLegacyEtags: legacyKeyEtags,
+                statisticsMetadata: statisticsMetadata
             )
         }
 
@@ -236,7 +244,7 @@ final class HttpSyncBatchState {
                 do {
                     let decoded = try decoder.decode([String: HttpSyncBookmarkMapEntry].self, from: fetched.body)
                     shards[meta.key] = decoded.filter { _, entry in
-                        entry.value == nil || parseRfc3339(entry.lastModified) != nil
+                        parseRfc3339(entry.lastModified) != nil && (entry.value?.isValid ?? true)
                     }
                 } catch {
                     throw HttpSyncError("A server bookmark-map shard is malformed.")
@@ -305,7 +313,8 @@ final class HttpSyncBatchState {
             otherChanged: legacyChangedBeforeWrites,
             uploadedBookmarks: uploaded,
             downloadedBookmarks: downloaded,
-            observedLegacyEtags: legacyKeyEtags
+            observedLegacyEtags: legacyKeyEtags,
+            statisticsMetadata: statisticsMetadata
         )
     }
 
@@ -432,7 +441,7 @@ final class HttpSyncBatchState {
         var applied = 0
         for (id, entry) in remote {
             if let localEntry = local[id], compareEntries(entry, localEntry) <= 0 { continue }
-            guard let blob = entry.value, let root = roots[id], let date = parseRfc3339(blob.lastModified) else { continue }
+            guard let blob = entry.value, blob.isValid, let root = roots[id], let date = parseRfc3339(blob.lastModified) else { continue }
             if let current = BookStorage.loadBookmark(root: root) {
                 var currentBlob = current.toBlob()
                 currentBlob.rev = HttpSyncRevisionStore.current(SyncKeys.bookmark(id)).localRev
@@ -462,8 +471,13 @@ final class HttpSyncBatchState {
         remote: [String: HttpSyncBookmarkMapEntry],
         local: [String: HttpSyncBookmarkMapEntry]
     ) -> [String: HttpSyncBookmarkMapEntry] {
-        var result = remote
-        for (id, entry) in local where result[id].map({ compareEntries(entry, $0) > 0 }) ?? true {
+        // Validate cached shards too: they may have been read by a version that accepted
+        // malformed positions, and must not suppress a valid entry from another device.
+        func valid(_ entry: HttpSyncBookmarkMapEntry) -> Bool {
+            parseRfc3339(entry.lastModified) != nil && (entry.value?.isValid ?? true)
+        }
+        var result = remote.filter { valid($0.value) }
+        for (id, entry) in local where valid(entry) && (result[id].map({ compareEntries(entry, $0) > 0 }) ?? true) {
             result[id] = entry
         }
         return result
@@ -476,8 +490,8 @@ final class HttpSyncBatchState {
     private func compareEntries(_ left: HttpSyncBookmarkMapEntry, _ right: HttpSyncBookmarkMapEntry) -> Int {
         let stamp = compareRfc3339(left.lastModified, right.lastModified)
         if stamp != 0 { return stamp }
-        let revision = (left.value?.rev ?? 0) - (right.value?.rev ?? 0)
-        if revision != 0 { return revision }
+        let leftRevision = left.value?.rev ?? 0, rightRevision = right.value?.rev ?? 0
+        if leftRevision != rightRevision { return leftRevision < rightRevision ? -1 : 1 }
         return left.etag == right.etag ? 0 : (left.etag < right.etag ? -1 : 1)
     }
 

@@ -17,6 +17,7 @@
 
 import Foundation
 import os
+import UIKit
 
 @Observable
 @MainActor
@@ -35,6 +36,9 @@ final class HttpSyncManager {
     /// actor as the reconciler streams `HttpSyncProgress` updates; drives the settings screen's
     /// linear progress bar + phase label. Mirrors Android's `SyncStatus.Running(progress)`.
     private(set) var progress: HttpSyncProgress?
+    private(set) var transferProgress: HttpSyncTransferProgress?
+    private var transferMeter = HttpSyncTransferMeter()
+    private var cancellationGeneration: UInt64 = 0
     /// One-line summary of the last successful reconcile, or nil if none yet.
     private(set) var lastStatus: String?
     /// Last fatal error string (e.g. not configured / transport build failure), or nil.
@@ -71,10 +75,38 @@ final class HttpSyncManager {
     /// Runs one full reconcile pass. Safe to call repeatedly; a concurrent call awaits the
     /// in-flight one. Never throws.
     func syncNow() async {
+        let generation = cancellationGeneration
+        // A manual refresh must inspect state that arrived after an older background snapshot.
+        if let previous = reconcileTask {
+            let previousID = reconcileTaskId
+            await previous.value
+            if reconcileTaskId == previousID { reconcileTask = nil; reconcileTaskId = nil }
+        }
         if let mapExchangeTask {
             _ = await mapExchangeTask.value
         }
+        guard generation == cancellationGeneration else { return }
         await beginReconcile(preflight: nil).value
+    }
+
+    func cancelSync() {
+        cancellationGeneration &+= 1
+        reconcileTask?.cancel()
+        mapExchangeTask?.cancel()
+        fullRetryAfter = Date().addingTimeInterval(60)
+        lastStatus = "Sync cancelled. Interrupted downloads can resume next time."
+        lastError = nil
+        lastErrors = []
+    }
+
+    func interruptedDownloadSummary() async -> HttpSyncDownloadCache.Summary {
+        guard let books = try? BookStorage.getBooksDirectory() else { return .init() }
+        return await HttpSyncBackgroundDownloads.shared.interruptedSummary(books: books)
+    }
+
+    func cleanInterruptedDownloads() async -> Int {
+        guard let books = try? BookStorage.getBooksDirectory() else { return 0 }
+        return await HttpSyncBackgroundDownloads.shared.cleanDownloads(books: books, olderThan: Date())
     }
 
     @discardableResult
@@ -112,10 +144,23 @@ final class HttpSyncManager {
             return
         }
         let config = settings.currentConfig()
+        let host = URLComponents(string: config.baseURL)?.host ?? ""
+        if !["localhost", "127.0.0.1", "::1", "[::1]"].contains(host),
+           NetworkReachability.shared.hasObservedPath, !NetworkReachability.shared.isOnline {
+            lastError = "No network — try again when you're back online."
+            return
+        }
         var cursor = settings.lastSyncedAt
 
         log.info("syncNow starting (cursor=\(cursor ?? "nil", privacy: .public))")
         isSyncing = true
+        transferMeter = HttpSyncTransferMeter()
+        // Gives the small reconciliation steps time to finish while background URLSession owns
+        // the long file transfer. Expiration ends this lease, never the OS-owned download.
+        var backgroundLease: UIBackgroundTaskIdentifier = .invalid
+        backgroundLease = UIApplication.shared.beginBackgroundTask(withName: "Book sync") {
+            if backgroundLease != .invalid { UIApplication.shared.endBackgroundTask(backgroundLease); backgroundLease = .invalid }
+        }
         lastError = nil
         progress = HttpSyncProgress(
             message: "Starting sync",
@@ -124,6 +169,12 @@ final class HttpSyncManager {
         defer {
             isSyncing = false
             progress = nil
+            transferProgress = nil
+            if backgroundLease != .invalid { UIApplication.shared.endBackgroundTask(backgroundLease) }
+            if Task.isCancelled {
+                lastError = nil; lastErrors = []
+                lastStatus = "Sync cancelled. Interrupted downloads can resume next time."
+            }
             // The shelf shortcut stays on Books while sync imports/removes titles and positions.
             NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil)
         }
@@ -135,10 +186,15 @@ final class HttpSyncManager {
         //
         // The reconciler streams phased progress through `onProgress`; we hop back onto the main
         // actor to update the @Observable `progress` so the settings screen's bar/label tracks it.
+        let operationID = reconcileTaskId
         let transport = HttpSyncWriteTrackingTransport(
-            base: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+            base: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token) { [weak self] sample in
+                Task { @MainActor in
+                    guard let self, self.isSyncing, self.reconcileTaskId == operationID else { return }
+                    self.transferProgress = self.transferMeter.update(sample, now: ProcessInfo.processInfo.systemUptime)
+                }
+            }
         )
-        let statisticsErrors = await HttpReadingStatisticsSync.shared.pushLocalChanges(transport: transport)
         let mapChanges: HttpSyncMapChanges
         if let preflight {
             mapChanges = preflight
@@ -147,13 +203,21 @@ final class HttpSyncManager {
                 mapChanges = try await batchState.syncMaps(transport: transport)
             } catch {
                 let message = error.localizedDescription
-                lastErrors = statisticsErrors + [message]
+                lastErrors = [message]
                 lastError = lastErrors.first
                 noteFullReconcileOutcome(errors: lastErrors)
                 log.error("map preflight failed: \(message, privacy: .public)")
                 return
             }
         }
+        guard !Task.isCancelled else { return }
+        // The metadata snapshot is also the availability index for statistics. Without it,
+        // an installed tablet with missing history and missing sync state can return here
+        // forever with an unchanged book map and an empty streak.
+        let statisticsErrors = await HttpReadingStatisticsSync.shared.pushLocalChanges(
+            transport: transport, listing: mapChanges.statisticsMetadata
+        )
+        guard !Task.isCancelled else { return }
         if mapChanges.needsBootstrap || mapChanges.booksChanged { cursor = nil }
         if statisticsErrors.isEmpty && !mapChanges.needsBootstrap && !mapChanges.booksChanged && !mapChanges.otherChanged {
             var result = HttpSyncResult()
@@ -163,6 +227,7 @@ final class HttpSyncManager {
             lastStatus = result.summary()
             notePushOutcome(success: true)
             noteFullReconcileOutcome(errors: [])
+            await cleanExpiredDownloads()
             log.info("syncNow done from maps: \(result.summary(), privacy: .public)")
             return
         }
@@ -183,11 +248,12 @@ final class HttpSyncManager {
 
         let reconciler = HttpSyncReconciler(transport: transport)
         var result = await reconciler.syncOnce(sinceCursor: cursor) { [weak self] update in
-            await MainActor.run { self?.progress = update }
+            await MainActor.run { self?.progress = update; self?.transferProgress = nil }
         }
         result.uploadedAppSettings = appSettingsOutcome.uploaded
         result.downloadedAppSettings = appSettingsOutcome.downloaded
         result.uploadedBookmarks += mapChanges.uploadedBookmarks
+        guard !Task.isCancelled else { return }
         result.downloadedBookmarks += mapChanges.downloadedBookmarks
         for error in statisticsErrors where !result.errors.contains(error) { result.errors.append(error) }
         if let error = appSettingsOutcome.error { result.errors.append(error) }
@@ -208,7 +274,7 @@ final class HttpSyncManager {
         }
 
         if let newCursor = result.newLastSyncedAt {
-            settings.lastSyncedAt = newCursor
+            settings.recordCursor(newCursor, for: config)
         }
         lastErrors = result.errors
         lastStatus = result.summary()
@@ -216,12 +282,19 @@ final class HttpSyncManager {
         if result.errors.isEmpty {
             // A successful reconcile proves the server is reachable — reopen the breaker.
             notePushOutcome(success: true)
+            await cleanExpiredDownloads()
             log.info("syncNow done: \(result.summary(), privacy: .public)")
         } else {
             lastError = result.errors.first
             log.error("syncNow finished with \(result.errors.count) error(s): \(result.summary(), privacy: .public)")
             for err in result.errors { log.error("syncNow error: \(err, privacy: .public)") }
         }
+    }
+
+    private func cleanExpiredDownloads() async {
+        guard let books = try? BookStorage.getBooksDirectory() else { return }
+        _ = await HttpSyncBackgroundDownloads.shared.cleanDownloads(books: books,
+            olderThan: Date().addingTimeInterval(-HttpSyncDownloadCache.retention))
     }
 
     private func noteFullReconcileOutcome(errors: [String]) {

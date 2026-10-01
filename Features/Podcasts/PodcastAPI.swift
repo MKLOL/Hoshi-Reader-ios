@@ -56,6 +56,12 @@ nonisolated struct PodcastAPI: PodcastServing {
     func catalogue(config: HttpSyncConfig) async throws -> PodcastCatalogue {
         try await get(PodcastCatalogue.self, config: config)
     }
+    func transcript(config: HttpSyncConfig, id: String) async throws -> PodcastTranscript {
+        guard PodcastRules.validID(id) else { throw PodcastHTTPError(status: 0, message: "Invalid podcast episode.") }
+        let value = try await get(PodcastTranscript.self, config: config, suffix: "/\(id)/transcript")
+        guard let transcript = value.validated(episodeID: id) else { throw PodcastHTTPError(status: 0, message: "The podcast transcript is invalid.") }
+        return transcript
+    }
     func prepare(config: HttpSyncConfig, id: String) async throws -> PodcastEpisode {
         guard PodcastRules.validID(id) else { throw PodcastHTTPError(status: 0, message: "Invalid podcast episode.") }
         return try await get(PodcastEpisode.self, config: config, suffix: "/\(id)/prepare", post: true)

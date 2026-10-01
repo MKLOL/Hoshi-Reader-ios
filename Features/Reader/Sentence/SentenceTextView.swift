@@ -43,12 +43,15 @@ struct SentenceTextView: UIViewRepresentable {
     let onTapOutside: () -> Void
     let onSwipeLeft: () -> Void
     let onSwipeRight: () -> Void
+    /// Transcript rows grow to fit their text; sentence mode keeps its full-height scrolling view.
+    var fitsContent = false
 
     /// Furigana are half the base size, as in the web reader.
     private static let rubySizeFactor: CGFloat = 0.5
 
     func makeUIView(context: Context) -> CenteringTextView {
         let view = CenteringTextView(usingTextLayoutManager: false)
+        view.isScrollEnabled = !fitsContent
         view.isEditable = false
         view.isSelectable = false
         view.backgroundColor = .clear
@@ -104,6 +107,11 @@ struct SentenceTextView: UIViewRepresentable {
         uiView.setNeedsLayout()
     }
 
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: CenteringTextView, context: Context) -> CGSize? {
+        guard fitsContent, let width = proposal.width, width > 0 else { return nil }
+        return uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     private func attributes(readingFont: UIFont) -> [NSAttributedString.Key: Any] {
@@ -144,11 +152,15 @@ struct SentenceTextView: UIViewRepresentable {
         }
 
         private func resolveTap(_ gesture: UITapGestureRecognizer) -> SentenceTap? {
-            guard let view = textView,
-                  let layoutManager = view.layoutManager as NSLayoutManager?,
+            guard let view = textView else { return nil }
+            return Self.resolveTap(in: view, at: gesture.location(in: view))
+        }
+
+        static func resolveTap(in view: UITextView, at location: CGPoint) -> SentenceTap? {
+            guard let layoutManager = view.layoutManager as NSLayoutManager?,
                   !view.text.isEmpty else { return nil }
             let container = view.textContainer
-            var point = gesture.location(in: view)
+            var point = location
             point.x -= view.textContainerInset.left
             point.y -= view.textContainerInset.top
 
@@ -160,6 +172,7 @@ struct SentenceTextView: UIViewRepresentable {
             )
             // A tap in the margin resolves to the nearest glyph, which would look like a hit on a
             // word the user never touched. Require the point to be inside the line it landed on.
+            guard glyphIndex < layoutManager.numberOfGlyphs else { return nil }
             let lineRect = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphIndex, effectiveRange: nil)
             guard lineRect.contains(point) else { return nil }
 

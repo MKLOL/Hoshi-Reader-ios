@@ -328,10 +328,14 @@ class AnkiManager {
                 let ext = media.path.split(separator: ".").last.map(String.init) ?? ""
                 let filename = "hoshi_dict_\(mediaData.sha1).\(ext)"
                 fields = fields.mapValues { $0.replacingOccurrences(of: media.filename, with: filename) }
-                _ = try? await ankiConnectRequest(action: "storeMediaFile", params: [
-                    "filename": filename,
-                    "data": mediaData.base64EncodedString()
-                ])
+                guard !mediaData.isEmpty else { return false }
+                do {
+                    let stored = try await ankiConnectRequest(action: "storeMediaFile", params: [
+                        "filename": filename,
+                        "data": mediaData.base64EncodedString()
+                    ])
+                    try AnkiConnectResponse.storedFilename(stored, expected: filename)
+                } catch { return false }
             }
             note["fields"] = fields
         }
@@ -342,7 +346,8 @@ class AnkiManager {
         }
         
         do {
-            _ = try await ankiConnectRequest(action: "addNote", params: ["note": note])
+            let result = try await ankiConnectRequest(action: "addNote", params: ["note": note])
+            _ = try AnkiConnectResponse.noteID(result)
             addWord(content["expression"] ?? "")
             LocalFileServer.shared.clearMedia()
             
@@ -629,14 +634,8 @@ class AnkiManager {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         request.timeoutInterval = 10
         
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        
-        if let error = json["error"] as? String {
-            throw AnkiConnectError.ankiconnectError(error)
-        }
-        
-        return json["result"]
+        let (data, response) = try await URLSession.shared.data(for: request)
+        return try AnkiConnectResponse.result(data: data, response: response)
     }
     
     private func mimeType(for path: String) -> String {

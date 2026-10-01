@@ -76,6 +76,7 @@ nonisolated private let httpSyncPayloadReplacementBackupPrefix = ".hoshi-sync-ba
 nonisolated private let httpSyncReplacementPreservedFiles = httpSyncPayloadExcludedFiles
     .subtracting([
         "bookinfo.json",
+        FileNames.generatedCover,
         httpSyncPayloadShaCacheFilename,
         httpSyncPayloadZipShaCacheFilename,
         ".payload.sha256.cache",
@@ -374,18 +375,36 @@ nonisolated struct HttpSyncPayloadCodec {
             )
         }
         let fileManager = FileManager.default
-        let zipURL = fileManager.temporaryDirectory.appendingPathComponent("hoshi-sync-download-\(UUID().uuidString).zip")
-        defer { try? fileManager.removeItem(at: zipURL) }
-
-        guard try await transport.downloadToFile(key: keys.zip, targetURL: zipURL) != nil else {
-            throw HttpSyncError("Payload zip missing for \(syncId) (manifest existed).")
+        let cache = HttpSyncDownloadCache.shared
+        let directory = cache.directory(books: targetDir.deletingLastPathComponent(), key: keys.zip, archiveSHA: manifest.sha256)
+        try cache.acquire(directory)
+        defer { cache.release(directory) }
+        let zipURL = directory.appendingPathComponent("payload.zip")
+        // A completed background transfer may have outlived its importing process. Verify its
+        // manifest before reuse; a new manifest gets a distinct checkpoint directory.
+        let complete = await Task.detached(priority: .utility) {
+            let size = (try? zipURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+            return Int64(size) == manifest.sizeBytes && (try? Self.sha256OfFile(zipURL)) == manifest.sha256
+        }.value
+        try Task.checkCancellation()
+        if !complete {
+            if fileManager.fileExists(atPath: zipURL.path) {
+                try? fileManager.removeItem(at: zipURL)
+                try? fileManager.removeItem(at: zipURL.appendingPathExtension("response"))
+            }
+            guard try await transport.downloadToFile(key: keys.zip, targetURL: zipURL) != nil else {
+                throw HttpSyncError("Payload zip missing for \(syncId) (manifest existed).")
+            }
         }
+        try Task.checkCancellation()
         // Offload sha verification + unzip so a large download never blocks the UI. Reference
         // FileManager.default inside the closure rather than capturing the local (non-Sendable)
         // instance, so the detached closure stays Sendable.
         try await Task.detached(priority: .utility) {
             let actualSha = try Self.sha256OfFile(zipURL)
-            if actualSha != manifest.sha256 {
+            let size = (try zipURL.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
+            if actualSha != manifest.sha256 || Int64(size) != manifest.sizeBytes {
+                try? FileManager.default.removeItem(at: directory)
                 throw HttpSyncError("Payload zip for \(syncId) failed sha256 check (expected \(manifest.sha256), got \(actualSha)).")
             }
             try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
@@ -395,9 +414,11 @@ nonisolated struct HttpSyncPayloadCodec {
                 throw HttpSyncError("Failed to unpack payload zip for \(syncId): \(error.localizedDescription)")
             }
         }.value
+        try Task.checkCancellation()
         let contentSha = try await Task.detached(priority: .utility) {
             try Self.contentSha(bookRoot: targetDir)
         }.value
+        try Task.checkCancellation()
         Self.writeCachedSha(bookRoot: targetDir, sha: contentSha)
         let verified = HttpSyncPayloadManifest(
             sha256: manifest.sha256,
@@ -414,6 +435,7 @@ nonisolated struct HttpSyncPayloadCodec {
             try await repairManifest(transport: transport, keys: keys, verifiedAgainst: fetchedManifest.body, verified: verified)
         }
         Self.writeZipSha(bookRoot: targetDir, sha: manifest.sha256)
+        try? fileManager.removeItem(at: directory)
         return verified
     }
 

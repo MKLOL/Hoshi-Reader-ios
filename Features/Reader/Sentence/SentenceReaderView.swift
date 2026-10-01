@@ -335,44 +335,9 @@ struct SentenceReaderView: View {
     }
 
     private func popupStack(screenSize: CGSize) -> some View {
-        ForEach($popups) { $popup in
-            let popupId = popup.id
-            PopupView(
-                userConfig: userConfig,
-                isVisible: $popup.showPopup,
-                selectionData: popup.currentSelection,
-                lookupResults: popup.lookupResults,
-                dictionaryStyles: popup.dictionaryStyles,
-                screenSize: screenSize,
-                isVertical: popup.isVertical,
-                isFullWidth: popup.isFullWidth,
-                coverURL: coverURL,
-                documentTitle: document.title,
-                clearSelection: popup.clearSelection,
-                onTextSelected: { selection in
-                    if let index = popups.firstIndex(where: { $0.id == popupId }) {
-                        closeChildPopups(parent: index)
-                    }
-                    return await handleTextSelection(selection)
-                },
-                onTapOutside: {
-                    if let index = popups.firstIndex(where: { $0.id == popupId }) {
-                        closeChildPopups(parent: index)
-                    }
-                },
-                onSwipeDismiss: {
-                    guard let index = popups.firstIndex(where: { $0.id == popupId }),
-                          popups.indices.contains(index) else { return }
-                    if index == 0 {
-                        dismissPopups()
-                    } else if popups.indices.contains(index - 1) {
-                        popups[index - 1].clearSelection.toggle()
-                        closeChildPopups(parent: index - 1)
-                    }
-                }
-            )
-            .zIndex(Double(100 + (popups.firstIndex(where: { $0.id == popupId }) ?? 0)))
-        }
+        NativeDictionaryPopupStack(userConfig: userConfig, popups: $popups, screenSize: screenSize,
+            coverURL: coverURL, documentTitle: document.title, onTextSelected: handleTextSelection,
+            onDismiss: dismissPopups, onCloseChildren: { closeChildPopups(parent: $0) })
     }
 
     /// The reader's lookup, minus the web view: same engine, same styles, same stacked popups.

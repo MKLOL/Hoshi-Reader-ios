@@ -16,7 +16,7 @@
 #   * the Swift `isMatchable` predicate equals `EpubTranslationStore.normalize`'s ICU character
 #     class on all 1,112,064 Unicode scalars (the predicate exists only because per-character
 #     NSRegularExpression is too slow);
-#   * `hoshi_pretranslate.epub.load_epub` on a real EPUB yields exactly the Swift segmenter's
+#   * `hoshi_pretranslate.epub.load_epub` on a generated EPUB yields exactly the Swift segmenter's
 #     (id, length, text) triples, chapter for chapter.
 #
 # Changing a vector means changing the tool and BOTH apps, or none of them.
@@ -247,10 +247,63 @@ RUBY_VECTORS = [
 
 MATCHABLE_COUNT_VECTORS = [("「今日は」", 1, 0), ("「今日は」", 3, 2), ("「今日は」", 99, 3)]
 
-DEMO_EPUB = Path(
-    "/private/tmp/claude-501/-Users-dragosristache-Hoshi-Reader-Android/"
-    "42c6980a-e211-49df-9a08-246fc648b285/scratchpad/sentence-demo.epub"
-)
+def write_synthetic_epub(path: Path) -> list[tuple[str, str]]:
+    """A complete, original-text EPUB; return its content documents in declared spine order."""
+    def document(body: str) -> str:
+        return (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja">'
+            '<head><title>Ignored chapter title</title></head>'
+            f'<body>{body}</body></html>'
+        )
+
+    chapters = [
+        ("Text/opening.xhtml", document(
+            '<h1>朝の散歩</h1><p><ruby>今日<rt>きょう</rt></ruby>は晴れ。'
+            '「外へ行こう！」</p><p>Ver. 2.5 を読む。</p>'
+        )),
+        ("Text/note.xhtml", document(
+            '<h2>覚え書き</h2><p>Ａ１とB2を比べる。<br/>次は何？</p>'
+        )),
+        ("Text/closing.xhtml", document(
+            '<h1>帰り道</h1><p>caf&#233; で&#160;休む。&#x3042;の文字。</p>'
+            f'<p>{CLAUSE}、{CLAUSE}、{CLAUSE}。</p><p>また明日。</p>'
+        )),
+    ]
+    container = '''<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>'''
+    package = '''<?xml version="1.0" encoding="utf-8"?>
+<package version="3.0" unique-identifier="book-id" xmlns="http://www.idpf.org/2007/opf">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="book-id">urn:hoshi:sentence-parity-fixture</dc:identifier>
+    <dc:title>Synthetic sentence parity</dc:title><dc:language>ja</dc:language>
+    <meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest>
+    <item id="closing" href="Text/closing.xhtml" media-type="application/xhtml+xml"/>
+    <item id="navigation" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="opening" href="Text/opening.xhtml" media-type="application/xhtml+xml"/>
+    <item id="note" href="Text/note.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="opening"/><itemref idref="note" linear="no"/><itemref idref="closing"/></spine>
+</package>'''
+    navigation = '''<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>Contents</title></head><body><nav epub:type="toc"><ol>
+<li><a href="Text/opening.xhtml">朝の散歩</a></li>
+<li><a href="Text/note.xhtml">覚え書き</a></li>
+<li><a href="Text/closing.xhtml">帰り道</a></li>
+</ol></nav></body></html>'''
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        archive.writestr("META-INF/container.xml", container)
+        archive.writestr("OEBPS/content.opf", package)
+        archive.writestr("OEBPS/nav.xhtml", navigation)
+        # Neither archive order nor manifest order may define sentence chapter addresses.
+        for href, html in reversed(chapters):
+            archive.writestr("OEBPS/" + href, html)
+    return chapters
 
 
 def _extract_braced(source: str, signature: str) -> str:
@@ -457,19 +510,25 @@ class SentenceSegmenterParityTest(unittest.TestCase):
                     total += length
                 self.assertEqual(len(normalized), total, "sentences must cover the whole chapter")
 
-    # MARK: the real book
+    # MARK: the complete EPUB path
 
-    @unittest.skipUnless(DEMO_EPUB.is_file(), f"fixture EPUB not present: {DEMO_EPUB}")
     def test_the_tool_and_the_app_agree_on_a_whole_epub(self):
-        book = tool_epub.load_epub(DEMO_EPUB, sync_id="sentence_demo")
+        fixture = self.workdir / "sentence-parity.epub"
+        chapters = write_synthetic_epub(fixture)
+        book = tool_epub.load_epub(fixture, sync_id="sentence_parity")
         self.assertEqual([], tool_epub.verify(book), "the fixture EPUB does not verify")
-        self.assertGreaterEqual(len(book.chapters), 2)
+        self.assertEqual("Synthetic sentence parity", book.title)
+        self.assertEqual(len(chapters), book.spine_count)
+        self.assertEqual(list(range(len(chapters))), [c.spine for c in book.chapters])
+        self.assertEqual([href for href, _ in chapters], [c.href for c in book.chapters],
+                         "spine order, including linear=no, defines sentence addresses")
 
-        with zipfile.ZipFile(DEMO_EPUB) as archive:
+        with zipfile.ZipFile(fixture) as archive:
             for chapter_data in book.chapters:
                 with self.subTest(chapter=chapter_data.spine):
-                    member = tool_epub._resolve_href("OEBPS", chapter_data.href)
-                    html = archive.read(member).decode("utf-8")
+                    href, original_html = chapters[chapter_data.spine]
+                    html = archive.read("OEBPS/" + href).decode("utf-8")
+                    self.assertEqual(original_html, html)
                     swift = [
                         (s["id"], s["length"], s["text"])
                         for s in self.swift_sentences(chapter_data.spine, html)

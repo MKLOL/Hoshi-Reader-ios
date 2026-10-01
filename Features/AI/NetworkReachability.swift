@@ -22,11 +22,12 @@ final class NetworkReachability {
 
     private let monitor = NWPathMonitor()
     private var isSatisfied = true
+    private(set) var hasObservedPath = false
 
     private init() {
         monitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
-            Task { @MainActor in self?.isSatisfied = satisfied }
+            Task { @MainActor in self?.isSatisfied = satisfied; self?.hasObservedPath = true }
         }
         monitor.start(queue: DispatchQueue(label: "hoshi.reachability"))
         // Seed synchronously from the current path. The first `pathUpdateHandler` callback lands on

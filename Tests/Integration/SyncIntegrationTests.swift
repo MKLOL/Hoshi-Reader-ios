@@ -192,6 +192,54 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.method == "PUT" && $0.path.hasSuffix(httpSyncBooksMapKey) }, "a failed statistics exchange must not acknowledge convergence")
     }
 
+    @MainActor
+    func testUnchangedBookMapRecoversMissingReadingAndMangaHistoryWithoutPayloadDownloads() async throws {
+        try await prepare()
+        let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        let readingKey = "books/\(Self.mangaSyncId)/statistics"
+        let textKey = "books/\(Self.mangaSyncId)/manga_statistics"
+        var reading = Statistics.empty(title: Self.mangaTitle, day: "2026-10-01", device: ReadingDevice(id: "phone", name: "Phone"))
+        reading.add(seconds: 900, count: 3, stamp: 1)
+        reading.readingTimeByHour = ["2026-10-01T01:00": 900]
+        let text = MangaTextStatistic(dateKey: "2026-10-01", charactersRead: 120, lastModified: 1, deviceId: "phone", deviceName: "Phone")
+        _ = try await client.put(key: readingKey, contentType: "application/json", body: JSONEncoder().encode(ReadingStatisticsBlob(syncId: Self.mangaSyncId, entries: [reading])))
+        _ = try await client.put(key: textKey, contentType: "application/json", body: JSONEncoder().encode(MangaStatisticsBlob(syncId: Self.mangaSyncId, entries: [text])))
+        await syncNow()
+        await syncNow()
+        let manga = try book(Self.mangaSyncId)
+        XCTAssertEqual(ReadingStatisticsStore.reading(root: manga.root), [reading])
+        XCTAssertEqual(ReadingStatisticsStore.text(root: manga.root), [text])
+
+        // Keep the installed book, migration marker and acknowledged map cache. Test both a
+        // lost history file and the broken-tablet case where its per-book sync state is gone too.
+        for loseSyncState in [false, true] {
+            for name in [FileNames.statistics, FileNames.mangaStatistics] {
+                try FileManager.default.removeItem(at: manga.root.appendingPathComponent(name))
+            }
+            if loseSyncState {
+                try FileManager.default.removeItem(at: manga.root.appendingPathComponent(HttpReadingStatisticsSync.stateFile))
+            }
+            try await clearServerRequests()
+            await syncNow()
+            XCTAssertEqual(ReadingStatisticsStore.reading(root: manga.root), [reading])
+            XCTAssertEqual(ReadingStatisticsStore.text(root: manga.root), [text])
+            let history = ReadingDay.streakHistory([reading], resetHour: 3)
+            let now = ReadingDay.parse("2026-10-01")!.addingTimeInterval(3600)
+            XCTAssertEqual(StatisticsMath.streak(history.days, goalMinutes: 10, now: now, resetHour: 3).current, 1)
+            let requests = try await serverRequests().filter { $0.path.hasPrefix("/v1/") }
+            XCTAssertEqual(requests.count, 3, "one metadata check and the two missing histories: \(requests)")
+            XCTAssertEqual(requests.filter { $0.method == "GET" && ($0.path.hasSuffix(readingKey) || $0.path.hasSuffix(textKey)) }.count, 2)
+            XCTAssertFalse(requests.contains { $0.path.hasSuffix(".zip") || $0.path.hasSuffix(".manifest") })
+
+            try await clearServerRequests()
+            await syncNow()
+            let unchanged = try await serverRequests().filter { $0.path.hasPrefix("/v1/") }
+            XCTAssertEqual(unchanged.count, 1, "converged histories add no per-book requests: \(unchanged)")
+            XCTAssertEqual(unchanged.first?.method, "GET")
+            XCTAssertFalse(unchanged.contains { $0.path.hasPrefix("/v1/kv/") })
+        }
+    }
+
     private struct LocalBook {
         let metadata: BookMetadata
         let root: URL

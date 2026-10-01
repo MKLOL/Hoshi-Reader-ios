@@ -5,6 +5,12 @@ import Observation
 @Observable @MainActor final class PodcastPlayback {
     static let shared = PodcastPlayback()
     private(set) var episode: PodcastEpisode?
+    private(set) var original = false
+    private let suppliedStore: PodcastStore?
+    private var store: PodcastStore { suppliedStore ?? .shared }
+    private var lastSavedPosition: Double?
+
+    init(store: PodcastStore? = nil) { suppliedStore = store }
     private let audioOwner = UUID()
     private(set) var playing = false {
         didSet { if !playing { LongFormAudioCoordinator.shared.end(owner: audioOwner) } }
@@ -28,23 +34,40 @@ import Observation
     private var commands: [(MPRemoteCommand, Any)] = []
     private var seekGeneration = 0
 
-    func play(_ episode: PodcastEpisode) {
-        let store = PodcastStore.shared
-        guard store.enabled, let account = store.account, let url = store.files.audio(account: account, id: episode.id), store.isDownloaded(episode.id) else {
-            error = "The downloaded lesson is missing. Download it again."; store.revision += 1; return
+    func isCurrent(_ episode: PodcastEpisode, account: String?, original: Bool) -> Bool {
+        self.account == account && self.episode?.id == episode.id && self.original == original
+    }
+    func play(_ episode: PodcastEpisode) { load(episode, original: false, autoplay: true) }
+    /// Opening a transcript prepares its saved original position without starting sound.
+    func prepareOriginal(_ episode: PodcastEpisode) {
+        guard !isCurrent(episode, account: store.account, original: true) || error != nil else { return }
+        load(episode, original: true, autoplay: false)
+    }
+    func playOriginal(_ episode: PodcastEpisode, from seconds: Double) {
+        prepareOriginal(episode)
+        guard isCurrent(episode, account: store.account, original: true), error == nil else { return }
+        seek(to: seconds)
+        if !playing { toggle() }
+    }
+    private func load(_ episode: PodcastEpisode, original: Bool, autoplay: Bool) {
+        guard store.enabled, let account = store.account,
+              let url = original ? store.files.originalAudio(account: account, id: episode.id) : store.files.audio(account: account, id: episode.id),
+              original ? store.isTranscriptDownloaded(episode.id) : store.isDownloaded(episode.id) else {
+            error = original ? "The downloaded transcript or original recording is missing. Download it again." : "The downloaded lesson is missing. Download it again."
+            store.revision += 1; return
         }
         stop()
-        self.episode = episode; self.account = account; error = nil
+        self.episode = episode; self.account = account; self.original = original; error = nil
         do {
-            LongFormAudioCoordinator.shared.begin(owner: audioOwner) { [weak self] in self?.pause() }
+            if autoplay { LongFormAudioCoordinator.shared.begin(owner: audioOwner) { [weak self] in self?.pause() } }
             let audio = AVAudioSession.sharedInstance()
             try audio.setCategory(.playback, mode: .spokenAudio)
-            try audio.setActive(true)
+            if autoplay { try audio.setActive(true) }
             let item = AVPlayerItem(url: url)
             let player = AVPlayer(playerItem: item)
             self.player = player
-            duration = max(0, episode.lessonDurationSeconds ?? 0)
-            let saved = store.files.position(account: account, id: episode.id)
+            duration = max(0, original ? (store.transcript(episode.id)?.duration ?? Double(episode.durationSeconds)) : (episode.lessonDurationSeconds ?? 0))
+            let saved = store.files.position(account: account, id: episode.id, original: original)
             position = saved < 0 || (duration > 0 && saved >= duration - 1) ? 0 : saved
             observer = item.observe(\.status, options: [.new, .initial]) { [weak self] item, _ in
                 Task { @MainActor in
@@ -54,12 +77,12 @@ import Observation
                     self.updateNowPlaying()
                 }
             }
-            ticker = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 600), queue: .main) { [weak self] time in
+            ticker = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.2, preferredTimescale: 600), queue: .main) { [weak self] time in
                 Task { @MainActor in
                     guard let self, self.player === player, !self.seeking, !self.ended, time.seconds.isFinite else { return }
                     self.position = max(0, time.seconds)
                     if item.duration.seconds.isFinite { self.duration = max(0, item.duration.seconds) }
-                    self.savePosition(); self.updateNowPlaying()
+                    self.savePosition(periodic: true); self.updateNowPlaying()
                 }
             }
             finished = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
@@ -96,16 +119,18 @@ import Observation
                 if note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { Task { @MainActor in self?.pause() } }
             }
             nowPlayingSession = MPNowPlayingSession(players: [player])
-            nowPlayingSession?.becomeActiveIfPossible()
+            if autoplay { nowPlayingSession?.becomeActiveIfPossible() }
             installCommands()
             seek(to: position)
-            playing = true; player.playImmediately(atRate: speed); updateNowPlaying()
+            playing = autoplay
+            if autoplay { player.playImmediately(atRate: speed) }
+            updateNowPlaying()
         } catch { self.error = PodcastRules.display(error.localizedDescription); playing = false }
     }
     func toggle() {
         if playing { pause() } else {
-            if let episode, error != nil || ended || (duration > 0 && position >= duration - 1) { play(episode); return }
-            guard player != nil, PodcastStore.shared.enabled, PodcastStore.shared.account == account else { return }
+            if let episode, error != nil || ended { load(episode, original: original, autoplay: true); return }
+            guard player != nil, store.enabled, store.account == account else { return }
             LongFormAudioCoordinator.shared.begin(owner: audioOwner) { [weak self] in self?.pause() }
             try? AVAudioSession.sharedInstance().setActive(true)
             nowPlayingSession?.becomeActiveIfPossible()
@@ -137,13 +162,16 @@ import Observation
         for token in [finished, failed, interrupted, routeChanged].compactMap({ $0 }) { NotificationCenter.default.removeObserver(token) }
         finished = nil; failed = nil; interrupted = nil; routeChanged = nil
         for (command, token) in commands { command.removeTarget(token) }; commands = []
-        player = nil; episode = nil; account = nil; playing = false; position = 0; duration = 0
+        player = nil; episode = nil; account = nil; original = false; playing = false; position = 0; duration = 0; error = nil; lastSavedPosition = nil
         nowPlayingSession?.nowPlayingInfoCenter.nowPlayingInfo = nil
         nowPlayingSession = nil; seeking = false; ended = false; resumeAfterInterruption = false; seekGeneration += 1
     }
-    private func savePosition() {
+    private func savePosition(periodic: Bool = false) {
         guard let account, let episode else { return }
-        PodcastStore.shared.files.savePosition(position, account: account, id: episode.id)
+        // Highlight at word cadence without rewriting positions.json five times per second.
+        if periodic, let lastSavedPosition, abs(position - lastSavedPosition) < 5 { return }
+        store.files.savePosition(position, account: account, id: episode.id, original: original)
+        lastSavedPosition = position
     }
     private func updateNowPlaying() {
         guard let episode else { return }

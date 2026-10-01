@@ -13,6 +13,8 @@ nonisolated struct PodcastEpisode: Codable, Identifiable, Equatable, Sendable {
     var failureCount = 0
     var show = ""
     var retryable = true
+    var transcript = false
+    var uploaded = false
     func needsAdministrator(maxFailures: Int?) -> Bool {
         status == "failed" && (!retryable || maxFailures.map { failureCount >= $0 } == true)
     }
@@ -31,6 +33,8 @@ nonisolated extension PodcastEpisode {
         failureCount = try c.decodeIfPresent(Int.self, forKey: .failureCount) ?? 0
         show = try c.decodeIfPresent(String.self, forKey: .show) ?? ""
         retryable = try c.decodeIfPresent(Bool.self, forKey: .retryable) ?? true
+        transcript = try c.decodeIfPresent(Bool.self, forKey: .transcript) ?? false
+        uploaded = try c.decodeIfPresent(Bool.self, forKey: .uploaded) ?? false
     }
 }
 nonisolated struct PodcastShow: Codable, Identifiable, Equatable, Sendable {

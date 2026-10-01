@@ -38,7 +38,7 @@ struct BookCell: View {
                 onSelect()
             }
         } label: {
-            BookView(book: book, progress: viewModel.progress(for: book), pageLabel: viewModel.pageLabel(for: book), isSelected: isSelecting && isSelected)
+            BookView(book: book, progress: viewModel.progress(for: book), pageLabel: viewModel.pageLabel(for: book), isSelected: isSelecting && isSelected, hasPretranslations: viewModel.pretranslatedBookIds.contains(book.id))
         }
         .buttonStyle(.plain)
         .contextMenu(isSelecting ? nil : ContextMenu {

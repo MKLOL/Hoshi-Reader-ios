@@ -9,9 +9,9 @@
 # Requires Xcode with an available iPhone simulator. Set HOSHI_IOS_SIMULATOR to a device name to
 # pick a specific one, HOSHI_DERIVED_DATA to reuse a derived-data directory (default build/DD-sim).
 #
-# WARNING: the scenarios simulate fresh installs, so they WIPE the app's book library and sync
-# settings on the simulator they run on. Without HOSHI_IOS_SIMULATOR the runner therefore picks a
-# shut-down device, never one that is currently booted.
+# WARNING: the scenarios simulate fresh installs and WIPE their simulator's app library/settings.
+# Use tools/test_ios_parity.py to create a dedicated disposable simulator automatically.
+# Direct invocation requires HOSHI_IOS_SIMULATOR to name an explicitly disposable device.
 
 import json
 import os
@@ -45,13 +45,10 @@ def runtime_version(runtime: str) -> tuple[int, ...]:
 
 
 def pick_simulator() -> str | None:
-    """The simulator to test on.
-
-    `HOSHI_IOS_SIMULATOR` names one explicitly. Otherwise prefer a SHUT DOWN iPhone on the newest
-    runtime: the suite wipes the app's library and sync settings on whichever device it runs on,
-    so it must never grab the simulator a developer is using right now.
-    """
+    """Require explicit selection; a shut-down simulator may still hold the user's library."""
     wanted = os.environ.get("HOSHI_IOS_SIMULATOR")
+    if not wanted:
+        return None
     listing = json.loads(subprocess.run(
         ["xcrun", "simctl", "list", "devices", "available", "-j"], check=True, capture_output=True, text=True
     ).stdout)
@@ -123,7 +120,7 @@ class IosSyncIntegration(unittest.TestCase):
     def test_production_sync_stack_against_real_server(self):
         self.assertTrue(CORPUS.is_file(), f"missing {CORPUS}")
         simulator = pick_simulator()
-        self.assertIsNotNone(simulator, "no available iPhone simulator (xcrun simctl list devices available)")
+        self.assertIsNotNone(simulator, "Run python3 tools/test_ios_parity.py, or set HOSHI_IOS_SIMULATOR to a disposable iPhone simulator")
         server = ServerProcess()
         try:
             server.call("POST", "/_test/load", CORPUS.read_bytes())
@@ -165,6 +162,29 @@ class IosSyncIntegration(unittest.TestCase):
             executed = [line for line in interesting if "Test Case" in line and "passed" in line]
             self.assertGreaterEqual(len(executed), 5, f"expected the sync scenarios to run, saw:\n{summary}")
             self.assertNotIn("skipped", " ".join(interesting).lower(), f"scenarios must not skip:\n{summary}")
+            # Other feature tests also produce HTTP traffic. Require the critical production
+            # manager/download scenarios themselves so a target-membership regression fails.
+            required = {
+                "SyncIntegrationTests": [
+                    "testFreshInstallSyncsEverythingAndroidPublished",
+                    "testResyncTransfersNothingAndLeavesTheServerAlone",
+                    "testBookmarkTurnedOnThisDeviceSurvivesAFreshInstall",
+                    "testCorruptStatisticsDoNotBlockBookmarkOrSettingsSync",
+                    "testUnchangedBookMapRecoversMissingReadingAndMangaHistoryWithoutPayloadDownloads",
+                ],
+                "HttpSyncTransferTests": [
+                    "testNativeBackgroundDownloadCancelsResumesAndPreservesExactBytes",
+                    "testTruncatedBackgroundDownloadRecoversWithoutInstallingPartialData",
+                ],
+                "PodcastTranscriptHTTPTests": [
+                    "testTranscriptChainRejectsInvalidTextBeforeAudioAndPublishesBothDownloads",
+                ],
+            }
+            for suite, methods in required.items():
+                for method in methods:
+                    self.assertTrue(any(suite in line and method in line for line in executed),
+                                    f"Critical scenario did not pass: {suite}/{method}\n{summary}")
+
 
             # The simulator really talked to this server with the production client.
             requests = json.loads(server.call("GET", "/_test/requests"))["requests"]

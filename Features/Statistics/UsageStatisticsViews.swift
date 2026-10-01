@@ -44,9 +44,10 @@ struct StatisticsTrendsSections: View {
     let reading: [DailyReading]
     let usage: UsageStatisticsModel
     @State private var days = 30
+    @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     private func series(_ values: [Date: Double], denominator: [Date: Double]? = nil, local: Bool = false) -> [ReadingTrendPoint] {
         if local && usage.firstDay == nil { return [] }
-        return ReadingTrends.series(values: values, denominators: denominator, days: days, since: local ? usage.firstDay : nil)
+        return ReadingTrends.series(values: values, denominators: denominator, days: days, since: local ? usage.firstDay : nil, resetHour: resetHour)
     }
     var body: some View {
         Section {

@@ -433,6 +433,10 @@ struct MangaReaderView: View {
             model.closePopups()
             model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
         }
+        .onChange(of: userConfig.mangaEnlargeSmallText) { _, _ in
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+        }
         .onChange(of: userConfig.mangaShowCopyButton) { _, _ in
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
         }

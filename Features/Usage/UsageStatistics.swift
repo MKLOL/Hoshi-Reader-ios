@@ -15,15 +15,36 @@ nonisolated struct UsageDay {
     var spans: [UsageSpan] = []
     var firstActivity: Date?
     var lastActivity: Date?
-    static func summarize(_ events: [UsageEvent], date: Date, calendar: Calendar = .current) -> Self {
-        let start = calendar.startOfDay(for: date), end = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))!
-        var result = Self(date: start)
+    static func summarize(_ events: [UsageEvent], date: Date, calendar: Calendar = .current, resetHour: Int = 0) -> Self {
+        let day = calendar.startOfDay(for: date)
+        return summarize(events, dates: [day], calendar: calendar, resetHour: resetHour)[day] ?? Self(date: day)
+    }
+
+    /// Resolve sessions and order events once for the whole history. Only a span crossing a
+    /// reading-day boundary is split; a large usage log is never rescanned for every chart day.
+    static func summarize(_ events: [UsageEvent], dates: [Date], calendar: Calendar = .current, resetHour: Int = 0) -> [Date: Self] {
+        let dates = Set(dates.map { calendar.startOfDay(for: $0) }).sorted()
+        guard let first = dates.first, let lastDay = dates.last else { return [:] }
+        var result = Dictionary(uniqueKeysWithValues: dates.map { ($0, Self(date: $0)) })
+        let start = ReadingDay.boundary(on: first, resetHour: resetHour, calendar: calendar)
+        let end = ReadingDay.boundary(on: calendar.date(byAdding: .day, value: 1, to: lastDay)!, resetHour: resetHour, calendar: calendar)
         let ordered = events.sorted { $0.at < $1.at }
         var opened: [String: UsageEvent] = [:], last: [String: Date] = [:]
-        var words: [String: (Int, Int)] = [:]
+        var words: [Date: [String: (Int, Int)]] = [:]
         func addSpan(from: Date, to: Date, event: UsageEvent) {
             let a = max(start, from), b = min(end, to)
-            if b > a { result.spans.append(UsageSpan(start: a, end: b, title: event.bookTitle ?? "Untitled", session: event.session ?? "")) }
+            guard b > a else { return }
+            var day = ReadingDay.date(at: a, resetHour: resetHour, calendar: calendar)
+            while day <= lastDay {
+                let next = calendar.date(byAdding: .day, value: 1, to: day)!
+                let spanStart = max(a, ReadingDay.boundary(on: day, resetHour: resetHour, calendar: calendar))
+                let spanEnd = min(b, ReadingDay.boundary(on: next, resetHour: resetHour, calendar: calendar))
+                if spanEnd > spanStart, result[day] != nil {
+                    result[day]!.spans.append(UsageSpan(start: spanStart, end: spanEnd, title: event.bookTitle ?? "Untitled", session: event.session ?? ""))
+                }
+                if spanEnd >= b { break }
+                day = next
+            }
         }
         for (index, event) in ordered.enumerated() {
             let session = event.session ?? "", at = event.date
@@ -33,27 +54,36 @@ nonisolated struct UsageDay {
                 let began = event.startedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? opened[session]?.date ?? at
                 opened[session] = nil; addSpan(from: began, to: at, event: event)
             }
-            guard at >= start, at < end else { continue }
-            result.firstActivity = result.firstActivity ?? at
-            result.lastActivity = at
+            let day = ReadingDay.date(at: at, resetHour: resetHour, calendar: calendar)
+            guard at >= start, at < end, var summary = result[day] else { continue }
+            summary.firstActivity = summary.firstActivity ?? at
+            summary.lastActivity = at
             switch event.type {
-            case .opened: result.sessions += 1
-            case .page: if event.source != "jump" { result.pages += 1 }
+            case .opened: summary.sessions += 1
+            case .page: if event.source != "jump" { summary.pages += 1 }
             case .lookup:
-                result.lookups += 1
-                if event.contentType == "manga", event.source == "page" { result.mangaLookups += 1 }
-                if event.outcome != "not-found", let word = event.term ?? event.text, !word.isEmpty { words[word] = ((words[word]?.0 ?? 0) + 1, index) }
-            case .revealed: result.revealed += 1
-            case .translated: result.translated += 1
-            case .screenshot: result.screenshots += 1
-            case .copied: result.copied += 1
+                summary.lookups += 1
+                if event.contentType == "manga", event.source == "page" { summary.mangaLookups += 1 }
+                if event.outcome != "not-found", let word = event.term ?? event.text, !word.isEmpty {
+                    let count = (words[day]?[word]?.0 ?? 0) + 1
+                    words[day, default: [:]][word] = (count, index)
+                }
+            case .revealed: summary.revealed += 1
+            case .translated: summary.translated += 1
+            case .screenshot: summary.screenshots += 1
+            case .copied: summary.copied += 1
             default: break
             }
+            result[day] = summary
         }
         for (session, event) in opened { addSpan(from: event.date, to: last[session] ?? event.date, event: event) }
-        result.spans.sort { $0.start < $1.start }
-        if let spanStart = result.spans.first?.start { result.firstActivity = min(result.firstActivity ?? spanStart, spanStart) }
-        result.repeated = words.filter { $0.value.0 > 1 }.sorted { $0.value.0 == $1.value.0 ? $0.value.1 > $1.value.1 : $0.value.0 > $1.value.0 }.prefix(5).map { ($0.key, $0.value.0) }
+        for day in dates {
+            var summary = result[day]!
+            summary.spans.sort { $0.start < $1.start }
+            if let spanStart = summary.spans.first?.start { summary.firstActivity = min(summary.firstActivity ?? spanStart, spanStart) }
+            summary.repeated = (words[day] ?? [:]).filter { $0.value.0 > 1 }.sorted { $0.value.0 == $1.value.0 ? $0.value.1 > $1.value.1 : $0.value.0 > $1.value.0 }.prefix(5).map { ($0.key, $0.value.0) }
+            result[day] = summary
+        }
         return result
     }
 }
@@ -66,8 +96,8 @@ nonisolated struct ReadingTrendPoint: Identifiable {
 }
 nonisolated enum ReadingTrends {
     /// A ratio's average is the ratio of the window sums, never an average of daily ratios.
-    static func series(values: [Date: Double], denominators: [Date: Double]? = nil, days: Int, since: Date? = nil, now: Date = .now) -> [ReadingTrendPoint] {
-        let calendar = Calendar.current, today = Calendar.current.startOfDay(for: now)
+    static func series(values: [Date: Double], denominators: [Date: Double]? = nil, days: Int, since: Date? = nil, now: Date = .now, resetHour: Int = 0, calendar: Calendar = .current) -> [ReadingTrendPoint] {
+        let today = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         guard days > 0 else { return [] }
         return (0..<days).reversed().compactMap { offset in
             let date = calendar.date(byAdding: .day, value: -offset, to: today)!
@@ -91,18 +121,27 @@ nonisolated enum ReadingTrends {
     var today = UsageDay(date: Calendar.current.startOfDay(for: .now))
     private var counts: [Date: UsageDay] = [:]
     private var reloadGeneration = 0
-    func reload() async {
+    func reload(resetHour: Int = ReadingDay.resetHour, now: Date = .now, log: UsageLog = .shared) async {
         reloadGeneration += 1
         let generation = reloadGeneration
-        let snapshot = await UsageLog.shared.read()
+        let snapshot = await log.read(now: now)
+        let calendar = Calendar.current
+        let readingToday = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         let summaries = await Task.detached {
-            Dictionary(grouping: snapshot.events, by: { Calendar.current.startOfDay(for: $0.date) })
-                .mapValues { UsageDay.summarize($0, date: $0[0].date) }
+            let dates = (0...92).map { calendar.date(byAdding: .day, value: -$0, to: readingToday)! }
+            return UsageDay.summarize(snapshot.events, dates: dates, calendar: calendar, resetHour: resetHour)
         }.value
         guard generation == reloadGeneration else { return }
-        events = snapshot.events; firstDay = snapshot.firstDay; counts = summaries
-        today = UsageDay.summarize(events, date: .now)
+        events = snapshot.events
+        firstDay = snapshot.firstDay.map { first in
+            // If the first file is still available, its first event gives the real reading day.
+            snapshot.events.first(where: { calendar.isDate($0.date, inSameDayAs: first) })
+                .map { ReadingDay.date(at: $0.date, resetHour: resetHour, calendar: calendar) } ?? first
+        }
+        counts = summaries
+        today = summaries[readingToday] ?? UsageDay(date: readingToday)
     }
+
     func values(_ keyPath: KeyPath<UsageDay, Int>) -> [Date: Double] {
         counts.mapValues { Double($0[keyPath: keyPath]) }
     }

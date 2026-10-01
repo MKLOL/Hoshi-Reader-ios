@@ -14,6 +14,7 @@ struct BookView: View {
     /// When set (mokuro books), shown in place of the percentage label.
     var pageLabel: String? = nil
     var isSelected: Bool = false
+    var hasPretranslations: Bool = false
 
     var body: some View {
         VStack(spacing: 6) {
@@ -21,7 +22,8 @@ struct BookView: View {
                 book: book,
                 progress: progress,
                 pageLabel: pageLabel,
-                isSelected: isSelected
+                isSelected: isSelected,
+                hasPretranslations: hasPretranslations
             )
             
             Text(book.title ?? "")
@@ -39,6 +41,7 @@ struct BookCover: View {
     /// When set (mokuro books), shown in place of the percentage label.
     var pageLabel: String? = nil
     var isSelected: Bool = false
+    var hasPretranslations: Bool = false
     
     private let coverAspectRatio: CGFloat = 0.709
     private let innerCornerRadius: CGFloat = 6
@@ -77,6 +80,17 @@ struct BookCover: View {
                 if isSelected {
                     checkmark(color: .blue)
                         .padding(6)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if hasPretranslations {
+                    Image(systemName: "translate")
+                        .font(.system(size: 14, weight: .semibold))
+                        .padding(5)
+                        .background(.regularMaterial, in: Circle())
+                        .padding(6)
+                        .accessibilityLabel("Offline translations available")
+                        .accessibilityIdentifier("book-pretranslation-badge")
                 }
             }
             .overlay(alignment: .bottomTrailing) {

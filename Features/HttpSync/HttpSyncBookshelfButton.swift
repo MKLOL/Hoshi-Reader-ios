@@ -34,15 +34,16 @@ struct HttpSyncBookshelfButton: View {
                     List {
                         if running {
                             if let progress = manager.progress {
-                                HttpSyncProgressView(progress: progress)
+                                HttpSyncProgressView(progress: progress, transfer: manager.transferProgress)
                             } else {
                                 ProgressView("Starting sync")
                             }
+                            Button("Cancel sync", role: .cancel) { manager.cancelSync() }
                         } else {
                             if let error = manager.lastError {
                                 Text(error).foregroundStyle(.red)
                             } else if let status = manager.lastStatus {
-                                Label("Sync complete", systemImage: "checkmark.circle")
+                                Label(status.hasPrefix("Sync cancelled") ? "Sync cancelled" : "Sync complete", systemImage: status.hasPrefix("Sync cancelled") ? "xmark.circle" : "checkmark.circle")
                                 Text(status)
                             }
                             if !manager.lastErrors.isEmpty {

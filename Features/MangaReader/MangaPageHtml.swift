@@ -58,7 +58,8 @@ nonisolated enum MangaPageHtml {
         singleTapLookup: Bool = false,
         useNotoSansJpFont: Bool = false,
         showActionButtons: Bool = true,
-        showCopyButton: Bool = false
+        showCopyButton: Bool = false,
+        enlargeSmallText: Bool = true
     ) -> String {
         // Each page is fitted with `object-fit: contain` into its share of the viewport, baked into
         // the CSS as definite px sizes (no vw/vh, no JS). In a two-page spread (`leftPage != nil`)
@@ -77,12 +78,12 @@ nonisolated enum MangaPageHtml {
         if let leftPage {
             frames += frameHtml(page: leftPage, availableWidth: perPageWidth,
                                 viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
-                                showActionButtons: showActionButtons)
+                                showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText)
             frames += "\n"
         }
         frames += frameHtml(page: page, availableWidth: perPageWidth,
                             viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
-                            showActionButtons: showActionButtons)
+                            showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText)
 
         let css = pageCss(
             backgroundCssColor: backgroundCssColor,
@@ -100,11 +101,15 @@ nonisolated enum MangaPageHtml {
         <style>
         \(css)
         .translate-only .ocr-copy-btn { display: none; }
-        .translate-only .ocr-ai-btn { width: 48px; height: 48px; }
-        .translate-only .ocr-ai-btn svg { width: 30px; height: 30px; }
+        /* 1.14 times each paired dimension is approximately 30% more area. */
+        .translate-only .ocr-ai-btn {
+          width: 29.64px; height: 29.64px;
+          min-width: 29.64px; min-height: 29.64px;
+          padding: 5.7px; border-radius: 5.7px;
+        }
         </style>
         </head>
-        <body class="\(showCopyButton ? "" : "translate-only")">
+        <body class="\(showCopyButton ? "" : "translate-only")" data-enlarge-text="\(enlargeSmallText)">
         <div class="page">
         \(frames)
         </div>
@@ -135,7 +140,8 @@ nonisolated enum MangaPageHtml {
         viewportHeight: Int,
         shortSide: Double,
         longSide: Double,
-        showActionButtons: Bool
+        showActionButtons: Bool,
+        enlargeSmallText: Bool
     ) -> String {
         let imageWidth = max(page.imageWidth, 1)
         let imageHeight = max(page.imageHeight, 1)
@@ -151,12 +157,13 @@ nonisolated enum MangaPageHtml {
         )
         let boxes = page.textBoxes
             .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight,
-                               readabilityFitScale: readabilityFitScale, pageIndex: page.index) }
+                               readabilityFitScale: readabilityFitScale, pageIndex: page.index, enlargeSmallText: enlargeSmallText) }
             .joined(separator: "\n")
         let uiTestBoxes = uiTestActionBoxesHtml(
             imageWidth: imageWidth,
             imageHeight: imageHeight,
-            readabilityFitScale: readabilityFitScale
+            readabilityFitScale: readabilityFitScale,
+            enlargeSmallText: enlargeSmallText
         )
         let actionButtons = showActionButtons ? actionButtonsHtml : ""
         let imageSrc = escapeAttribute(encodeImagePath(page.imagePath))
@@ -342,7 +349,8 @@ nonisolated enum MangaPageHtml {
         imageHeight: Int,
         readabilityFitScale: Double,
         extraAttributes: String = "",
-        pageIndex: Int? = nil
+        pageIndex: Int? = nil,
+        enlargeSmallText: Bool = true
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
         let topPct = percent(box.top, imageHeight)
@@ -360,7 +368,7 @@ nonisolated enum MangaPageHtml {
         // the zoom multiplier strictly decreases as drawn size grows (smaller art zooms more).
         // Defined in pt so it self-adjusts across scan resolutions and devices.
         let drawnPt = Double(max(1, box.fontSize)) * readabilityFitScale
-        let revealPt = drawnPt + max(0, MangaFontTuning.targetRevealPt - drawnPt) * MangaFontTuning.revealBoost
+        let revealPt = enlargeSmallText ? drawnPt + max(0, MangaFontTuning.targetRevealPt - drawnPt) * MangaFontTuning.revealBoost : drawnPt
         // readabilityFitScale > 0 always (build() clamps image and viewport dims to >= 1). Dividing
         // back out yields an image-space reveal size; the cqw unit below then renders it against the
         // real frame width, so on screen it tracks the displayed image in either orientation.
@@ -391,7 +399,8 @@ nonisolated enum MangaPageHtml {
     private static func uiTestActionBoxesHtml(
         imageWidth: Int,
         imageHeight: Int,
-        readabilityFitScale: Double
+        readabilityFitScale: Double,
+        enlargeSmallText: Bool
     ) -> String {
         #if DEBUG
         guard ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1" else { return "" }
@@ -433,7 +442,8 @@ nonisolated enum MangaPageHtml {
                 imageWidth: imageWidth,
                 imageHeight: imageHeight,
                 readabilityFitScale: readabilityFitScale,
-                extraAttributes: "data-hoshi-ui-test=\"\(id)\""
+                extraAttributes: "data-hoshi-ui-test=\"\(id)\"",
+                enlargeSmallText: enlargeSmallText
             )
         }.joined(separator: "\n")
         #else
@@ -618,7 +628,7 @@ nonisolated enum MangaPageHtml {
           }
         },
         tryWrapFallback: function(box) {
-          if (box.dataset.wrapTried === '1') return;
+          if (document.body.dataset.enlargeText === 'false' || box.dataset.wrapTried === '1') return;
           box.dataset.wrapTried = '1';
           if (box.classList.contains('vertical')) return;
           var initialPx = parseFloat(window.getComputedStyle(box).fontSize);

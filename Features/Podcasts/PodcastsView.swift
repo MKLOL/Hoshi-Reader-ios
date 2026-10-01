@@ -7,6 +7,7 @@ struct PodcastsView: View {
     @State private var length = PodcastLength.all
     @State private var showID: String?
     @State private var appeared = false
+    @State private var transcriptEpisode: PodcastEpisode?
     private var shows: [PodcastShow] { store.catalogue.shows.filter { !$0.id.isEmpty && PodcastRules.display($0.name) != nil } }
     private var inShow: [PodcastEpisode] { store.catalogue.episodes.filter { showID == nil || $0.show == showID } }
     private var episodes: [PodcastEpisode] { inShow.filter(length.includes) }
@@ -17,21 +18,8 @@ struct PodcastsView: View {
                 if let episode = playback.episode {
                     Section("Now playing") {
                         Text(PodcastRules.display(episode.title) ?? "Podcast lesson").font(.headline)
-                        Slider(value: Binding(get: { playback.position }, set: { playback.seek(to: $0) }), in: 0...max(1, playback.duration))
-                            .accessibilityLabel("Playback position")
-                        HStack {
-                            Text(StatisticsMath.duration(playback.position)).monospacedDigit()
-                            Spacer()
-                            Text(StatisticsMath.duration(playback.duration)).monospacedDigit()
-                        }.font(.caption)
-                        HStack(spacing: 32) {
-                            Button { playback.seek(to: playback.position - 15) } label: { Image(systemName: "gobackward.15") }.accessibilityLabel("Back 15 seconds")
-                            Button { playback.toggle() } label: { Image(systemName: playback.playing ? "pause.fill" : "play.fill") }.accessibilityLabel(playback.playing ? "Pause" : "Play")
-                            Button { playback.seek(to: playback.position + 15) } label: { Image(systemName: "goforward.15") }.accessibilityLabel("Forward 15 seconds")
-                        }.font(.title2).buttonStyle(.borderless).frame(maxWidth: .infinity)
-                        Picker("Speed", selection: $playback.speed) {
-                            ForEach([Float(0.75), 1, 1.25, 1.5, 2], id: \.self) { Text("\($0.formatted())×").tag($0) }
-                        }
+                        Text(playback.original ? "Original recording" : "Lesson").font(.caption).foregroundStyle(.secondary)
+                        PodcastPlaybackControls(playback: playback)
                     }
                 }
                 if let error = playback.error {
@@ -84,6 +72,9 @@ struct PodcastsView: View {
 
             }
             .navigationTitle("Podcasts")
+            .fullScreenCover(item: $transcriptEpisode) { episode in
+                NavigationStack { PodcastTranscriptView(episode: episode) }
+            }
             .refreshable { await store.refresh() }
             .toolbar { if store.loading { ProgressView() } }
             .task(id: appeared && scenePhase == .active) {
@@ -112,6 +103,15 @@ struct PodcastsView: View {
         Text(episode.durationSeconds > 0 ? "Original: \(StatisticsMath.duration(Double(episode.durationSeconds)))" : "Original length unknown").font(.caption)
         if let duration = episode.lessonDurationSeconds { Text("Lesson: \(StatisticsMath.duration(duration))").font(.caption) }
         if let error = store.downloadErrors[episode.id] { Text("Download: \(error)").font(.caption).foregroundStyle(.red) }
+        if let error = store.transcriptDownloadErrors[episode.id] { Text(error).font(.caption).foregroundStyle(.red) }
+        if store.isTranscriptDownloaded(episode.id) {
+            Button { transcriptEpisode = episode } label: { Label("Transcript", systemImage: "text.alignleft") }
+        } else if let progress = store.transcriptDownloads[episode.id] {
+            if progress > 0 { ProgressView("Downloading transcript…", value: progress) }
+            else { ProgressView("Waiting for transcript…") }
+        } else if episode.transcript && episode.status == "ready" {
+            Button { store.downloadTranscript(episode) } label: { Label("Get transcript", systemImage: "text.badge.plus") }
+        }
         if store.isDownloaded(episode.id) {
             Button { playback.play(episode) } label: { Label("Play lesson", systemImage: "play.circle.fill") }
         } else if let progress = store.downloads[episode.id] {

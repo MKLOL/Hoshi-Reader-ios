@@ -51,9 +51,9 @@ final class HttpSyncSettingsStore {
     /// Base URL of the sync server, e.g. `https://dragos.games/api/book_sync`. No trailing slash.
     var baseURL: String {
         didSet {
-            let normalized = Self.normalizeBaseURL(baseURL)
-            if normalized != baseURL { baseURL = normalized; return }
-            defaults.set(normalized, forKey: Keys.baseURL)
+            // Preserve the draft while typing (especially the two slashes in https://).
+            defaults.set(baseURL, forKey: Keys.baseURL)
+            if Self.normalizeBaseURL(oldValue) != Self.normalizeBaseURL(baseURL) { lastSyncedAt = nil }
         }
     }
 
@@ -86,8 +86,10 @@ final class HttpSyncSettingsStore {
         }
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let changed = token != trimmed
             if Keychain.set(trimmed.isEmpty ? nil : trimmed, for: SecretKeys.httpSyncToken) {
                 tokenRevision &+= 1
+                if changed { lastSyncedAt = nil }
             }
         }
     }
@@ -117,14 +119,17 @@ final class HttpSyncSettingsStore {
         HttpSyncConfig(baseURL: Self.normalizeBaseURL(baseURL), token: token)
     }
 
+    func recordCursor(_ cursor: String, for config: HttpSyncConfig) {
+        if currentConfig() == config { lastSyncedAt = cursor }
+    }
+
     nonisolated private static func normalizeBaseURL(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         while s.hasSuffix("/") { s.removeLast() }
         return s
     }
 
-    /// Bearer-token sync must not run over cleartext network links. Plain HTTP is accepted only
-    /// for loopback development where the token never leaves the device.
+    /// Permit explicit self-hosted LAN endpoints; public endpoints still require TLS.
     nonisolated static func isSecureBaseURL(_ raw: String) -> Bool {
         let normalized = normalizeBaseURL(raw)
         guard let components = URLComponents(string: normalized),
@@ -133,15 +138,29 @@ final class HttpSyncSettingsStore {
               !host.isEmpty else { return false }
         if scheme == "https" { return true }
         if scheme == "http" {
-            return host == "localhost" || host == "127.0.0.1" || host == "::1"
+            return isLocalHost(host)
         }
         return false
+    }
+
+    nonisolated static func isLocalHost(_ raw: String) -> Bool {
+        let host = raw.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host == "localhost" || host == "::1" || host.hasSuffix(".local") { return true }
+        if host.contains(":"), host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("fe80:") { return true }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        let octets = parts.compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else { return false }
+        return octets[0] == 10 || octets[0] == 127 ||
+            (octets[0] == 192 && octets[1] == 168) ||
+            (octets[0] == 172 && (16...31).contains(octets[1])) ||
+            (octets[0] == 169 && octets[1] == 254)
     }
 }
 
 /// Sendable snapshot of the bits a transport needs, so the reconciler/manager can build a
 /// `HttpSyncKvClient` without touching the `@MainActor` store off the main thread.
-nonisolated struct HttpSyncConfig: Sendable {
+nonisolated struct HttpSyncConfig: Sendable, Equatable {
     let baseURL: String
     let token: String
     var isConfigured: Bool { !baseURL.isEmpty && !token.isEmpty && HttpSyncSettingsStore.isSecureBaseURL(baseURL) }

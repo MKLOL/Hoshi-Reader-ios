@@ -92,6 +92,10 @@ fi
 # bash 3.2 (the system bash) errors on "${arr[@]}" when the array is empty under
 # set -u, hence the ${arr[@]+...} guard at each use site below.
 
+# The same production-client/real-server gate runs before any version mutation or archive.
+# It owns a disposable simulator and never wipes a developer's existing device.
+python3 tools/test_ios_parity.py
+
 # --- version -----------------------------------------------------------------
 # CURRENT_PROJECT_VERSION and MARKETING_VERSION live at PROJECT level, so the app
 # and the ShareExtension always share them. There are exactly two occurrences of

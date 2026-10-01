@@ -26,6 +26,15 @@
 		BED3413E901A4CC59EC149FE /* NewsPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FF6364803C44F1297A0F862 /* NewsPipelineTests.swift */; };
 		BEE3413E901A4CC59EC149FA /* StatisticsParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EE6364803C44F1297A0F86A /* StatisticsParityTests.swift */; };
 		FA9B860BD4DC4F74B1B753D9 /* NewsTabUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F44EE274C884DCEA4A90C99 /* NewsTabUITests.swift */; };
+		FACE00000000000000000001 /* PodcastTranscriptDataTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000101 /* PodcastTranscriptDataTests.swift */; };
+		FACE00000000000000000002 /* PodcastTranscriptPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000102 /* PodcastTranscriptPlaybackTests.swift */; };
+		FACE00000000000000000003 /* RecentParitySafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000103 /* RecentParitySafetyTests.swift */; };
+		FACE00000000000000000004 /* StatisticsDayParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000104 /* StatisticsDayParityTests.swift */; };
+		FACE00000000000000000005 /* HttpSyncTransferTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000105 /* HttpSyncTransferTests.swift */; };
+		FACE00000000000000000006 /* BookTranslationAvailabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000106 /* BookTranslationAvailabilityTests.swift */; };
+		FACE00000000000000000007 /* PodcastTranscriptHTTPTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000107 /* PodcastTranscriptHTTPTests.swift */; };
+		FACE00000000000000000008 /* MangaReadabilityParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000108 /* MangaReadabilityParityTests.swift */; };
+		FACE00000000000000000009 /* PodcastTranscriptUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000109 /* PodcastTranscriptUITests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -84,6 +93,15 @@
 		D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ZoomPopupUITests.swift; sourceTree = "<group>"; };
 		EC4F9CC1D389C928A405FB8B /* PopupCardStyleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PopupCardStyleTests.swift; sourceTree = "<group>"; };
 		FB85D2068BD83A02D2382159 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		FACE00000000000000000101 /* PodcastTranscriptDataTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastTranscriptDataTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000102 /* PodcastTranscriptPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastTranscriptPlaybackTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000103 /* RecentParitySafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentParitySafetyTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000104 /* StatisticsDayParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatisticsDayParityTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000105 /* HttpSyncTransferTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HttpSyncTransferTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000106 /* BookTranslationAvailabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookTranslationAvailabilityTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000107 /* PodcastTranscriptHTTPTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastTranscriptHTTPTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000108 /* MangaReadabilityParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MangaReadabilityParityTests.swift; sourceTree = "<group>"; };
+		FACE00000000000000000109 /* PodcastTranscriptUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastTranscriptUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -275,6 +293,7 @@
 		937B9310E9D6E712C5243510 /* UITests */ = {
 			isa = PBXGroup;
 			children = (
+				FACE00000000000000000109 /* PodcastTranscriptUITests.swift */,
 				D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */,
 				3F44EE274C884DCEA4A90C99 /* NewsTabUITests.swift */,
 			);
@@ -284,6 +303,14 @@
 		D044623BC1FCEA930EF9E90E /* Integration */ = {
 			isa = PBXGroup;
 			children = (
+				FACE00000000000000000101 /* PodcastTranscriptDataTests.swift */,
+				FACE00000000000000000102 /* PodcastTranscriptPlaybackTests.swift */,
+				FACE00000000000000000103 /* RecentParitySafetyTests.swift */,
+				FACE00000000000000000104 /* StatisticsDayParityTests.swift */,
+				FACE00000000000000000105 /* HttpSyncTransferTests.swift */,
+				FACE00000000000000000106 /* BookTranslationAvailabilityTests.swift */,
+				FACE00000000000000000107 /* PodcastTranscriptHTTPTests.swift */,
+				FACE00000000000000000108 /* MangaReadabilityParityTests.swift */,
 				1AF21FD83BC8A779CCA7B886 /* SyncIntegrationTests.swift */,
 				5FF6364803C44F1297A0F862 /* NewsPipelineTests.swift */,
 				5FF6364803C44F1297A0F86D /* FeatureParityTests.swift */,
@@ -488,6 +515,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FACE00000000000000000009 /* PodcastTranscriptUITests.swift in Sources */,
 				5784FD089920275CA0864F51 /* ZoomPopupUITests.swift in Sources */,
 				FA9B860BD4DC4F74B1B753D9 /* NewsTabUITests.swift in Sources */,
 			);
@@ -497,6 +525,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FACE00000000000000000001 /* PodcastTranscriptDataTests.swift in Sources */,
+				FACE00000000000000000002 /* PodcastTranscriptPlaybackTests.swift in Sources */,
+				FACE00000000000000000003 /* RecentParitySafetyTests.swift in Sources */,
+				FACE00000000000000000004 /* StatisticsDayParityTests.swift in Sources */,
+				FACE00000000000000000005 /* HttpSyncTransferTests.swift in Sources */,
+				FACE00000000000000000006 /* BookTranslationAvailabilityTests.swift in Sources */,
+				FACE00000000000000000007 /* PodcastTranscriptHTTPTests.swift in Sources */,
+				FACE00000000000000000008 /* MangaReadabilityParityTests.swift in Sources */,
 				808AA22008165367F5046F9E /* SyncIntegrationTests.swift in Sources */,
 				BED3413E901A4CC59EC149FE /* NewsPipelineTests.swift in Sources */,
 				BED3413E901A4CC59EC149FD /* FeatureParityTests.swift in Sources */,
@@ -717,7 +753,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Allow Hoshi Reader to access AnkiConnect instances on your local network.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Allow Hoshi Reader to access AnkiConnect and HTTP sync servers on your local network.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow Hoshi Reader to save images to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -759,7 +795,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.books";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Allow Hoshi Reader to access AnkiConnect instances on your local network.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Allow Hoshi Reader to access AnkiConnect and HTTP sync servers on your local network.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Allow Hoshi Reader to save images to your photo library.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

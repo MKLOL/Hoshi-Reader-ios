@@ -20,6 +20,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         var localHash: String
         var remoteSize: Int
         var remoteStamp: String
+        var remoteETag: String? = nil
     }
     private var busy: Set<String> = []
     private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
@@ -90,22 +91,22 @@ nonisolated struct MangaStatisticsBlob: Codable {
     }
     private func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
-    func pushLocalChanges(transport: any HttpSyncKvTransport) async -> [String] {
+    func pushLocalChanges(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil) async -> [String] {
         do {
             let directory = try BookStorage.getBooksDirectory()
             let roots = try BookStorage.loadAllBooks().compactMap { book -> (root: URL, syncId: String)? in
                 guard let folder = book.folder, let id = syncId(for: book) else { return nil }
                 return (directory.appendingPathComponent(folder), id)
             }
-            return await pushLocalChanges(roots: roots, transport: transport)
+            return await pushLocalChanges(roots: roots, transport: transport, listing: listing)
         } catch { return ["Statistics: \(error.localizedDescription)"] }
     }
 
     /// A damaged statistics sidecar must not prevent other books or bookmarks from syncing.
-    func pushLocalChanges(roots: [(root: URL, syncId: String)], transport: any HttpSyncKvTransport) async -> [String] {
+    func pushLocalChanges(roots: [(root: URL, syncId: String)], transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil) async -> [String] {
         var errors: [String] = []
         for book in roots {
-            do { try await exchange(root: book.root, syncId: book.syncId, transport: transport) }
+            do { try await exchange(root: book.root, syncId: book.syncId, transport: transport, listing: listing) }
             catch { errors.append("Statistics \(book.syncId): \(error.localizedDescription)") }
         }
         return errors
@@ -127,11 +128,15 @@ nonisolated struct MangaStatisticsBlob: Codable {
         let meta = listing?[key]
         if old?.localHash == localHash {
             if listing == nil { return }
-            if let meta, old?.remoteSize == meta.size, old?.remoteStamp == meta.lastModified { return }
+            if let meta, old?.remoteSize == meta.size, old?.remoteStamp == meta.lastModified,
+               let etag = meta.etag, !etag.isEmpty, old?.remoteETag == etag { return }
         }
         if listing == nil, old == nil, local.isEmpty { return }
         if let meta, (meta.size ?? 0) > 4 * 1024 * 1024 { throw HttpSyncError("Statistics exceed the size limit") }
-        let fetched = listing != nil && meta == nil ? nil : try await transport.getBounded(key: key, maxBytes: 4 * 1024 * 1024)
+        // Absence is only a snapshot. A peer may have written this key after the listing;
+        // fetch again before a nonempty upload so we merge rather than erase its first day.
+        if listing != nil, meta == nil, local.isEmpty { return }
+        let fetched = try await transport.getBounded(key: key, maxBytes: 4 * 1024 * 1024)
         if let fetched, fetched.body.count > 4 * 1024 * 1024 { throw HttpSyncError("Statistics exceed the size limit") }
         let remote = try fetched.map { merge(try decode($0.body)) } ?? []
         // The reader can save while GET is in flight. Re-read before merging.
@@ -143,14 +148,15 @@ nonisolated struct MangaStatisticsBlob: Codable {
         let mergedBody = try encode(merged)
         let size: Int
         let stamp: String
+        let etag: String?
         if merged != remote {
             let written = try await transport.put(key: key, contentType: "application/json; charset=utf-8", body: mergedBody)
-            size = mergedBody.count; stamp = written.lastModified
+            size = mergedBody.count; stamp = written.lastModified; etag = written.etag
         } else {
-            size = fetched?.body.count ?? 0; stamp = fetched?.lastModified ?? ""
+            size = fetched?.body.count ?? 0; stamp = fetched?.lastModified ?? ""; etag = fetched?.etag ?? ""
         }
         guard FileManager.default.fileExists(atPath: root.path) else { return }
-        state[key] = Stamp(localHash: hash(mergedBody), remoteSize: size, remoteStamp: stamp)
+        state[key] = Stamp(localHash: hash(mergedBody), remoteSize: size, remoteStamp: stamp, remoteETag: etag)
         try BookStorage.save(state, inside: root, as: Self.stateFile)
     }
 }

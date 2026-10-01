@@ -60,7 +60,7 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         tracker.update(currentPage: 0, now: now.addingTimeInterval(-100))
         tracker.update(currentPage: 1, now: now.addingTimeInterval(-90))
         XCTAssertEqual(tracker.session.readingTime, 10)
-        XCTAssertEqual(tracker.dayTotal(at: now.addingTimeInterval(-90)).charactersRead, 11)
+        XCTAssertEqual(tracker.dayTotal(at: now.addingTimeInterval(-90), resetHour: 0).charactersRead, 11)
         XCTAssertGreaterThan(tracker.statisticsForPersistence()!.first!.lastStatisticModified, Int.max - 100)
     }
     func testPausedTimeAndBaselineJumpsAreNotCounted() {
@@ -74,15 +74,15 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         XCTAssertEqual(tracker.session.readingTime, 20)
         XCTAssertEqual(tracker.session.charactersRead, 2)
     }
-    func testPausedTodayChangesAtMidnightWithoutLosingHistory() {
+    func testPausedTodaySupportsMidnightResetWithoutLosingHistory() {
         let midnight = Calendar.current.startOfDay(for: .now)
         let yesterday = midnight.addingTimeInterval(-60)
         var tracker = MangaStatisticsTracker(title: "Fixture", initialStatistics: [], enabled: true, now: yesterday)
         tracker.start(currentPage: 0, now: yesterday)
         tracker.pause(currentPage: 2, now: yesterday.addingTimeInterval(30))
-        XCTAssertEqual(tracker.today.readingTime, 0)
-        XCTAssertEqual(tracker.dayTotal(at: midnight).readingTime, 0)
-        XCTAssertEqual(tracker.dayTotal(at: yesterday).readingTime, 30)
+        XCTAssertEqual(tracker.dayTotal(at: .now, resetHour: 0).readingTime, 0)
+        XCTAssertEqual(tracker.dayTotal(at: midnight, resetHour: 0).readingTime, 0)
+        XCTAssertEqual(tracker.dayTotal(at: yesterday, resetHour: 0).readingTime, 30)
         XCTAssertEqual(tracker.allTime.charactersRead, 2)
     }
     func testLiveTrackerMergesOtherDevicesWithoutLosingSession() {
@@ -93,7 +93,7 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         tracker.update(currentPage: 3, now: now.addingTimeInterval(10))
         tracker.mergeHistory([row(day), row(day, device: "tablet", seconds: 120, count: 20)])
         XCTAssertEqual(tracker.session.charactersRead, 3)
-        XCTAssertEqual(tracker.dayTotal(at: now).charactersRead, 33)
+        XCTAssertEqual(tracker.dayTotal(at: now, resetHour: 0).charactersRead, 33)
         tracker.update(currentPage: 4, now: now.addingTimeInterval(20))
         let saved = tracker.statisticsForPersistence()!
         XCTAssertEqual(saved.first { $0.deviceId == "phone" }?.charactersRead, 14)

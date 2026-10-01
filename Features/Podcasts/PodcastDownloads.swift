@@ -28,21 +28,28 @@ import Foundation
                     if PodcastStore.shared.configID != pair.account || PodcastStore.shared.files.validatedAccount != pair.account { task.cancel() }
                     continue
                 }
-                let key = pair.account + "|" + pair.id
+                let key = pair.key
                 if let current = tasks[key], current.taskIdentifier != task.taskIdentifier { task.cancel(); continue }
                 tasks[key] = task
                 epochs.record(task.taskIdentifier)
                 let fraction = task.countOfBytesExpectedToReceive > 0 ? Double(task.countOfBytesReceived) / Double(task.countOfBytesExpectedToReceive) : 0
-                PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: min(1, max(0, fraction)))
+                PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: pair.part == .transcript ? 0 : min(1, max(0, fraction)), transcript: pair.part.isTranscript)
             }
         }
     }
-    func start(episode: String, account: String, config: HttpSyncConfig) throws {
-        let key = account + "|" + episode
-        guard tasks[key] == nil else { return }
-        let task = session.downloadTask(with: try PodcastAPI.request(config: config, suffix: "/\(episode)/audio"))
-        task.taskDescription = key
-        tasks[key] = task; epochs.record(task.taskIdentifier); task.resume()
+    func start(episode: String, account: String, config: HttpSyncConfig, transcript: Bool = false) throws {
+        guard PodcastRules.validID(account), PodcastRules.validID(episode) else { throw CocoaError(.fileReadInvalidFileName) }
+        let pair = PodcastDownloadReference(account: account, id: episode, part: transcript ? .transcript : .lesson)
+        guard tasks[pair.key] == nil else { return }
+        enqueue(try PodcastAPI.request(config: config, suffix: "/\(episode)/\(pair.part.suffix)"), pair: pair)
+    }
+    private func enqueue(_ request: URLRequest, pair: PodcastDownloadReference, delay: TimeInterval = 0) {
+        var request = request
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        let task = session.downloadTask(with: request)
+        task.taskDescription = pair.description
+        if delay > 0 { task.earliestBeginDate = Date().addingTimeInterval(delay) }
+        tasks[pair.key] = task; epochs.record(task.taskIdentifier); task.resume()
     }
     func cancelAll() {
         // Fence both registered and still-restoring tasks before yielding. A→B→A must not
@@ -60,26 +67,21 @@ import Foundation
     private func isRetired(_ task: URLSessionTask, account: String) -> Bool {
         epochs.isRetired(task.taskIdentifier, account: account)
     }
-    private func accepts(_ task: URLSessionTask, pair: (account: String, id: String)) -> Bool {
-        epochs.accepts(task.taskIdentifier, account: pair.account, currentTaskID: tasks[pair.account + "|" + pair.id]?.taskIdentifier)
+    private func accepts(_ task: URLSessionTask, pair: PodcastDownloadReference) -> Bool {
+        epochs.accepts(task.taskIdentifier, account: pair.account, currentTaskID: tasks[pair.key]?.taskIdentifier)
     }
-    private func finishTracking(_ task: URLSessionTask, pair: (account: String, id: String)) {
-        tasks[pair.account + "|" + pair.id] = nil
+    private func finishTracking(_ task: URLSessionTask, pair: PodcastDownloadReference) {
+        tasks[pair.key] = nil
         epochs.record(task.taskIdentifier)
     }
-    static func pair(_ description: String?) -> (account: String, id: String)? {
-        let parts = (description ?? "").split(separator: "|").map(String.init)
-        guard (2...3).contains(parts.count), PodcastRules.validID(parts[0]), PodcastRules.validID(parts[1]) else { return nil }
-        if parts.count == 3, !(Int(parts[2]).map { (1...2).contains($0) } ?? false) { return nil }
-        return (parts[0], parts[1])
-    }
+    static func pair(_ description: String?) -> PodcastDownloadReference? { PodcastDownloadReference(description) }
     func progress(task: URLSessionTask, written: Int64, total: Int64) {
         guard let pair = Self.pair(task.taskDescription), accepts(task, pair: pair) else { return }
-        if written > 512 * 1024 * 1024 || total > 512 * 1024 * 1024 {
-            forcedErrors[task.taskIdentifier] = "The lesson exceeds the 512 MB download limit."
+        if written > pair.part.maximumBytes || total > pair.part.maximumBytes {
+            forcedErrors[task.taskIdentifier] = pair.part == .transcript ? "The podcast transcript exceeds the 2 MB download limit." : "The recording exceeds the 512 MB download limit."
             task.cancel(); return
         }
-        PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: total > 0 ? min(1, Double(written) / Double(total)) : 0)
+        PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: pair.part == .transcript ? 0 : (total > 0 ? min(1, Double(written) / Double(total)) : 0), transcript: pair.part.isTranscript)
     }
     func completed(task: URLSessionTask, staged: URL) {
         defer { try? FileManager.default.removeItem(at: staged) }
@@ -98,16 +100,20 @@ import Foundation
                 if [401, 403].contains(response.statusCode) { store.invalidate() }
                 throw PodcastHTTPError(status: response.statusCode, message: "Download failed: HTTP \(response.statusCode).")
             }
-            guard response.mimeType?.lowercased() == "audio/mpeg" else { throw PodcastHTTPError(status: 0, message: "The server did not return an MP3 lesson.") }
             let size = try staged.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size > 0, size <= 512 * 1024 * 1024 else { throw PodcastHTTPError(status: 0, message: "The downloaded lesson is empty or too large.") }
-            guard response.expectedContentLength < 0 || response.expectedContentLength == size else { throw PodcastHTTPError(status: 0, message: "The lesson download is incomplete.") }
-            guard let destination = store.files.audio(account: pair.account, id: pair.id) else { return }
-            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: destination.path) { _ = try FileManager.default.replaceItemAt(destination, withItemAt: staged) }
-            else { try FileManager.default.moveItem(at: staged, to: destination) }
-            store.downloadFinished(account: pair.account, id: pair.id, failure: nil)
-        } catch { store.downloadFinished(account: pair.account, id: pair.id, failure: PodcastRules.failureMessage(error)) }
+            try pair.part.validate(response: response, fileSize: Int64(size))
+            if pair.part == .transcript {
+                // This persists a validated checkpoint across URLSession's background relaunch.
+                // Invalid or oversized text can never trigger the much larger audio request.
+                try store.files.stageTranscript(staged, account: pair.account, id: pair.id)
+                guard var request = task.originalRequest, let url = request.url else { throw URLError(.badURL) }
+                request.url = url.deletingLastPathComponent().appendingPathComponent("original")
+                enqueue(request, pair: PodcastDownloadReference(account: pair.account, id: pair.id, part: .original))
+                return
+            }
+            try store.files.installAudio(staged, account: pair.account, id: pair.id, original: pair.part == .original)
+            store.downloadFinished(account: pair.account, id: pair.id, failure: nil, transcript: pair.part.isTranscript)
+        } catch { store.downloadFinished(account: pair.account, id: pair.id, failure: PodcastRules.failureMessage(error), transcript: pair.part.isTranscript) }
     }
     func failed(task: URLSessionTask, error: Error) {
         let forced = forcedErrors.removeValue(forKey: task.taskIdentifier)
@@ -115,22 +121,17 @@ import Foundation
         finishTracking(task, pair: pair)
         if forced == nil, (error as? URLError)?.code != .cancelled, retry(task, pair: pair) { return }
         let reason = forced ?? PodcastRules.failureMessage(error)
-        PodcastStore.shared.downloadFinished(account: pair.account, id: pair.id, failure: reason)
+        PodcastStore.shared.downloadFinished(account: pair.account, id: pair.id, failure: reason, transcript: pair.part.isTranscript)
     }
-    private func retry(_ task: URLSessionTask, pair: (account: String, id: String)) -> Bool {
-        let parts = (task.taskDescription ?? "").split(separator: "|")
-        let attempt = parts.count == 3 ? (Int(parts[2]) ?? 0) : 0
-        guard attempt < 2, let request = task.originalRequest, PodcastStore.shared.enabled,
+    private func retry(_ task: URLSessionTask, pair: PodcastDownloadReference) -> Bool {
+        guard pair.attempt < 2, let request = task.originalRequest, PodcastStore.shared.enabled,
               PodcastStore.shared.account == pair.account else { return false }
-        let retry = session.downloadTask(with: request)
-        retry.taskDescription = pair.account + "|" + pair.id + "|" + String(attempt + 1)
-        retry.earliestBeginDate = Date().addingTimeInterval(Double((attempt + 1) * 30))
-        tasks[pair.account + "|" + pair.id] = retry
-        epochs.record(retry.taskIdentifier)
-        retry.resume()
-        PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: 0)
+        var retried = pair; retried.attempt += 1
+        enqueue(request, pair: retried, delay: Double(retried.attempt * 30))
+        PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: 0, transcript: pair.part.isTranscript)
         return true
     }
+
 }
 
 nonisolated private final class PodcastDownloadDelegate: NSObject, URLSessionDownloadDelegate {

@@ -95,7 +95,7 @@ struct ShelfView: View {
                                 isCollapsed = false
                             }
                         } label: {
-                            BookCover(book: book)
+                            BookCover(book: book, hasPretranslations: viewModel.pretranslatedBookIds.contains(book.id))
                         }
                         .buttonStyle(.plain)
                     }

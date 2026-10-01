@@ -46,6 +46,8 @@ import os
 import re
 import signal
 import sys
+import socket
+import time
 import threading
 import uuid
 from http import HTTPStatus
@@ -243,9 +245,9 @@ class Store:
                 }
             return len(self.entries)
 
-    def record(self, method: str, path: str, status: int, size: int) -> None:
+    def record(self, method: str, path: str, status: int, size: int, range_header: str | None = None, if_range: str | None = None) -> None:
         with self.lock:
-            self.requests.append({"method": method, "path": path, "status": status, "size": size})
+            self.requests.append({"method": method, "path": path, "status": status, "size": size, "range": range_header, "ifRange": if_range})
 
     # -- fault injection -----------------------------------------------------------------
 
@@ -253,10 +255,12 @@ class Store:
         with self.lock:
             self.faults.append(fault)
 
-    def take_fault(self, method: str, path: str) -> dict | None:
+    def take_fault(self, method: str, path: str, kind: str = "failure") -> dict | None:
         """Consumes and returns the first armed fault matching this request, if any."""
         with self.lock:
             for index, fault in enumerate(self.faults):
+                if fault.get("kind", "failure") != kind:
+                    continue
                 if fault.get("method") and fault["method"] != method:
                     continue
                 if not path.startswith(fault["pathPrefix"]):
@@ -321,8 +325,10 @@ class Handler(BaseHTTPRequestHandler):
         self._consumed = self._declared_length()
 
     def _send(self, status: int, body: bytes = b"", content_type: str = JSON_CONTENT_TYPE,
-              headers: dict | None = None) -> None:
+              headers: dict | None = None, disconnect_after: int | None = None, chunk_delay: float = 0) -> None:
         self._drain_body()
+        if disconnect_after is not None:
+            self.close_connection = True
         self.send_response(status)
         if status == HTTPStatus.NO_CONTENT:
             self.send_header("Content-Length", "0")
@@ -334,10 +340,24 @@ class Handler(BaseHTTPRequestHandler):
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
-        if body and self.command != "HEAD" and status != HTTPStatus.NO_CONTENT:
-            self.wfile.write(body)
+        sent = body if disconnect_after is None else body[:disconnect_after]
+        try:
+            if sent and self.command != "HEAD" and status != HTTPStatus.NO_CONTENT:
+                for start in range(0, len(sent), 32768):
+                    self.wfile.write(sent[start:start + 32768])
+                    self.wfile.flush()
+                    if chunk_delay:
+                        time.sleep(chunk_delay)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         if not self.path.startswith("/_test/"):
-            self.store.record(self.command, self.path, status, len(body))
+            self.store.record(self.command, self.path, status, len(sent),
+                              self.headers.get("Range"), self.headers.get("If-Range"))
+        if disconnect_after is not None:
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
 
     def _send_json(self, status: int, payload: dict) -> None:
         self._send(status, json.dumps(payload).encode("utf-8"))
@@ -416,6 +436,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(HTTPStatus.OK, self.store.dump())
         if path == "/_test/requests":
             return self._send_json(HTTPStatus.OK, {"requests": self.store.request_log()})
+        # Podcast fixtures use the same authenticated byte store, exercising the production
+        # chained background downloader without a feed worker or third-party recordings.
+        if path == "/v1/podcasts/access":
+            return self._send_json(HTTPStatus.OK, {"enabled": True})
+        if path == "/v1/podcasts":
+            return self._send_json(HTTPStatus.OK, {"episodes": [], "shows": []})
+        podcast = re.fullmatch(r"/v1/podcasts/([0-9a-f]{64})/(transcript|original|audio)", path)
+        if podcast:
+            return self._get("podcasts/" + podcast.group(1) + "/" + podcast.group(2))
         if path == "/v1/kv":
             return self._list(query)
         if path.startswith("/v1/kv/"):
@@ -463,6 +492,28 @@ class Handler(BaseHTTPRequestHandler):
                 "count": int(request.get("count") or 1),
                 "body": request.get("body"),
             })
+            return self._send_json(HTTPStatus.OK, {"ok": True})
+        if path == "/_test/download_next":
+            request = self._read_json()
+            if request is None:
+                return
+            prefix = request.get("pathPrefix")
+            count = request.get("count", 1)
+            cutoff = request.get("disconnectAfter")
+            ignore_range = request.get("ignoreRange", False)
+            delay = request.get("chunkDelay", 0)
+            overrides = [request.get("etag"), request.get("contentRange")]
+            if (
+                not isinstance(prefix, str) or not prefix.startswith("/v1/kv/")
+                or type(count) is not int or count < 1
+                or (cutoff is not None and (type(cutoff) is not int or cutoff < 0))
+                or type(delay) not in (int, float) or not 0 <= delay <= 1
+                or type(ignore_range) is not bool
+                or any(value is not None and (not isinstance(value, str) or "\r" in value or "\n" in value)
+                       for value in overrides)
+            ):
+                return self._error(HTTPStatus.BAD_REQUEST, "invalid download_next configuration")
+            self.store.add_fault(dict(request, kind="download", method="GET", count=count))
             return self._send_json(HTTPStatus.OK, {"ok": True})
         if path == "/_test/load":
             snapshot = self._read_json()
@@ -514,12 +565,36 @@ class Handler(BaseHTTPRequestHandler):
         entry = self.store.get(key)
         if entry is None:
             return self._error(HTTPStatus.NOT_FOUND, "no such key")
-        self._send(
-            HTTPStatus.OK,
-            entry["body"],
-            content_type=entry["contentType"],
-            headers={"Last-Modified": entry["lastModified"], "ETag": entry["etag"]},
-        )
+        body = entry["body"]
+        total = len(body)
+        headers = {"Last-Modified": entry["lastModified"], "ETag": entry["etag"], "Accept-Ranges": "bytes"}
+        fault = self.store.take_fault(self.command, self._route()[0], kind="download") or {}
+        status = HTTPStatus.OK
+        range_header = self.headers.get("Range")
+        if_range = self.headers.get("If-Range")
+        # A changed or weak validator requires a complete replacement, never concatenation.
+        if (self.command == "GET" and range_header and not fault.get("ignoreRange")
+                and (if_range is None or if_range == entry["etag"])):
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+            if match and any(match.groups()):
+                first, last = match.groups()
+                if first:
+                    start, end = int(first), int(last) if last else total - 1
+                else:
+                    start, end = max(0, total - int(last)), total - 1
+                if start >= total or end < start or total == 0:
+                    return self._send(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE,
+                                      headers={**headers, "Content-Range": f"bytes */{total}"})
+                end = min(end, total - 1)
+                body = body[start:end + 1]
+                status = HTTPStatus.PARTIAL_CONTENT
+                headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        if "etag" in fault:
+            headers["ETag"] = fault["etag"]
+        if "contentRange" in fault:
+            headers["Content-Range"] = fault["contentRange"]
+        self._send(status, body, content_type=entry["contentType"], headers=headers,
+                   disconnect_after=fault.get("disconnectAfter"), chunk_delay=fault.get("chunkDelay", 0))
 
     def _list(self, query: dict) -> None:
         prefix = query.get("prefix", [""])[0]

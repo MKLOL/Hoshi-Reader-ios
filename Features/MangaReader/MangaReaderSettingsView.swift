@@ -38,6 +38,12 @@ struct MangaReaderSettingsView: View {
             }
 
             Section {
+                Toggle("Enlarge Small Text", isOn: $userConfig.mangaEnlargeSmallText)
+            } footer: {
+                Text("Enlarge small revealed manga text for readability. Turn off to keep the original OCR size; translation and dictionary cards are unchanged.")
+            }
+
+            Section {
                 Toggle("Show translation button", isOn: $userConfig.mangaShowActionButtons)
                 Toggle("Show Copy button", isOn: $userConfig.mangaShowCopyButton)
             } footer: {

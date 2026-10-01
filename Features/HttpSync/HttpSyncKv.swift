@@ -76,7 +76,7 @@ struct HttpSyncKvFetched {
 }
 
 /// Headers from a successful `GET /v1/kv/{key}` streamed directly to disk.
-struct HttpSyncKvFileFetched {
+nonisolated struct HttpSyncKvFileFetched: Codable, Sendable {
     let contentType: String
     let lastModified: String
     let etag: String
@@ -238,6 +238,8 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     private let session: URLSession
     private let multipartPartSizeBytes: Int64
     private let multipartThresholdBytes: Int64
+    private let useBackgroundDownloads: Bool
+    private let onTransfer: @Sendable (HttpSyncTransferSample) -> Void
 
     private static let jsonDecoder = JSONDecoder()
     private static let jsonEncoder = JSONEncoder()
@@ -254,10 +256,13 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         bearerToken: String,
         session: URLSession? = nil,
         multipartPartSizeBytes: Int64 = HttpSyncKvClient.maxMultipartPartSizeBytes,
-        multipartThresholdBytes: Int64 = HttpSyncKvClient.defaultMultipartThresholdBytes
+        multipartThresholdBytes: Int64 = HttpSyncKvClient.defaultMultipartThresholdBytes,
+        onTransfer: @escaping @Sendable (HttpSyncTransferSample) -> Void = { _ in }
     ) {
         self.baseURL = baseURL
         self.bearerToken = bearerToken
+        self.useBackgroundDownloads = session == nil
+        self.onTransfer = onTransfer
         if let session {
             self.session = session
         } else {
@@ -295,7 +300,10 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             return try await putFileMultipart(key: key, contentType: contentType, fileURL: fileURL)
         }
         var request = makeRequest("PUT", path: "/v1/kv/\(encodeKey(key))", contentType: contentType)
-        let (data, response) = try await uploadFile(request: &request, fileURL: fileURL)
+        onTransfer(.init(key: key, uploading: true, completed: 0, total: size))
+        let (data, response) = try await uploadFile(request: &request, fileURL: fileURL) { [onTransfer] done in
+            onTransfer(.init(key: key, uploading: true, completed: done, total: size))
+        }
         try ensureSuccess(response: response, data: data)
         return try decodeWriteResponse(data)
     }
@@ -352,6 +360,28 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? {
         let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
+        if useBackgroundDownloads {
+            for attempt in 0...Self.maxRateLimitRetries {
+                do {
+                    try Task.checkCancellation()
+                    try await Self.requestGate.wait()
+                    return try await HttpSyncBackgroundDownloads.shared.download(request, to: targetURL) { [onTransfer] done, total in
+                        onTransfer(.init(key: key, uploading: false, completed: done, total: total))
+                    }
+                } catch {
+                    try Task.checkCancellation()
+                    if let http = error as? HttpSyncDownloadHTTPError {
+                        if shouldRetryRateLimit(response: http.response, attempt: attempt) {
+                            try await waitForRateLimit(response: http.response, attempt: attempt)
+                            continue
+                        }
+                        throw HttpSyncError(parseError(code: http.response.statusCode, rawBody: ""))
+                    }
+                    guard attempt < 2, NetworkReachability.isNetworkFailure(error) else { throw error }
+                    try await Task.sleep(for: .seconds(attempt + 1))
+                }
+            }
+        }
         let (tempURL, response) = try await downloadData(request)
         defer { try? FileManager.default.removeItem(at: tempURL) }
         guard let http = response as? HTTPURLResponse else {
@@ -432,7 +462,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         do {
             let id = try await startMultipartUpload(key: key, contentType: contentType)
             uploadId = id
-            let parts = try await uploadMultipartParts(uploadId: id, fileURL: fileURL)
+            let parts = try await uploadMultipartParts(uploadId: id, fileURL: fileURL, key: key)
             return try await completeMultipartUpload(uploadId: id, parts: parts, fallbackContentType: contentType)
         } catch {
             if let uploadId { await cancelMultipartUploadQuietly(uploadId: uploadId) }
@@ -453,29 +483,37 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         }
     }
 
-    private func uploadMultipartParts(uploadId: String, fileURL: URL) async throws -> [Int] {
+    private func uploadMultipartParts(uploadId: String, fileURL: URL, key: String) async throws -> [Int] {
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }
         var parts: [Int] = []
         var partNumber = 1
+        var uploaded: Int64 = 0
+        let total = Int64((try fileURL.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+        onTransfer(.init(key: key, uploading: true, completed: 0, total: total))
         while true {
+            try Task.checkCancellation()
             let chunk = try handle.read(upToCount: Int(multipartPartSizeBytes)) ?? Data()
             if chunk.isEmpty { break }
-            try await uploadMultipartPart(uploadId: uploadId, partNumber: partNumber, chunk: chunk)
+            let offset = uploaded
+            try await uploadMultipartPart(uploadId: uploadId, partNumber: partNumber, chunk: chunk) { [onTransfer] done in
+                onTransfer(.init(key: key, uploading: true, completed: offset + done, total: total))
+            }
+            uploaded += Int64(chunk.count)
             parts.append(partNumber)
             partNumber += 1
         }
         return parts
     }
 
-    private func uploadMultipartPart(uploadId: String, partNumber: Int, chunk: Data) async throws {
+    private func uploadMultipartPart(uploadId: String, partNumber: Int, chunk: Data, progress: @escaping @Sendable (Int64) -> Void) async throws {
         var request = makeRequest(
             "PUT",
             path: "/v1/kv-multipart/\(urlEncode(uploadId))/\(partNumber)",
             contentType: "application/octet-stream"
         )
         request.httpBody = chunk
-        let (data, response) = try await perform(request, uploadBody: chunk)
+        let (data, response) = try await perform(request, uploadBody: chunk, progress: progress)
         try ensureSuccess(response: response, data: data)
     }
 
@@ -526,15 +564,17 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         return request
     }
 
-    private func perform(_ request: URLRequest, uploadBody: Data? = nil) async throws -> (Data, URLResponse) {
+    private func perform(_ request: URLRequest, uploadBody: Data? = nil, progress: (@Sendable (Int64) -> Void)? = nil) async throws -> (Data, URLResponse) {
         for attempt in 0...Self.maxRateLimitRetries {
             do {
+                try Task.checkCancellation()
                 try await Self.requestGate.wait()
                 let result: (Data, URLResponse)
                 if let uploadBody {
                     var bodyless = request
                     bodyless.httpBody = nil
-                    result = try await session.upload(for: bodyless, from: uploadBody)
+                    result = try await session.upload(for: bodyless, from: uploadBody,
+                        delegate: progress.map(HttpSyncUploadProgressDelegate.init))
                 } else {
                     result = try await session.data(for: request)
                 }
@@ -546,17 +586,20 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 throw HttpSyncError(friendlyMessage(error))
             }
         }
         throw HttpSyncError("Sync server kept rate-limiting requests (HTTP 429). Try again in a moment.")
     }
 
-    private func uploadFile(request: inout URLRequest, fileURL: URL) async throws -> (Data, URLResponse) {
+    private func uploadFile(request: inout URLRequest, fileURL: URL, progress: @escaping @Sendable (Int64) -> Void) async throws -> (Data, URLResponse) {
         for attempt in 0...Self.maxRateLimitRetries {
             do {
+                try Task.checkCancellation()
                 try await Self.requestGate.wait()
-                let result = try await session.upload(for: request, fromFile: fileURL)
+                let result = try await session.upload(for: request, fromFile: fileURL,
+                    delegate: HttpSyncUploadProgressDelegate(progress))
                 if shouldRetryRateLimit(response: result.1, attempt: attempt) {
                     try await waitForRateLimit(response: result.1, attempt: attempt)
                     continue
@@ -565,6 +608,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 throw HttpSyncError(friendlyMessage(error))
             }
         }
@@ -574,6 +618,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     private func downloadData(_ request: URLRequest) async throws -> (URL, URLResponse) {
         for attempt in 0...Self.maxRateLimitRetries {
             do {
+                try Task.checkCancellation()
                 try await Self.requestGate.wait()
                 let result = try await session.download(for: request)
                 if shouldRetryRateLimit(response: result.1, attempt: attempt) {
@@ -585,6 +630,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 throw HttpSyncError(friendlyMessage(error))
             }
         }

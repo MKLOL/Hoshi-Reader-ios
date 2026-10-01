@@ -7,9 +7,10 @@ struct StatisticsOverviewView: View {
     @State private var model = StatisticsOverview()
     @State private var usage = UsageStatisticsModel()
     @State private var selectedTab = 0
-    @State private var calendarDay = MangaStatisticsTracker.dateKey(for: .now)
-    @AppStorage("statistics.dailyGoalMinutes") private var goal = 10
-    private var today: DailyReading { model.days.first { Calendar.current.isDateInToday($0.date) } ?? DailyReading(date: .now) }
+    @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
+    @AppStorage(ReadingDay.goalKey) private var goal = 10
+    @AppStorage(ReadingDay.resetKey) private var resetHour = 3
+    private var today: DailyReading { model.days.first { $0.date == readingDate } ?? DailyReading(date: readingDate) }
 
     var body: some View {
         List {
@@ -21,30 +22,44 @@ struct StatisticsOverviewView: View {
             else { StatisticsTrendsSections(reading: model.days, usage: usage) }
         }
         .navigationTitle("Statistics")
-        .onAppear { model.reload() }
+        .onAppear { refresh() }
         .task { await usage.reload() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            model.reload(); Task { await usage.reload() }
+            refresh(); Task { await usage.reload(resetHour: resetHour) }
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now in
-            let day = MangaStatisticsTracker.dateKey(for: now)
-            if day != calendarDay { calendarDay = day; model.reload(); Task { await usage.reload() } }
+            let day = ReadingDay.date(at: now, resetHour: resetHour)
+            if day != readingDate { refresh(); Task { await usage.reload(resetHour: resetHour) } }
         }
         .onReceive(NotificationCenter.default.publisher(for: .usageLogChanged).receive(on: RunLoop.main)) { _ in Task { await usage.reload() } }
-        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload() }
-        .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in model.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in refresh() }
+        .onChange(of: resetHour) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
+    }
+    private func refresh() {
+        readingDate = ReadingDay.date(at: .now, resetHour: resetHour)
+        model.reload(resetHour: resetHour)
     }
     @ViewBuilder private var overviewSections: some View {
         @Bindable var config = userConfig
             UsageTodaySection(reading: today, usage: usage.today)
             Section("Reading streak") {
-                let streak = StatisticsMath.streak(model.days, goalMinutes: goal)
+                let streak = StatisticsMath.streak(model.streakHistory.days, goalMinutes: goal, resetHour: resetHour)
                 LabeledContent("Current", value: "\(streak.current) days")
                 LabeledContent("Longest", value: "\(streak.longest) days")
-                Picker("Daily goal", selection: $goal) {
-                    ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) minutes").tag($0) }
+                LabeledContent("Daily goal", value: "\(min(120, max(1, goal))) minutes")
+                Slider(value: Binding(get: { Double(min(120, max(1, goal))) }, set: { goal = Int($0) }), in: 1...120, step: 1)
+                    .accessibilityLabel("Daily goal")
+                Picker("Day resets at", selection: $resetHour) {
+                    ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
                 }
-                ProgressView(value: min(today.seconds / Double(goal * 60), 1))
+                Text("All statistics days run from the selected hour until that hour the next morning.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.streakHistory.estimated {
+                    Text("Earlier history has no exact time. Your streak receives credit for either possible reading day; reading totals stay unchanged.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ProgressView(value: min(today.seconds / (Double(min(120, max(1, goal))) * 60), 1))
             }
             Section("All time") {
                 LabeledContent("Reading time", value: StatisticsMath.duration(model.books.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }))
@@ -80,11 +95,15 @@ struct StatisticsOverviewView: View {
             }
     }
 
+    private static func hourLabel(_ hour: Int) -> String {
+        ReadingDay.boundary(on: .now, resetHour: hour).formatted(date: .omitted, time: .shortened)
+    }
 }
 
 struct BookStatisticsDetailView: View {
     let bookId: UUID
     @State private var model = StatisticsOverview()
+    @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     var body: some View {
         List {
             if let item = model.books.first(where: { $0.id == bookId }) {
@@ -121,8 +140,10 @@ struct BookStatisticsDetailView: View {
             }
         }
         .navigationTitle("Book statistics")
-        .onAppear { model.reload() }
-        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload() }
+        .onAppear { model.reload(resetHour: resetHour) }
+        .onChange(of: resetHour) { _, _ in model.reload(resetHour: resetHour) }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in model.reload(resetHour: resetHour) }
+        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload(resetHour: resetHour) }
     }
 }
 
@@ -152,9 +173,10 @@ struct DeviceReadingSection: View {
 
 struct ReadingHeatmap: View {
     let days: [DailyReading]
+    @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     var body: some View {
         let calendar = Calendar.current
-        let today = calendar.startOfDay(for: .now)
+        let today = ReadingDay.date(at: .now, resetHour: resetHour)
         let mondayOffset = (calendar.component(.weekday, from: today) + 5) % 7
         let start = calendar.date(byAdding: .day, value: -(15 * 7 + mondayOffset), to: today)!
         let maximum = days.filter { $0.date >= start && $0.date <= today }.map(\.seconds).max() ?? 1

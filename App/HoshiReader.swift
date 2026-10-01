@@ -24,6 +24,7 @@ struct HoshiReaderApp: App {
     private var shortcutHandler = ShortcutHandler.shared
     
     init() {
+        HttpSyncBackgroundDownloads.shared.restore()
         TokenStorage.clearOldKeys()
         BookStorage.migrateFromDocuments()
         if let books = try? BookStorage.getBooksDirectory() {
@@ -48,13 +49,15 @@ struct HoshiReaderApp: App {
     
     var body: some Scene {
         WindowGroup {
-            BookshelfView(
-                pendingImportURL: $pendingImportURL,
-                pendingRemoteImportURL: $pendingRemoteImportURL,
-                pendingLookup: $pendingLookup,
-                pendingTab: $pendingTab,
-                pendingNewsURL: $pendingNewsURL
-            )
+            Group {
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_PODCAST"] == "1" {
+                    PodcastTranscriptUITestFixture()
+                } else { bookshelf }
+                #else
+                bookshelf
+                #endif
+            }
             .environment(userConfig)
             .preferredColorScheme(userConfig.theme == .custom ? userConfig.uiTheme.colorScheme : (userConfig.theme == .sepia && userConfig.sepiaInvertInDark ? nil : userConfig.theme.colorScheme))
             .onChange(of: scenePhase, initial: true) { _, phase in
@@ -89,6 +92,16 @@ struct HoshiReaderApp: App {
         }
     }
     
+    private var bookshelf: some View {
+        BookshelfView(
+                pendingImportURL: $pendingImportURL,
+                pendingRemoteImportURL: $pendingRemoteImportURL,
+                pendingLookup: $pendingLookup,
+                pendingTab: $pendingTab,
+                pendingNewsURL: $pendingNewsURL
+            )
+    }
+
     private func handleURL(_ url: URL) {
         if url.scheme == "hoshi" {
             if url.host == "ankiFetch" {
@@ -152,6 +165,11 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         if identifier == PodcastDownloads.identifier {
             PodcastDownloads.shared.backgroundCompletion = completionHandler
             PodcastDownloads.shared.restore()
+            return
+        }
+        if identifier == HttpSyncBackgroundDownloads.identifier {
+            HttpSyncBackgroundDownloads.shared.backgroundCompletion = completionHandler
+            HttpSyncBackgroundDownloads.shared.restore()
             return
         }
         ModelDownloadManager.shared.setBackgroundCompletionHandler(

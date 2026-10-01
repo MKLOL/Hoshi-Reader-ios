@@ -17,9 +17,17 @@ nonisolated struct MangaStatisticsTracker {
     var today: Statistics {
         dayTotal(at: .now)
     }
-    func dayTotal(at date: Date) -> Statistics {
-        let day = Self.dateKey(for: date)
-        return Statistics.total(rows.filter { $0.dateKey == day }, title: title, day: day)
+    func dayTotal(at date: Date, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = .current) -> Statistics {
+        let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
+        let total = ReadingDay.days(reading: rows, resetHour: resetHour, calendar: calendar).first { $0.date == day }
+        var result = Statistics.empty(title: title, day: ReadingDay.key(day, calendar: calendar))
+        result.readingTime = total?.seconds ?? 0; result.charactersRead = total?.characters ?? 0
+        result.lastReadingSpeed = StatisticsNumbers.speed(count: result.charactersRead, seconds: result.readingTime)
+        return result
+    }
+    func textTotal(_ text: [MangaTextStatistic], at date: Date = .now, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = .current) -> Int {
+        let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
+        return ReadingDay.days(reading: rows, text: text, resetHour: resetHour, calendar: calendar).first { $0.date == day }?.characters ?? 0
     }
     var allTime: Statistics { Statistics.total(rows, title: title) }
     private var rows: [Statistics] { Statistics.merged(allStats.filter { $0.key != localToday.key } + [localToday]) }
@@ -63,6 +71,9 @@ nonisolated struct MangaStatisticsTracker {
         let stamp = StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000)
         session.add(seconds: elapsed, count: delta, stamp: stamp)
         localToday.add(seconds: elapsed, count: delta, stamp: stamp)
+        let hours = ReadingDay.hours(from: lastTimestamp, to: now)
+        localToday.readingTimeByHour = ReadingDay.sumHours([localToday.readingTimeByHour, hours])
+        session.readingTimeByHour = ReadingDay.sumHours([session.readingTimeByHour, hours])
         hasUpdated = true
         resetBaseline(currentPage: currentPage, now: now)
     }

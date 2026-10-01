@@ -416,3 +416,12 @@ nonisolated struct HttpSyncBookmarkMapEntry: Codable, Sendable, Equatable {
     let lastModified: String
     let value: HttpSyncBookmarkBlob?
 }
+
+
+extension HttpSyncBookmarkBlob {
+    /// Reject damaged positions before revision ordering can replace a readable local bookmark.
+    nonisolated var isValid: Bool {
+        chapterIndex >= 0 && progress.isFinite && (0...1).contains(progress) &&
+            characterCount >= 0 && (rev ?? 0) >= 0 && parseRfc3339(lastModified) != nil
+    }
+}

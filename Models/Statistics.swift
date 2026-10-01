@@ -33,4 +33,43 @@ nonisolated struct Statistics: Codable, Equatable, Sendable {
     var lastStatisticModified: Int
     var deviceId: String? = nil
     var deviceName: String? = nil
+    /// Counted seconds by local ISO date/hour, shared with Android; missing hours are legacy evidence.
+    var readingTimeByHour: [String: Double] = [:]
+}
+
+nonisolated extension Statistics {
+    private enum CodingKeys: String, CodingKey {
+        case title, dateKey, charactersRead, readingTime, minReadingSpeed, altMinReadingSpeed
+        case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        title = try values.decode(String.self, forKey: .title)
+        dateKey = try values.decode(String.self, forKey: .dateKey)
+        charactersRead = try values.decodeIfPresent(Int.self, forKey: .charactersRead) ?? 0
+        readingTime = try values.decodeIfPresent(Double.self, forKey: .readingTime) ?? 0
+        minReadingSpeed = try values.decodeIfPresent(Int.self, forKey: .minReadingSpeed) ?? 0
+        altMinReadingSpeed = try values.decodeIfPresent(Int.self, forKey: .altMinReadingSpeed) ?? 0
+        lastReadingSpeed = try values.decodeIfPresent(Int.self, forKey: .lastReadingSpeed) ?? 0
+        maxReadingSpeed = try values.decodeIfPresent(Int.self, forKey: .maxReadingSpeed) ?? 0
+        lastStatisticModified = try values.decodeIfPresent(Int.self, forKey: .lastStatisticModified) ?? 0
+        deviceId = try values.decodeIfPresent(String.self, forKey: .deviceId)
+        deviceName = try values.decodeIfPresent(String.self, forKey: .deviceName)
+        readingTimeByHour = try values.decodeIfPresent([String: Double].self, forKey: .readingTimeByHour) ?? [:]
+    }
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(title, forKey: .title)
+        try values.encode(dateKey, forKey: .dateKey)
+        try values.encode(charactersRead, forKey: .charactersRead)
+        try values.encode(readingTime, forKey: .readingTime)
+        try values.encode(minReadingSpeed, forKey: .minReadingSpeed)
+        try values.encode(altMinReadingSpeed, forKey: .altMinReadingSpeed)
+        try values.encode(lastReadingSpeed, forKey: .lastReadingSpeed)
+        try values.encode(maxReadingSpeed, forKey: .maxReadingSpeed)
+        try values.encode(lastStatisticModified, forKey: .lastStatisticModified)
+        try values.encodeIfPresent(deviceId, forKey: .deviceId)
+        try values.encodeIfPresent(deviceName, forKey: .deviceName)
+        if !readingTimeByHour.isEmpty { try values.encode(readingTimeByHour, forKey: .readingTimeByHour) }
+    }
 }

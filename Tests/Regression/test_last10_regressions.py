@@ -345,19 +345,14 @@ class LastTenRegressionTests(unittest.TestCase):
         ]
         self.assertIn("guard controller.state != .browsingHistory else", history_button)
 
-    def test_ai_popup_has_bounded_scroll_window_and_wraps_long_tokens(self):
-        popup = read("Features/AI/MangaAiPopupView.swift")
+    def test_ai_popup_tokenizer_preserves_words_and_japanese_lookup_units(self):
+        # PopupCardStyleTests exercises responsive card geometry against production APIs.
+        # Keep the real tokenizer probe here; implementation spelling is not its contract.
         tokenizer = read("Features/AI/MangaAiTextTokenizer.swift")
-        self.assertIn("let maxCardWidth: CGFloat = isPad ? 680 : 520", popup)
-        self.assertIn(".frame(width: width, height: height)", popup)
-        self.assertIn(".scrollIndicators(.visible)", popup)
-        self.assertNotIn("let maxCharactersPerToken = 8", popup)
-        self.assertIn("import NaturalLanguage", tokenizer)
-        self.assertIn("NLTokenizer(unit: .word)", tokenizer)
-        self.assertNotIn("maxUnbrokenCharacters", tokenizer)
         swift = shutil.which("swift")
-        if swift is not None:
-            assertions = r'''
+        if swift is None:
+            self.skipTest("swift is required to execute tokenizer behavior regression")
+        assertions = r'''
 
 let text = "This doesn't split words, and we're okay."
 let segments = MangaAiTextTokenizer.segments(in: text).map(\.text)
@@ -370,10 +365,10 @@ let mixed = MangaAiTextTokenizer.segments(in: "日本語 doesn't")
 precondition(mixed.filter { $0.kind == .japanese }.map(\.text) == ["日", "本", "語"])
 precondition(mixed.contains { $0.text == "doesn't" && $0.kind == .word })
 '''
-            with tempfile.TemporaryDirectory() as tmp:
-                script = Path(tmp) / "main.swift"
-                script.write_text(tokenizer + assertions, encoding="utf-8")
-                subprocess.run([swift, str(script)], check=True, capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "main.swift"
+            script.write_text(tokenizer + assertions, encoding="utf-8")
+            subprocess.run([swift, str(script)], check=True, capture_output=True, text=True)
 
     def test_ai_screenshot_viewer_uses_native_zoom_scroll_view(self):
         popup = read("Features/AI/MangaAiPopupView.swift")

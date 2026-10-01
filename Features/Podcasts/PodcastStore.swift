@@ -12,6 +12,8 @@ import Foundation
     private(set) var preparing: Set<String> = []
     private(set) var downloads: [String: Double] = [:]
     private(set) var downloadErrors: [String: String] = [:]
+    private(set) var transcriptDownloads: [String: Double] = [:]
+    private(set) var transcriptDownloadErrors: [String: String] = [:]
     private(set) var receivedUptime: TimeInterval?
     private var selectedConfigID: String?
     private var refreshTask: Task<Void, Never>?
@@ -52,7 +54,7 @@ import Foundation
             generation += 1
             cancelRefresh()
             if selectedConfigID != nil { PodcastPlayback.shared.stop(); PodcastDownloads.shared.cancelAll() }
-            selectedConfigID = id; account = nil; catalogue = PodcastCatalogue(); preparing = []; downloads = [:]; downloadErrors = [:]; error = nil
+            selectedConfigID = id; account = nil; catalogue = PodcastCatalogue(); preparing = []; downloads = [:]; downloadErrors = [:]; transcriptDownloads = [:]; transcriptDownloadErrors = [:]; error = nil
             if !id.isEmpty, files.validatedAccount == id { account = id; catalogue = files.load(id) }
             PodcastDownloads.shared.restore()
         }
@@ -77,7 +79,7 @@ import Foundation
     func invalidate() {
         PodcastPlayback.shared.stop(); PodcastDownloads.shared.cancelAll()
         generation += 1; cancelRefresh()
-        account = nil; files.validatedAccount = nil; preparing = []; downloads = [:]; clearLiveStatus()
+        account = nil; files.validatedAccount = nil; preparing = []; downloads = [:]; transcriptDownloads = [:]; downloadErrors = [:]; transcriptDownloadErrors = [:]; clearLiveStatus()
     }
     func clearLiveStatus() { catalogue.worker = nil; catalogue.generating = nil; receivedUptime = nil }
     func refresh() async {
@@ -118,7 +120,7 @@ import Foundation
         } catch { if self.account == account, configID == account, generation == version { handle(error) } }
     }
     func download(_ episode: PodcastEpisode) {
-        guard let account, enabled, PodcastRules.validID(episode.id) else { return }
+        guard let account, enabled, PodcastRules.validID(episode.id), downloads[episode.id] == nil, !isDownloaded(episode.id) else { return }
         do {
             try files.remember(episode, account: account, shows: catalogue.shows)
             downloadErrors[episode.id] = nil
@@ -126,20 +128,41 @@ import Foundation
             try PodcastDownloads.shared.start(episode: episode.id, account: account, config: configuration())
         } catch { downloads[episode.id] = nil; downloadErrors[episode.id] = PodcastRules.failureMessage(error) }
     }
+    func downloadTranscript(_ episode: PodcastEpisode) {
+        guard let account, enabled, PodcastRules.validID(episode.id), episode.transcript,
+              transcriptDownloads[episode.id] == nil, !isTranscriptDownloaded(episode.id) else { return }
+        do {
+            try files.remember(episode, account: account, shows: catalogue.shows)
+            transcriptDownloadErrors[episode.id] = nil
+            transcriptDownloads[episode.id] = 0
+            try PodcastDownloads.shared.start(episode: episode.id, account: account, config: configuration(), transcript: true)
+        } catch { transcriptDownloads[episode.id] = nil; transcriptDownloadErrors[episode.id] = PodcastRules.failureMessage(error) }
+    }
     func isDownloaded(_ id: String) -> Bool {
         _ = revision
         return account.map { files.isDownloaded(account: $0, id: id) } ?? false
     }
-    func downloadProgress(account: String, id: String, fraction: Double) {
-        guard self.account == account, configID == account else { return }
-        downloads[id] = fraction
+    func isTranscriptDownloaded(_ id: String) -> Bool {
+        _ = revision
+        return account.map { files.isTranscriptDownloaded(account: $0, id: id) } ?? false
     }
-    func downloadFinished(account: String, id: String, failure: String?) {
-        guard self.account == account, configID == account else { return }
-        downloads[id] = nil; downloadErrors[id] = failure; revision += 1
-        // Includes lessons whose show was archived while the transfer ran.
+    func transcript(_ id: String) -> PodcastTranscript? {
+        guard let account, enabled else { return nil }
+        return files.loadTranscript(account: account, id: id)
+    }
+    func downloadProgress(account: String, id: String, fraction: Double, transcript: Bool = false) {
+        guard self.account == account, configID == account, PodcastRules.validID(id) else { return }
+        let progress = fraction.isFinite ? min(1, max(0, fraction)) : 0
+        if transcript { transcriptDownloads[id] = progress } else { downloads[id] = progress }
+    }
+    func downloadFinished(account: String, id: String, failure: String?, transcript: Bool = false) {
+        guard self.account == account, configID == account, PodcastRules.validID(id) else { return }
+        if transcript { transcriptDownloads[id] = nil; transcriptDownloadErrors[id] = failure }
+        else { downloads[id] = nil; downloadErrors[id] = failure }
+        revision += 1
+        // Includes episodes whose show was archived while either media transfer ran.
         let cached = files.load(account)
-        catalogue = catalogue.retaining(cached, downloaded: Set(cached.episodes.filter { files.isDownloaded(account: account, id: $0.id) }.map(\.id)))
+        catalogue = catalogue.retaining(cached, downloaded: Set(cached.episodes.filter { files.hasSavedMedia(account: account, id: $0.id) }.map(\.id)))
     }
     private func handle(_ failure: Error) {
         if let http = failure as? PodcastHTTPError, [401, 403].contains(http.status) { invalidate() }
