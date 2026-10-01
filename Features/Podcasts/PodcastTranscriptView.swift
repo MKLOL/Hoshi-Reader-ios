@@ -10,6 +10,7 @@ struct PodcastTranscriptView: View {
     @State private var loaded = false
     @State private var showEnglish = false
     @State private var following = true
+    @State private var showAppearance = false
     @State private var lookup = PodcastTranscriptLookup()
     init(episode: PodcastEpisode, store: PodcastStore = .shared, playback: PodcastPlayback = .shared,
          lookup: PodcastTranscriptLookup = PodcastTranscriptLookup()) {
@@ -51,13 +52,20 @@ struct PodcastTranscriptView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { lookup.dismiss(); showAppearance = true } label: { Image(systemName: "textformat.size") }
+                    .accessibilityLabel("Appearance")
+                    .accessibilityIdentifier("podcast-appearance")
                 if transcript?.lines.contains(where: { !($0.english?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }) == true {
                     Button { showEnglish.toggle() } label: { Image(systemName: "translate") }
                         .accessibilityLabel(showEnglish ? "Hide English" : "Show English")
                         .accessibilityIdentifier("podcast-toggle-english")
                 }
             }
+        }
+        .sheet(isPresented: $showAppearance) {
+            AppearanceView(userConfig: config, showDismiss: true, textOnly: true)
+                .presentationDetents([.medium, .large])
         }
         .task(id: store.account) {
             guard store.enabled else { lookup.dismiss(); transcript = nil; loaded = true; return }
@@ -108,7 +116,7 @@ struct PodcastTranscriptView: View {
     }
 }
 
-private struct PodcastTranscriptRow: View {
+struct PodcastTranscriptRow: View {
     let line: PodcastTranscriptLine
     let index: Int
     let active: Bool
@@ -120,6 +128,8 @@ private struct PodcastTranscriptRow: View {
     let play: () -> Void
     let select: (SentenceTap, CGRect) -> Void
     @State private var frame = CGRect.zero
+    @State private var annotatedText: String?
+    @State private var ruby: [RubyAnnotation] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -127,8 +137,9 @@ private struct PodcastTranscriptRow: View {
                 .accessibilityLabel("Play from \(StatisticsMath.duration(line.start))")
                 .accessibilityIdentifier("podcast-time-\(index)")
             SentenceTextView(text: line.text,
-                font: SentenceFontResolver.font(named: config.selectedFont, size: CGFloat(config.fontSize), verticalWriting: false),
-                color: .label, lineHeightMultiple: CGFloat(config.lineHeight), highlight: highlight, ruby: [],
+                font: SentenceFontResolver.sentenceFont(named: config.selectedFont, size: config.fontSize),
+                color: .label, lineHeightMultiple: CGFloat(config.lineHeight), highlight: highlight,
+                ruby: !config.readerHideFurigana && annotatedText == line.text ? ruby : [],
                 onTap: { select($0, frame) }, onTapOutside: dismissLookup, onSwipeLeft: {}, onSwipeRight: {}, fitsContent: true)
                 .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(coordinateSpace)) } action: { frame = $0 }
                 .accessibilityIdentifier("podcast-text-\(index)")
@@ -139,5 +150,16 @@ private struct PodcastTranscriptRow: View {
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
         .background(active ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
         .accessibilityValue(active ? "Current line" : "")
+        .task(id: config.readerHideFurigana ? nil : line.text) {
+            annotatedText = nil; ruby = []
+            guard !config.readerHideFurigana else { return }
+            let text = line.text
+            let work = Task.detached(priority: .userInitiated) { try JapaneseFurigana.annotations(for: text) }
+            let result = try? await withTaskCancellationHandler {
+                try await work.value
+            } onCancel: { work.cancel() }
+            guard !Task.isCancelled, let result else { return }
+            ruby = result; annotatedText = text
+        }
     }
 }

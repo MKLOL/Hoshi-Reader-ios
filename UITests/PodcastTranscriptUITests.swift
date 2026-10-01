@@ -1,6 +1,36 @@
 import XCTest
 
 final class PodcastTranscriptUITests: XCTestCase {
+    @MainActor func testReaderAppearanceIsAvailableInsideTranscript() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HOSHI_UI_TESTING_PODCAST"] = "1"
+        app.launch()
+        let appearance = app.buttons["podcast-appearance"]
+        XCTAssertTrue(appearance.waitForExistence(timeout: 15))
+        capture(app, "podcast-furigana-visible")
+        appearance.tap()
+        let hide = app.switches["Hide Furigana"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Text Orientation"].exists)
+        XCTAssertFalse(app.staticTexts["Paginated"].exists)
+        let initial = try XCTUnwrap(hide.value as? String, hide.debugDescription)
+        XCTAssertTrue(["0", "1"].contains(initial), hide.debugDescription)
+        // SwiftUI exposes the whole labeled row as the switch. Tap the visible trailing
+        // control; a center tap lands in empty space between its label and the knob.
+        func toggle() {
+            hide.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: hide.frame.width - min(26, hide.frame.width / 2), dy: hide.frame.height / 2)).tap()
+        }
+        toggle()
+        XCTAssertTrue(wait { hide.value as? String != initial })
+        toggle()
+        XCTAssertTrue(wait { hide.value as? String == initial })
+        app.buttons["Close appearance"].tap()
+        XCTAssertTrue(appearance.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["podcast-play-pause"].label, "Play")
+    }
+
     @MainActor func testTimestampPlaybackWordLookupEnglishAndFollowing() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

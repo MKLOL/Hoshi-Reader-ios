@@ -148,10 +148,9 @@ struct SentenceReaderView: View {
             if let position, let sentence = sentenceBook.sentence(at: position) {
                 SentenceTextView(
                     text: sentence.text,
-                    font: SentenceFontResolver.font(
+                    font: SentenceFontResolver.sentenceFont(
                         named: userConfig.selectedFont,
-                        size: CGFloat(userConfig.fontSize) * 1.1,
-                        verticalWriting: false
+                        size: userConfig.fontSize
                     ),
                     color: UIColor(foregroundColor),
                     lineHeightMultiple: CGFloat(userConfig.lineHeight),

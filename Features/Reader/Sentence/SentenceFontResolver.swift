@@ -19,16 +19,19 @@ import UIKit
 
 @MainActor
 enum SentenceFontResolver {
-    /// PostScript name per font file already registered in this process; nil marks a file that
-    /// could not be registered, so a broken font is not retried on every layout pass.
-    private static var registered: [URL: String?] = [:]
+    /// Every face in a registered collection. An empty array remembers an unreadable font.
+    private static var registered: [URL: [String]] = [:]
+
+    /// Sentence mode and transcripts share the same horizontal reading typography.
+    static func sentenceFont(named name: String, size: Int) -> UIFont {
+        font(named: name, size: CGFloat(size) * 1.1, verticalWriting: false)
+    }
 
     /// The reader's font at `size`, falling back to the system serif face when the selected font
     /// cannot be resolved.
     static func font(named name: String, size: CGFloat, verticalWriting: Bool) -> UIFont {
         if let url = try? FontManager.shared.fontUrl(name: name, verticalWriting: verticalWriting),
-           let postScriptName = postScriptName(for: url),
-           let font = UIFont(name: postScriptName, size: size) {
+           let font = font(at: url, preferredPostScriptName: FontManager.postScriptName(for: name, verticalWriting: verticalWriting), size: size) {
             return font
         }
         // The two built-in Japanese faces have no file — they are installed system-wide.
@@ -42,17 +45,24 @@ enum SentenceFontResolver {
         return serif.map { UIFont(descriptor: $0, size: size) } ?? .systemFont(ofSize: size)
     }
 
-    private static func postScriptName(for url: URL) -> String? {
+    static func font(at url: URL, preferredPostScriptName: String?, size: CGFloat) -> UIFont? {
+        let names = postScriptNames(for: url)
+        let name = preferredPostScriptName.flatMap { names.contains($0) ? $0 : nil } ?? names.first
+        return name.flatMap { UIFont(name: $0, size: size) }
+    }
+
+    private static func postScriptNames(for url: URL) -> [String] {
         if let cached = registered[url] { return cached }
         var error: Unmanaged<CFError>?
         // A font already registered by an earlier call reports an "already registered" error, which
         // is a success for our purposes — the name still resolves below.
         CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error)
         error?.release()
-        let name = CGDataProvider(url: url as CFURL)
-            .flatMap { CGFont($0) }
-            .flatMap { $0.postScriptName as String? }
-        registered[url] = name
-        return name
+        // CGFont(dataProvider:) sees only the first collection face: Klee.ttc starts with
+        // Demibold, while the reader's downloaded family explicitly selects Klee-Medium.
+        let descriptors = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor] ?? []
+        let names = descriptors.compactMap { CTFontDescriptorCopyAttribute($0, kCTFontNameAttribute) as? String }
+        registered[url] = names
+        return names
     }
 }

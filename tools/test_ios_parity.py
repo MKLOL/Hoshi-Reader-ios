@@ -69,8 +69,9 @@ def main():
         with log.open("w") as output:
             ui = subprocess.run(command, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT, check=False, timeout=900)
         output = log.read_text()
-        passed = any("PodcastTranscriptUITests" in line and "testTimestampPlaybackWordLookupEnglishAndFollowing" in line and "passed" in line
-                     for line in output.splitlines())
+        required = ("testTimestampPlaybackWordLookupEnglishAndFollowing", "testReaderAppearanceIsAvailableInsideTranscript")
+        passed = all(any("PodcastTranscriptUITests" in line and method in line and "passed" in line
+                         for line in output.splitlines()) for method in required)
         if ui.returncode or "** TEST SUCCEEDED **" not in output or not passed:
             print(f"Podcast UI regression gate failed; see {log}", file=sys.stderr)
             return ui.returncode or 1

@@ -12,6 +12,8 @@ import UniformTypeIdentifiers
 struct AppearanceView: View {
     let userConfig: UserConfig
     let showDismiss: Bool
+    /// Native transcript rows share reader fonts and readings, without pagination-only controls.
+    var textOnly = false
     @Environment(\.dismiss) var dismiss
     @State private var isImportingFont = false
     @State private var importedFonts: [String] = []
@@ -44,6 +46,7 @@ struct AppearanceView: View {
         )
         NavigationStack {
             List {
+                if !textOnly {
                 Section("Theme") {
                     Picker("Appearance", selection: $userConfig.theme) {
                         ForEach(Themes.allCases, id: \.self) { mode in
@@ -68,8 +71,10 @@ struct AppearanceView: View {
                         ColorPicker("Info Color", selection: $userConfig.customInfoColor)
                     }
                 }
+                }
                 
                 Section("Text") {
+                    if !textOnly {
                     HStack {
                         Text("Text Orientation")
                         Spacer()
@@ -79,6 +84,7 @@ struct AppearanceView: View {
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 100)
+                    }
                     }
 
                     HStack {
@@ -153,9 +159,12 @@ struct AppearanceView: View {
 
                     Toggle("Hide Furigana", isOn: $userConfig.readerHideFurigana)
 
-                    Toggle("Sentence translations", isOn: $userConfig.readerShowSentenceTranslations)
+                    if !textOnly {
+                        Toggle("Sentence translations", isOn: $userConfig.readerShowSentenceTranslations)
+                    }
                 }
                 
+                if !textOnly {
                 Section("Layout") {
                     HStack {
                         Text("Mode")
@@ -277,6 +286,7 @@ struct AppearanceView: View {
                         }
                     }
                 }
+                }
             }
             .navigationTitle("Appearance")
             .navigationBarTitleDisplayMode(.inline)
@@ -288,6 +298,7 @@ struct AppearanceView: View {
                         } label: {
                             Image(systemName: "xmark")
                         }
+                        .accessibilityLabel("Close appearance")
                     }
                 }
             }

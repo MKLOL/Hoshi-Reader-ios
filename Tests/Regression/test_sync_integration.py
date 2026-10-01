@@ -179,6 +179,17 @@ class IosSyncIntegration(unittest.TestCase):
                 "PodcastTranscriptHTTPTests": [
                     "testTranscriptChainRejectsInvalidTextBeforeAudioAndPublishesBothDownloads",
                 ],
+                "PodcastTranscriptAppearanceTests": [
+                    "testTranscriptGeneratesVisibleRubyAndFollowsReaderAppearanceChanges",
+                ],
+                "PodcastTranscriptPlaybackTests": [
+                    "testContentFittingRubyReservesSpaceForTheFirstReadingAndMeasuresStably",
+                    "testFirstLineRubyActuallyDrawsAndDisappearsWhenRemoved",
+                    "testRubyOnWrappedUnicodeTextKeepsGlyphTapOffsetsAndAnchors",
+                ],
+                "SentenceFontResolverTests": [
+                    "testBuiltInReaderFamiliesKeepTheirJapaneseFacesAndSentenceSize",
+                ],
             }
             for suite, methods in required.items():
                 for method in methods:

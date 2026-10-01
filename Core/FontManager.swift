@@ -142,14 +142,16 @@ class FontManager {
         return nil
     }
     
-    nonisolated private static func postScriptName(for familyName: String) -> String? {
+    /// The intended face inside downloadable collections, shared by WebKit's file selection
+    /// and native sentence/transcript text. A collection's first face may be a heavier weight.
+    nonisolated static func postScriptName(for familyName: String, verticalWriting: Bool = true) -> String? {
         switch familyName {
         case "Klee":
             return "Klee-Medium"
         case "Tsukushi A Round Gothic":
             return "TsukuARdGothic-Regular"
         case "YuKyokasho":
-            return "YuKyo-Medium"
+            return verticalWriting ? "YuKyo-Medium" : "YuKyo_Yoko-Medium"
         case "YuMincho":
             return "YuMin-Medium"
         case "YuGothic":
