@@ -181,11 +181,17 @@ class IosSyncIntegration(unittest.TestCase):
                 ],
                 "PodcastTranscriptAppearanceTests": [
                     "testTranscriptGeneratesVisibleRubyAndFollowsReaderAppearanceChanges",
+                    "testRubySeparatesOkuriganaAndUsesNativeWebKitLayoutWhenWrapped",
+                    "testSharedReaderSelectionExcludesRubyAndTimestampActions",
+                    "testFollowingRevealsCurrentLineWithoutMovingIndependentReading",
+                    "testDelayedFontLoadCannotRestoreAnAnchorAfterTheReaderScrolls",
                 ],
-                "PodcastTranscriptPlaybackTests": [
-                    "testContentFittingRubyReservesSpaceForTheFirstReadingAndMeasuresStably",
-                    "testFirstLineRubyActuallyDrawsAndDisappearsWhenRemoved",
-                    "testRubyOnWrappedUnicodeTextKeepsGlyphTapOffsetsAndAnchors",
+
+                "FeatureParityTests": [
+                    "testBothEpubReadersPreserveSharedTypographyRubyAndBaseText",
+                ],
+                "SentenceTextViewTests": [
+                    "testFullScreenSentenceCentersAndKeepsUnicodeTapCoordinates",
                 ],
                 "SentenceFontResolverTests": [
                     "testBuiltInReaderFamiliesKeepTheirJapaneseFacesAndSentenceSize",

@@ -37,7 +37,9 @@ final class PodcastTranscriptUITests: XCTestCase {
         app.launchEnvironment["HOSHI_UI_TESTING_PODCAST"] = "1"
         app.launch()
         XCUIDevice.shared.orientation = .portrait
-        let timestamp = app.buttons["podcast-time-1"]
+        let transcript = app.webViews["podcast-transcript-lines"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 15), app.debugDescription)
+        let timestamp = transcript.buttons["Play from 0m 10s"]
         XCTAssertTrue(timestamp.waitForExistence(timeout: 15), app.debugDescription)
         let player = app.buttons["podcast-play-pause"]
         XCTAssertEqual(player.label, "Play", "Opening a transcript must be quiet.")
@@ -47,15 +49,22 @@ final class PodcastTranscriptUITests: XCTestCase {
         app.buttons["podcast-toggle-english"].tap()
         timestamp.tap()
         XCTAssertTrue(wait { player.label == "Pause" })
-        let sentence = app.descendants(matching: .any)["podcast-text-1"].firstMatch
+        let sentence = transcript.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "本")).firstMatch
         XCTAssertTrue(sentence.waitForExistence(timeout: 5))
-        sentence.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.25)).tap()
+        // WebKit exposes the ruby plus following kana as one accessibility text element
+        // ("本ほんを"). Its upper third is the reading; the lower left is the 本 base glyph.
+        sentence.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.75)).tap()
         XCTAssertTrue(wait { player.label == "Play" }, "A word tap must pause audio.")
-        let word = app.webViews.staticTexts["本"].firstMatch
-        XCTAssertTrue(word.waitForExistence(timeout: 10), app.debugDescription)
+        // A WKWebView exposes nested WebViews without identifiers. Exclude the entire
+        // transcript viewport, not just its named outer node, when checking the dictionary card.
+        XCTAssertTrue(wait {
+            app.webViews.allElementsBoundByIndex.contains { web in
+                web.frame != transcript.frame && web.staticTexts["本"].firstMatch.exists
+            }
+        }, app.debugDescription)
         capture(app, "podcast-word-lookup-pauses-original")
         // Drag the exposed margin, not the dictionary card that overlays the list centre.
-        let lines = app.scrollViews["podcast-transcript-lines"]
+        let lines = transcript
         lines.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.85)).press(forDuration: 0.1,
             thenDragTo: lines.coordinate(withNormalizedOffset: CGVector(dx: 0.94, dy: 0.25)))
         let follow = app.buttons["Follow playback"]

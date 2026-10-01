@@ -38,6 +38,7 @@
 		FACE0000000000000000000A /* JapaneseFuriganaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010A /* JapaneseFuriganaTests.swift */; };
 		FACE0000000000000000000B /* SentenceFontResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010B /* SentenceFontResolverTests.swift */; };
 		FACE0000000000000000000C /* PodcastTranscriptAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010C /* PodcastTranscriptAppearanceTests.swift */; };
+		FACE0000000000000000000D /* SentenceTextViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010D /* SentenceTextViewTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -108,6 +109,7 @@
 		FACE0000000000000000010A /* JapaneseFuriganaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JapaneseFuriganaTests.swift; sourceTree = "<group>"; };
 		FACE0000000000000000010B /* SentenceFontResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceFontResolverTests.swift; sourceTree = "<group>"; };
 		FACE0000000000000000010C /* PodcastTranscriptAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastTranscriptAppearanceTests.swift; sourceTree = "<group>"; };
+		FACE0000000000000000010D /* SentenceTextViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceTextViewTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -318,6 +320,7 @@
 				FACE00000000000000000107 /* PodcastTranscriptHTTPTests.swift */,
 				FACE00000000000000000108 /* MangaReadabilityParityTests.swift */,
 				FACE0000000000000000010C /* PodcastTranscriptAppearanceTests.swift */,
+				FACE0000000000000000010D /* SentenceTextViewTests.swift */,
 				FACE0000000000000000010B /* SentenceFontResolverTests.swift */,
 				FACE0000000000000000010A /* JapaneseFuriganaTests.swift */,
 				1AF21FD83BC8A779CCA7B886 /* SyncIntegrationTests.swift */,
@@ -543,6 +546,7 @@
 				FACE00000000000000000007 /* PodcastTranscriptHTTPTests.swift in Sources */,
 				FACE00000000000000000008 /* MangaReadabilityParityTests.swift in Sources */,
 				FACE0000000000000000000C /* PodcastTranscriptAppearanceTests.swift in Sources */,
+				FACE0000000000000000000D /* SentenceTextViewTests.swift in Sources */,
 				FACE0000000000000000000B /* SentenceFontResolverTests.swift in Sources */,
 				FACE0000000000000000000A /* JapaneseFuriganaTests.swift in Sources */,
 				808AA22008165367F5046F9E /* SyncIntegrationTests.swift in Sources */,

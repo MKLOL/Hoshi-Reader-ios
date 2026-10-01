@@ -43,15 +43,12 @@ struct SentenceTextView: UIViewRepresentable {
     let onTapOutside: () -> Void
     let onSwipeLeft: () -> Void
     let onSwipeRight: () -> Void
-    /// Transcript rows grow to fit their text; sentence mode keeps its full-height scrolling view.
-    var fitsContent = false
 
     /// Furigana are half the base size, as in the web reader.
     private static let rubySizeFactor: CGFloat = 0.5
 
     func makeUIView(context: Context) -> CenteringTextView {
         let view = CenteringTextView(frame: .zero, textContainer: nil)
-        view.fitsContent = fitsContent
         view.isEditable = false
         view.isSelectable = false
         view.backgroundColor = .clear
@@ -78,7 +75,6 @@ struct SentenceTextView: UIViewRepresentable {
     func updateUIView(_ uiView: CenteringTextView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.textView = uiView
-        uiView.fitsContent = fitsContent
         // Ruby annotations compare by identity, so the attributed string itself cannot tell a
         // no-op update from a real one; a signature of everything that feeds it can.
         let signature = [
@@ -113,17 +109,12 @@ struct SentenceTextView: UIViewRepresentable {
         uiView.setNeedsLayout()
     }
 
-    func sizeThatFits(_ proposal: ProposedViewSize, uiView: CenteringTextView, context: Context) -> CGSize? {
-        guard fitsContent, let width = proposal.width, width > 0 else { return nil }
-        return uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-    }
-
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     private func attributes(readingFont: UIFont, hasRuby: Bool) -> [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineHeightMultiple = lineHeightMultiple
-        // CenteringTextView reserves space above the first line in both layout modes.
+        // CenteringTextView reserves space above the first line.
         // The paragraph spacing opens the same reading gap above following lines.
         if hasRuby {
             paragraph.lineSpacing = readingFont.lineHeight
@@ -199,23 +190,11 @@ struct SentenceTextView: UIViewRepresentable {
     }
 }
 
-/// Centers sentence mode while transcript rows fit their content. Both reserve the first line's
-/// reading space, which lives outside TextKit's base-text layout and therefore its measured height.
+/// Centers the native sentence screen. EPUB chapters and podcast transcripts use WebKit ruby.
 final class CenteringTextView: UITextView {
-    private(set) var ruby: [RubyAnnotation] = []
+    private var ruby: [RubyAnnotation] = []
     private var rubyFont: UIFont = .systemFont(ofSize: 8)
     private var rubyColor: UIColor = .label
-    var fitsContent = false {
-        didSet {
-            guard oldValue != fitsContent else { return }
-            isScrollEnabled = !fitsContent
-            if fitsContent { setContentOffset(.zero, animated: false) }
-            updateTextInsets()
-            invalidateIntrinsicContentSize()
-            setNeedsLayout()
-        }
-    }
-
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         // UITextView's `usingTextLayoutManager` API is an Objective-C class factory, which can
         // bypass a Swift subclass's stored-property initialization. Use the designated
@@ -262,24 +241,14 @@ final class CenteringTextView: UITextView {
     }
 
     private func updateTextInsets() {
-        let top: CGFloat
-        if fitsContent {
-            // A row must never borrow its previous frame's centering inset when measured again.
-            top = readingHeadroom
-        } else {
-            layoutManager.ensureLayout(for: textContainer)
-            let used = layoutManager.usedRect(for: textContainer).height
-            top = readingHeadroom + max(0, (bounds.height - used - readingHeadroom) / 2)
-        }
+        layoutManager.ensureLayout(for: textContainer)
+        let used = layoutManager.usedRect(for: textContainer).height
+        let top = readingHeadroom + max(0, (bounds.height - used - readingHeadroom) / 2)
         // Inset changes request another layout; ignore subpixel differences to keep it stable.
         if abs(textContainerInset.top - top) > 0.5 {
             textContainerInset = UIEdgeInsets(top: top, left: 0, bottom: 0, right: 0)
         }
     }
-
-    /// Reading rectangles consumed by draw(_:), in text-content coordinates. This also lets
-    /// hosts verify that their content-sized rows include the native annotation layout.
-    var rubyLayoutFrames: [CGRect] { rubyDrawings().map(\.frame) }
 
     override func draw(_ rect: CGRect) {
         super.draw(rect)

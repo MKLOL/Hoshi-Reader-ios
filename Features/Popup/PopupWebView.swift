@@ -123,6 +123,12 @@ struct PopupWebView: UIViewRepresentable {
         return js
     }()
     
+    private static let furiganaJs: String = {
+        guard let url = Bundle.main.url(forResource: "furigana", withExtension: "js"),
+              let js = try? String(contentsOf: url, encoding: .utf8) else { return "" }
+        return js
+    }()
+
     private static let popupJs: String = {
         guard let url = Bundle.main.url(forResource: "popup", withExtension: "js"),
               let js = try? String(contentsOf: url, encoding: .utf8) else {
@@ -368,6 +374,7 @@ struct PopupWebView: UIViewRepresentable {
             body { font-size: calc(16px * var(--hoshi-popup-font-scale, 1)); }
             </style>
             <script>\(Self.selectionJs)</script>
+            <script>\(Self.furiganaJs)</script>
             <script>\(Self.popupJs)</script>
         </head>
         <body>

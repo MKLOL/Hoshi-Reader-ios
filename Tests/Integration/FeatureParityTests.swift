@@ -1,6 +1,7 @@
 import XCTest
 import EPUBKit
 import SwiftUI
+import WebKit
 @testable import Hoshi_Reader
 
 nonisolated final class FeatureParityTests: XCTestCase {
@@ -175,6 +176,87 @@ nonisolated final class FeatureParityTests: XCTestCase {
         events = await log.read().events
         XCTAssertEqual(events.filter { $0.type == .closed }.count, 1)
         XCTAssertGreaterThan(ReadingStatisticsStore.reading(root: root).reduce(0) { $0 + $1.readingTime }, 0)
+    }
+
+    @MainActor func testBothEpubReadersPreserveSharedTypographyRubyAndBaseText() async throws {
+        let defaults = UserDefaults.standard
+        let keys = ["selectedFont", "fontSize", "readerHideFurigana", "verticalWriting", "layoutAdvanced"]
+        let saved = keys.map { ($0, defaults.object(forKey: $0)) }
+        defer { for (key, value) in saved { defaults.set(value, forKey: key) } }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("epub-ruby-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let chapter = root.appendingPathComponent("chapter.html")
+        try """
+        <!doctype html><html lang="ja"><head><meta charset="utf-8"></head><body>
+        <p id="fixture"><ruby id="example">例<rt>たと</rt></ruby>えば、<ruby>本<rt>ほん</rt></ruby>を読みます。</p>
+        </body></html>
+        """.write(to: chapter, atomically: true, encoding: .utf8)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        defer { window.isHidden = true; previous?.makeKeyAndVisible() }
+        func findWebView(_ view: UIView) -> WKWebView? {
+            if let webView = view as? WKWebView { return webView }
+            return view.subviews.lazy.compactMap(findWebView).first
+        }
+        for paginated in [false, true] {
+            for hidden in [false, true] {
+                let config = UserConfig()
+                config.selectedFont = "Hiragino Mincho ProN"
+                config.fontSize = 26
+                config.readerHideFurigana = hidden
+                config.verticalWriting = false
+                config.layoutAdvanced = false
+                let bridge = WebViewBridge()
+                bridge.updateState(url: chapter, progress: 0)
+                var restored = false
+                let content: AnyView
+                if paginated {
+                    content = AnyView(ReaderWebView(userConfig: config, viewSize: CGSize(width: 320, height: 480),
+                        bridge: bridge, readAccessRoot: root, textColor: nil, sasayakiTextColor: .black,
+                        sasayakiBackgroundColor: .yellow, onNextChapter: { false }, onPreviousChapter: { false },
+                        onSaveBookmark: { _ in }, onInternalLink: { _ in false }, onInternalJump: { _ in },
+                        onTextSelected: { _ in nil }, onTapOutside: {}, onPageTurn: {},
+                        onRestoreCompleted: { restored = true }, onHighlightCreated: { _, _ in }))
+                } else {
+                    content = AnyView(ScrollReaderWebView(userConfig: config, bridge: bridge,
+                        readAccessRoot: root, textColor: nil, sasayakiTextColor: .black,
+                        sasayakiBackgroundColor: .yellow, onNextChapter: { false }, onPreviousChapter: { false },
+                        onSaveBookmark: { _ in }, onInternalLink: { _ in false }, onInternalJump: { _ in },
+                        onTextSelected: { _ in nil }, onTapOutside: {}, onScroll: {}, onProgressChanged: { _ in },
+                        onRestoreCompleted: { restored = true }, onHighlightCreated: { _, _ in }))
+                }
+                let host = UIHostingController(rootView: content.frame(width: 320, height: 480))
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                try await waitUntil { restored }
+                let webView = try XCTUnwrap(findWebView(host.view))
+                let result = try await webView.evaluateJavaScript("""
+                    (() => {
+                        const paragraph = document.getElementById('fixture');
+                        const walker = window.hoshiSelection.createWalker(paragraph);
+                        let base = '', node;
+                        while (node = walker.nextNode()) base += node.textContent;
+                        const style = getComputedStyle(document.body);
+                        const rt = document.querySelector('#example rt');
+                        return {base, font: style.fontFamily, size: style.fontSize, lineHeight: style.lineHeight,
+                            ruby: getComputedStyle(document.getElementById('example')).display,
+                            readings: document.querySelectorAll('rt').length,
+                            readingHeight: rt ? rt.getBoundingClientRect().height : 0};
+                    })()
+                    """) as? [String: Any]
+                let values = try XCTUnwrap(result)
+                XCTAssertEqual(values["base"] as? String, "例えば、本を読みます。")
+                XCTAssertTrue((values["font"] as? String)?.contains("Hiragino Mincho ProN") == true)
+                XCTAssertEqual(values["size"] as? String, "26px")
+                XCTAssertEqual(values["lineHeight"] as? String, "normal")
+                XCTAssertEqual(values["ruby"] as? String, "ruby")
+                XCTAssertEqual(values["readings"] as? Int, hidden ? 0 : 2)
+                if !hidden { XCTAssertGreaterThan(values["readingHeight"] as? Double ?? 0, 0) }
+                window.rootViewController = nil
+            }
+        }
     }
 
     @MainActor private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async throws {

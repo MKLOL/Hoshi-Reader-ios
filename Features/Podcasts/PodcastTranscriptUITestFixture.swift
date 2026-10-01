@@ -19,8 +19,10 @@ struct PodcastTranscriptUITestFixture: View {
         let id = String(repeating: "a", count: 64)
         episode = PodcastEpisode(id: id, title: "Podcast transcript", publishedAt: "2026-10-01", status: "ready", transcript: true)
         files.validatedAccount = account
-        let lines = (0..<24).map { index in
-            PodcastTranscriptLine(start: Double(index * 10), end: Double(index * 10 + 8), text: "本を読みます。日本語を勉強します。", english: "I read books. I study Japanese.")
+        let lines = (0..<24).map { (index: Int) -> PodcastTranscriptLine in
+            let text = index == 0 ? "例えば、読みながら言葉を覚えます。世界中の話を聞きます。" : "本を読みます。日本語を勉強します。"
+            let start = Double(index * 10)
+            return PodcastTranscriptLine(start: start, end: start + 8, text: text, english: "I read books. I study Japanese.")
         }
         let transcript = PodcastTranscript(episode: id, duration: 240, lines: lines)
         try? PodcastRules.encoder().encode(transcript).write(to: files.transcript(account: account, id: id)!)
@@ -34,7 +36,8 @@ struct PodcastTranscriptUITestFixture: View {
         try? audio.write(to: files.originalAudio(account: account, id: id)!)
         store = PodcastStore(files: files, configuration: { config })
         playback = PodcastPlayback(store: store)
-        lookup = PodcastTranscriptLookup { _, _, _ in
+        lookup = PodcastTranscriptLookup { query, _, _ in
+            guard query.hasPrefix("本") else { return LookupSnapshot(results: [], styles: [:]) }
             var result = LookupResult()
             result.matched = std.string("本"); result.term.expression = std.string("本"); result.term.reading = std.string("ほん")
             return LookupSnapshot(results: [result], styles: [:])

@@ -301,24 +301,15 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 return "document.documentElement.style.setProperty('--hoshi-text-color', '\(hex)');"
             }()
             
-            var fontFaceCss = ""
-            if (try? FontManager.shared.fontUrl(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting)) != nil,
-               let fontURL = ReaderFontHandler.url(name: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting) {
-                fontFaceCss = """
-                @font-face {
-                    font-family: '\(parent.userConfig.selectedFont)';
-                    src: url('\(fontURL.absoluteString)');
-                }
-                """
-            }
+            let fontFaceCss = ReaderTextStyle.fontFaceCSS(
+                font: parent.userConfig.selectedFont, verticalWriting: parent.userConfig.verticalWriting
+            )
             
-            var textSpacingCss = ""
-            if parent.userConfig.layoutAdvanced {
-                textSpacingCss = """
-                line-height: \(parent.userConfig.lineHeight) !important;
-                letter-spacing: \((parent.userConfig.characterSpacing / 100.0))em !important;
-                """
-            }
+            let typographyCss = ReaderTextStyle.typographyDeclarations(
+                font: parent.userConfig.selectedFont, size: parent.userConfig.fontSize,
+                lineHeight: parent.userConfig.layoutAdvanced ? parent.userConfig.lineHeight : nil,
+                characterSpacing: parent.userConfig.layoutAdvanced ? parent.userConfig.characterSpacing : nil
+            )
             
             let verticalPadding = Double(parent.userConfig.verticalPadding)
             let horizontalPadding = Double(parent.userConfig.horizontalPadding)
@@ -355,10 +346,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 \(parent.userConfig.verticalWriting ? "overflow-y: hidden" : "overflow-x: hidden") !important;
             }
             body {
-                font-family: '\(parent.userConfig.selectedFont)', serif !important;
-                font-size: \(parent.userConfig.fontSize)px !important;
-                -webkit-text-size-adjust: none !important;
-                \(textSpacingCss)
+                \(typographyCss)
                 box-sizing: border-box !important;
                 padding: \(verticalPadding / 2)vh \(horizontalPadding / 2)vw !important;
                 \(bottomPaddingCss)
@@ -388,9 +376,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
             a {
                 color: rgba(66, 108, 245, 1) !important;
             }
-            ruby > rt, ruby > rp {
-                -webkit-user-select: none;
-            }
+            \(ReaderTextStyle.rubyCSS(hidden: parent.userConfig.readerHideFurigana))
             \(sentenceButtonCss)
             ::highlight(hoshi-sasayaki) {
                 color: var(--hoshi-sasayaki-text-color) !important;
@@ -456,7 +442,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 document.head.appendChild(newViewport);
                 
                 var style = document.createElement('style');
-                style.innerHTML = `\(css)`;
+                style.textContent = \(javaScriptStringLiteral(css));
                 document.head.appendChild(style);
                 \(textColorOverrideJs)
             

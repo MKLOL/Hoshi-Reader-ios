@@ -3,6 +3,8 @@ import Foundation
 
 /// Offline readings for plain Japanese text that has no publisher-supplied ruby. CoreFoundation
 /// owns word segmentation and pronunciation; Foundation's ICU transform produces the kana.
+/// These are whole-token readings, not final ruby bases. The shared `furigana.js` dictionary
+/// segmenter removes matching kana/okurigana before WebKit lays out native HTML ruby.
 /// Call from a background task and retain the original text: ranges address its UTF-16 units.
 nonisolated enum JapaneseFurigana {
     static let maximumUTF16Length = 16_384

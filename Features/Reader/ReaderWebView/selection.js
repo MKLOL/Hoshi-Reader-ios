@@ -417,6 +417,8 @@ window.hoshiSelection = {
             text,
             sentence,
             rect,
+            // Hosts with multiple paragraphs can pair the selection with its original line.
+            paragraphId: container.id || null,
             // Manga only (set by getSelectionRect): the tapped block's true writing
             // orientation from the mokuro data. The box aspect ratio is a bad proxy for
             // squat multi-column vertical bubbles (wider than tall), which the popup
