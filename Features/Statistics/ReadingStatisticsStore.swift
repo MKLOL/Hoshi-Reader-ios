@@ -153,7 +153,7 @@ extension Notification.Name {
         let marker = root.appendingPathComponent(migration)
         guard !FileManager.default.fileExists(atPath: marker.path) else { return }
         let device = ReadingDevice.current
-        var reading = BookStorage.load([Statistics].self, from: root.appendingPathComponent(FileNames.statistics)) ?? []
+        var reading = try strictReading(root: root)
         if let legacy = BookStorage.load([Statistics].self, from: root.appendingPathComponent(FileNames.mangaStatistics)), !legacy.isEmpty {
             reading += legacy
             // Keep a recovery copy until the whole migration has committed.
@@ -170,7 +170,11 @@ extension Notification.Name {
             if attributeReading && copy.deviceId == nil { copy.deviceId = device.id; copy.deviceName = device.name }
             return copy
         }
-        let originalText = BookStorage.load([MangaTextStatistic].self, from: root.appendingPathComponent(FileNames.mangaStatistics)) ?? []
+        let textFile = root.appendingPathComponent(FileNames.mangaStatistics)
+        let originalText: [MangaTextStatistic]
+        if FileManager.default.fileExists(atPath: textFile.path), BookStorage.load([Statistics].self, from: textFile) == nil {
+            originalText = try strictText(root: root)
+        } else { originalText = [] }
         let attributeText = !exchanged && !originalText.contains { $0.deviceId != nil }
         let text = originalText.map { row in
             var copy = row
@@ -184,22 +188,51 @@ extension Notification.Name {
         try Data().write(to: marker, options: .atomic)
     }
 
+    static func strictReading(root: URL) throws -> [Statistics] {
+        let file = root.appendingPathComponent(FileNames.statistics)
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        return Statistics.merged(try JSONDecoder().decode([Statistics].self, from: Data(contentsOf: file)))
+    }
+    static func strictText(root: URL) throws -> [MangaTextStatistic] {
+        let file = root.appendingPathComponent(FileNames.mangaStatistics)
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        return MangaTextStatistic.merged(try JSONDecoder().decode([MangaTextStatistic].self, from: Data(contentsOf: file)))
+    }
+    static func contentType(root: URL) -> ContentType {
+        StatisticsHistory.info(root)?.contentType ?? (FileManager.default.fileExists(atPath: root.appendingPathComponent(FileNames.mangaStatistics).path) && StatisticsHistory.info(root) != nil ? .mokuro : ContentType.detect(bookDir: root))
+    }
     static func reading(root: URL) -> [Statistics] {
+        try? StatisticsHistory.absorbIfPresent(root: root)
         try? migrate(root: root)
         return Statistics.merged(BookStorage.load([Statistics].self, from: root.appendingPathComponent(FileNames.statistics)) ?? [])
     }
     static func text(root: URL) -> [MangaTextStatistic] {
+        try? StatisticsHistory.absorbIfPresent(root: root)
         try? migrate(root: root)
         return MangaTextStatistic.merged(BookStorage.load([MangaTextStatistic].self, from: root.appendingPathComponent(FileNames.mangaStatistics)) ?? [])
     }
     static func save(_ rows: [Statistics], root: URL, scheduleSync: Bool = true) throws {
-        let merged = Statistics.merged(reading(root: root) + rows)
+        try migrate(root: root)
+        try StatisticsHistory.absorbIfPresent(root: root)
+        let merged = Statistics.merged(try preserveUnreadable(root: root, filename: FileNames.statistics, load: { try strictReading(root: root) }) + rows)
         try BookStorage.save(merged, inside: root, as: FileNames.statistics)
         changed(root: root, scheduleSync: scheduleSync)
     }
     static func saveText(_ rows: [MangaTextStatistic], root: URL, scheduleSync: Bool = true) throws {
-        try BookStorage.save(MangaTextStatistic.merged(text(root: root) + rows), inside: root, as: FileNames.mangaStatistics)
+        try migrate(root: root)
+        try StatisticsHistory.absorbIfPresent(root: root)
+        let existing = try preserveUnreadable(root: root, filename: FileNames.mangaStatistics, load: { try strictText(root: root) })
+        try BookStorage.save(MangaTextStatistic.merged(existing + rows), inside: root, as: FileNames.mangaStatistics)
         changed(root: root, scheduleSync: scheduleSync)
+    }
+    private static func preserveUnreadable<T>(root: URL, filename: String, load: () throws -> [T]) throws -> [T] {
+        do { return try load() }
+        catch is DecodingError {
+            let recovery = try BookStorage.getBooksDirectory().appendingPathComponent(".unreadable")
+            try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: root.appendingPathComponent(filename), to: recovery.appendingPathComponent(filename + "." + UUID().uuidString))
+            return []
+        }
     }
     static func collapsed(_ rows: [Statistics]) -> [Statistics] {
         Dictionary(grouping: Statistics.merged(rows), by: \.dateKey).map { day, entries in
@@ -209,7 +242,9 @@ extension Notification.Name {
 
     static func applyDayTotals(_ totals: [Statistics], root: URL, replace: Bool) throws {
         let device = ReadingDevice.current
-        var next = reading(root: root)
+        try migrate(root: root)
+        try StatisticsHistory.absorbIfPresent(root: root)
+        var next = try preserveUnreadable(root: root, filename: FileNames.statistics, load: { try strictReading(root: root) })
         for total in collapsed(totals) {
             let others = next.filter { $0.dateKey == total.dateKey && $0.deviceId != device.id }
             let own = next.first { $0.dateKey == total.dateKey && $0.deviceId == device.id }

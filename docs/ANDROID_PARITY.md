@@ -1,3 +1,15 @@
+# October 12 follow-up
+
+Android audit target: `a35bd97e` (0.12.4), from the previously ported `2cf591e0` baseline. Podcast changes are outside this follow-up's scope.
+
+| Android commits | iOS behavior |
+| --- | --- |
+| `b7df55d2`, `18f2a9fd`, `48a2ffda` | Retained statistics for deleted and never-downloaded books; Android-compatible device/month shards and bidirectional legacy history; synced streak goal/reset; current-history status; periodic persistence while reading; independent bookmark transfers; bounded final history flush and paused foreground polling. Legacy bookmarks exchange only during bootstrap, and download counts reflect actual position changes. |
+
+Two independent reviewers checked this feature and rechecked their fixes. Focused statistics suites passed 45 tests. The real-server integration regression also covers obsolete malformed legacy bookmarks during a metadata reconcile. Current final verification is recorded at the end of this follow-up once all slices are complete.
+
+---
+
 # Android → iOS parity (October 2026)
 
 Android target: `2cf591e0`, including 0.11.18–0.12.0 and the subsequent podcast transcript, sync, and reading-day fixes. iOS starting point: `980619f`. The September audit below remains the baseline.
@@ -13,7 +25,7 @@ Android target: `2cf591e0`, including 0.11.18–0.12.0 and the subsequent podcas
 | `a88f3917` remaining safety fixes | Strict AnkiConnect success/media responses and cancellation before backup restoration commits. Existing iOS atomic sidecars, content-derived media names, canonical Unicode equality, 64-bit TTU IDs, native literal filename handling and single EPUB parsing already supply the corresponding behavior. |
 | Android release/build/BOOX internals | APK signing/updating, WorkManager/UIDT plumbing and Android density policies do not transfer to iOS. iOS uses Foundation background URLSession/AVPlayer. The release regression gate is ported to `ship.sh` with a disposable simulator. |
 
-## Current verification
+## October 1 verification
 
 Run `python3 tools/test_ios_parity.py` for the full regression gate with Xcode, Node.js and the pretranslation tool's `regex` Python dependency available. For an isolated Python setup, create `build/parity-python` with `python3 -m venv build/parity-python`, install `regex>=2024.5.15` there, then activate it before invoking the gate or `ship.sh`.
 

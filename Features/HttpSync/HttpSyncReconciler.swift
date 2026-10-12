@@ -125,6 +125,7 @@ struct HttpSyncResult: Sendable {
 // detached tasks, so the main actor is never blocked on the expensive path.
 struct HttpSyncReconciler {
     private let transport: HttpSyncKvTransport
+    private let exchangeLegacyBookmarks: Bool
     private let payloadCodec = HttpSyncPayloadCodec()
 
     private let jsonEncoder = JSONEncoder()
@@ -132,8 +133,9 @@ struct HttpSyncReconciler {
 
     private static let jsonContentType = "application/json; charset=utf-8"
 
-    init(transport: HttpSyncKvTransport) {
+    init(transport: HttpSyncKvTransport, exchangeLegacyBookmarks: Bool = true) {
         self.transport = transport
+        self.exchangeLegacyBookmarks = exchangeLegacyBookmarks
     }
 
     /// One per-book reconciliation pass (inbound then outbound). The app-level AI-chat-settings
@@ -380,6 +382,7 @@ struct HttpSyncReconciler {
                 case .payloadManifest: payloadManifests.append(meta)
                 case .epubManifest: epubManifests.append(meta)
                 case .bookmark, .chat, .pretranslations, .sentences:
+                    if case .bookmark = parsed.kind, !exchangeLegacyBookmarks { markHandled(meta); return }
                     if let root = rootsBySyncId[parsed.syncId],
                        let applied = appliedKeys[meta.key],
                        applied.matches(meta),
@@ -431,7 +434,7 @@ struct HttpSyncReconciler {
                         result.errors.append("metadata \(parsed.syncId): deletion deferred while this book is open")
                         markUnhandled(meta)
                     } else {
-                        if let root = rootsBySyncId[parsed.syncId] { deleteBook(root: root, bookId: localBookId(localBooks, parsed.syncId)) }
+                        if let root = rootsBySyncId[parsed.syncId] { try deleteBook(root: root, bookId: localBookId(localBooks, parsed.syncId)) }
                         rootsBySyncId.removeValue(forKey: parsed.syncId)
                         shelfState.removeValue(forKey: parsed.syncId)
                         deletedSyncIds.insert(parsed.syncId)
@@ -740,7 +743,7 @@ struct HttpSyncReconciler {
                 userInfo: ["syncId": parsed.syncId]
             )
         }
-        return true
+        return local?.chapterIndex != blob.chapterIndex || local?.progress != blob.progress || local?.characterCount != blob.characterCount
     }
 
     private func applyChatEntryFromRemote(root: URL, meta: HttpSyncKvKeyMeta) async throws -> Bool {
@@ -1331,7 +1334,7 @@ struct HttpSyncReconciler {
                         result.errors.append("\(book.title): deletion deferred while this book is open")
                         continue
                     }
-                    deleteBook(root: book.root, bookId: book.id)
+                    try deleteBook(root: book.root, bookId: book.id)
                     shelfState.removeValue(forKey: book.syncId)
                     continue
                 }
@@ -1354,7 +1357,7 @@ struct HttpSyncReconciler {
                 }
 
                 // Bookmark — only if local is strictly newer than the server's.
-                if let bookmark = BookStorage.loadBookmark(root: book.root) {
+                if exchangeLegacyBookmarks, let bookmark = BookStorage.loadBookmark(root: book.root) {
                     if try await pushBookmarkIfLocalNewer(syncId: book.syncId, local: bookmark, root: book.root) {
                         result.uploadedBookmarks += 1
                     }
@@ -1608,8 +1611,8 @@ struct HttpSyncReconciler {
 
     // MARK: - Book deletion
 
-    private func deleteBook(root: URL, bookId: UUID?) {
-        try? BookStorage.delete(at: root)
+    private func deleteBook(root: URL, bookId: UUID?) throws {
+        try BookStorage.delete(at: root)
         if let bookId {
             var shelves = BookStorage.loadShelves() ?? []
             var changed = false

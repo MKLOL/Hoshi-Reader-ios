@@ -125,7 +125,10 @@ struct BookStorage {
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
             return
         }
+        let wasBook = loadMetadata(root: url) != nil
+        if wasBook { try StatisticsHistory.retain(root: url) }
         try FileManager.default.removeItem(at: url)
+        if wasBook { NotificationCenter.default.post(name: .readingStatisticsChanged, object: nil) }
     }
     
     static func save<T: Encodable>(_ object: T, inside directory: URL, as fileName: String) throws {

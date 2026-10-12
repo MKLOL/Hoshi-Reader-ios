@@ -324,7 +324,9 @@ class ReaderViewModel {
     func flushAutoSync() async {
         debounceTask?.cancel()
         debounceTask = nil
+        async let statistics: Void = HttpStatisticsLane.shared.refresh()
         await HttpSyncManager.shared.flushBookmarkSync()
+        await statistics
         await runAutoExport(direction: .exportToTtu)
     }
     
@@ -494,10 +496,13 @@ class ReaderViewModel {
         // The session outlives ReaderView's visibility while sentence mode covers it.
         statisticsTask?.cancel()
         statisticsTask = Task { [weak self] in
+            var ticks = 0
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(1)) } catch { break }
                 guard let self else { return }
                 self.updateStats()
+                ticks += 1
+                if ticks % 10 == 0 { self.saveStats() }
             }
         }
     }

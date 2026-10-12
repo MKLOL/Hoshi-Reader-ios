@@ -12,6 +12,9 @@ import UIKit
 nonisolated let httpSyncMapPrefix = "sync/maps/"
 nonisolated let httpSyncBooksMapKey = "sync/maps/books.json"
 // Read-only migration key used by early development builds.
+nonisolated func httpNeedsFullReconcile(_ key: String) -> Bool {
+    !key.hasPrefix("sync/maps/") && !(key.hasPrefix("books/") && ["/statistics", "/manga_statistics", "/bookmark"].contains { key.hasSuffix($0) })
+}
 nonisolated let httpSyncBookmarksMapKey = "sync/maps/bookmarks.json"
 nonisolated let httpSyncBookmarksMapPrefix = "sync/maps/bookmarks/"
 
@@ -197,13 +200,11 @@ final class HttpSyncBatchState {
         let before = loadState()
         let listing = try await listAllMetadata(transport: transport)
         let legacyPairs: [(String, String)] = listing.keys.compactMap { meta -> (String, String)? in
-            guard !meta.key.hasPrefix(httpSyncMapPrefix), let etag = meta.etag else { return nil }
+            guard httpNeedsFullReconcile(meta.key), let etag = meta.etag else { return nil }
             return (meta.key, etag)
         }
         let legacyKeyEtags = Dictionary(uniqueKeysWithValues: legacyPairs)
-        let statisticsMetadata = Dictionary(uniqueKeysWithValues: listing.keys.filter {
-            $0.key.hasPrefix("books/") && ($0.key.hasSuffix("/statistics") || $0.key.hasSuffix("/manga_statistics"))
-        }.map { ($0.key, $0) })
+        let statisticsMetadata = Dictionary(uniqueKeysWithValues: listing.keys.map { ($0.key, $0) })
         guard let booksMeta = listing.keys.first(where: { $0.key == httpSyncBooksMapKey }) else {
             return HttpSyncMapChanges(
                 needsBootstrap: true,
@@ -255,7 +256,7 @@ final class HttpSyncBatchState {
         let remote = mergeShards(Array(shards.values))
         let listedLegacyFingerprint = legacyKeyEtags
         let legacyChangedBeforeWrites = before.initialized &&
-            before.legacyEtags != listedLegacyFingerprint
+            before.legacyEtags.filter { httpNeedsFullReconcile($0.key) } != listedLegacyFingerprint
         let localBooks = (try? BookStorage.loadAllBooks()) ?? []
         let local = readLocalBookmarks(books: localBooks)
         let downloaded = try applyRemoteWinners(remote: remote, local: local, books: localBooks)
@@ -388,7 +389,7 @@ final class HttpSyncBatchState {
         defer { releaseOperation() }
         let listing = try await listAllMetadata(transport: transport)
         return Dictionary(uniqueKeysWithValues: listing.keys.compactMap { meta in
-            guard !meta.key.hasPrefix(httpSyncMapPrefix), let etag = meta.etag else { return nil }
+            guard httpNeedsFullReconcile(meta.key), let etag = meta.etag else { return nil }
             return (meta.key, etag)
         })
     }
@@ -454,6 +455,8 @@ final class HttpSyncBatchState {
                     guard compareEntries(entry, currentEntry) > 0 else { continue }
                 }
             }
+            let previous = BookStorage.loadBookmark(root: root)
+            let moved = previous?.chapterIndex != blob.chapterIndex || previous?.progress != blob.progress || previous?.characterCount != blob.characterCount
             try BookStorage.save(Bookmark(
                 chapterIndex: blob.chapterIndex,
                 progress: blob.progress,
@@ -462,7 +465,7 @@ final class HttpSyncBatchState {
             ), inside: root, as: FileNames.bookmark)
             HttpSyncRevisionStore.noteRemote(SyncKeys.bookmark(id), rev: blob.rev, appliedLocally: true)
             NotificationCenter.default.post(name: .httpSyncBookmarkApplied, object: nil, userInfo: ["syncId": id])
-            applied += 1
+            if moved { applied += 1 }
         }
         return applied
     }

@@ -240,6 +240,23 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         }
     }
 
+
+    @MainActor func testValidMapsIgnoreCorruptObsoleteLegacyBookmarksDuringMetadataSync() async throws {
+        try await prepare(); await syncNow()
+        let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        let key = SyncKeys.bookmark(Self.novelSyncId)
+        _ = try await client.put(key: key, contentType: "application/json", body: Data("broken obsolete bookmark".utf8))
+        let metadataKey = SyncKeys.metadata(Self.novelSyncId)
+        let fetched = try await client.get(key: metadataKey)!
+        var metadata = try JSONDecoder().decode(HttpSyncMetadataBlob.self, from: fetched.body)
+        metadata.shelfName = "Metadata change"; metadata.shelfUpdatedAt = "2099-01-01T00:00:00Z"
+        _ = try await client.put(key: metadataKey, contentType: "application/json", body: JSONEncoder().encode(metadata))
+        try await clearServerRequests(); await syncNow()
+        XCTAssertTrue(HttpSyncManager.shared.lastErrors.isEmpty, "\(HttpSyncManager.shared.lastErrors)")
+        let requests = try await serverRequests()
+        XCTAssertFalse(requests.contains { $0.path.hasSuffix(key) && $0.method == "GET" }, "maps replace per-book bookmark exchange after bootstrap")
+    }
+
     private struct LocalBook {
         let metadata: BookMetadata
         let root: URL

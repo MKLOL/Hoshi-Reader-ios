@@ -209,6 +209,128 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         try await sync.exchange(root: root, syncId: "fixture", transport: kv, listing: [:])
         XCTAssertEqual(Statistics.total(ReadingStatisticsStore.reading(root: root)).readingTime, 1200)
     }
+    @MainActor func testAndroidMonthlyShardsCountRemoteOnlyAndDeletedBooks() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "Lane." + UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"), defaults: defaults)
+        let first = row("2026-10-01", seconds: 600, device: "android")
+        let shard = HttpStatisticsShard(deviceId: "android", month: "2026-10", books: ["remote_book": HttpStatisticsShardBook(title: "Remote book", contentType: "epub", reading: [first])])
+        let key = HttpStatisticsLane.prefix + "android/2026-10.json"
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(shard))
+        var listing = try await kv.list(prefix: nil, since: nil, cursor: nil, limit: nil)
+        var errors = await lane.run(transport: kv, listing: Dictionary(uniqueKeysWithValues: listing.keys.map { ($0.key, $0) }), flush: true)
+        XCTAssertTrue(errors.isEmpty, "\(errors)")
+        let kept = try StatisticsHistory.historyRoot("remote_book", directory: root)
+        XCTAssertEqual(ReadingStatisticsStore.reading(root: kept), [first])
+        let roots = try StatisticsHistory.roots(directory: root)
+        XCTAssertEqual(roots.count, 1); XCTAssertNil(roots[0].book)
+        let meta = StatisticsHistory.metadata(for: roots[0])
+        XCTAssertNil(meta.folder); XCTAssertEqual(meta.title, "Remote book")
+        XCTAssertEqual(meta.id, StatisticsHistory.metadata(for: roots[0]).id)
+        let count = await kv.requests
+        listing = try await kv.list(prefix: nil, since: nil, cursor: nil, limit: nil)
+        errors = await lane.run(transport: kv, listing: Dictionary(uniqueKeysWithValues: listing.keys.map { ($0.key, $0) }))
+        XCTAssertTrue(errors.isEmpty)
+        let after = await kv.requests; XCTAssertEqual(after, count)
+    }
+    @MainActor func testReinstalledBookAbsorbsHistoryWithoutDoubleCounting() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let history = try StatisticsHistory.historyRoot("fixture", title: "Fixture", type: .epub, directory: root)
+        let first = row("2026-10-01", seconds: 600)
+        try ReadingStatisticsStore.save([first], root: history, scheduleSync: false)
+        let installed = root.appendingPathComponent("fixture")
+        try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+        try BookStorage.save(BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, syncId: "fixture"), inside: installed, as: FileNames.metadata)
+        try BookStorage.save([first, row("2026-10-01", seconds: 120, device: "tablet")], inside: installed, as: FileNames.statistics)
+        let roots = try StatisticsHistory.roots(directory: root)
+        XCTAssertEqual(roots.count, 1); XCTAssertNotNil(roots[0].book)
+        XCTAssertEqual(Statistics.total(ReadingStatisticsStore.reading(root: installed)).readingTime, 720)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: history.path))
+    }
+    @MainActor func testShardRejectsWrongDeviceAndUnsafeBookNamesAndRetriesAfterRepair() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"))
+        let key = HttpStatisticsLane.prefix + "android/2026-10.json"
+        var shard = HttpStatisticsShard(deviceId: "wrong", month: "2026-10", books: [:])
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(shard))
+        var meta = await kv.metadata(key)!
+        let errors = await lane.run(transport: kv, listing: [key: meta])
+        XCTAssertFalse(errors.isEmpty); XCTAssertNotNil(lane.problem)
+        shard.deviceId = "android"
+        shard.books = ["../escape": HttpStatisticsShardBook(reading: [row("2026-10-01", seconds: 600, device: "android")]), "safe": HttpStatisticsShardBook(reading: [row("2026-10-01", seconds: 600, device: "android")])]
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(shard))
+        meta = await kv.metadata(key)!
+        let recovered = await lane.run(transport: kv, listing: [key: meta])
+        XCTAssertTrue(recovered.isEmpty); XCTAssertNil(lane.problem)
+        XCTAssertEqual(try StatisticsHistory.roots(directory: root).map(\.syncId), ["safe"])
+    }
+    @MainActor func testStreakPreferencesConvergeAndOlderChoicesCannotUndoNewerOnes() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "Lane." + UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"), defaults: defaults)
+        let key = HttpStatisticsLane.prefix + "android/settings.json"
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(HttpStatisticsPreferences(streakMinimumMinutes: 25, dayResetHour: 4, updatedAt: 100)))
+        let meta = await kv.metadata(key)!
+        let errors = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        XCTAssertTrue(errors.isEmpty)
+        XCTAssertEqual(StatisticsPreferencesStore.load(defaults: defaults).streakMinimumMinutes, 25)
+        XCTAssertEqual(StatisticsPreferencesStore.load(defaults: defaults).dayResetHour, 4)
+        StatisticsPreferencesStore.save(HttpStatisticsPreferences(streakMinimumMinutes: 30, dayResetHour: 3, updatedAt: 101), defaults: defaults)
+        _ = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        XCTAssertEqual(StatisticsPreferencesStore.load(defaults: defaults).streakMinimumMinutes, 30)
+    }
+
+    @MainActor func testAndroidCapitalizedMangaTypeAndIOSOwnShardWireFormat() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"))
+        let fixture = Data(#"{"version":1,"deviceId":"android","month":"2026-10","books":{"manga":{"title":"Manga","contentType":"Mokuro","reading":[{"title":"Manga","dateKey":"2026-10-01","charactersRead":3,"readingTime":60.0,"minReadingSpeed":0,"altMinReadingSpeed":0,"lastReadingSpeed":0,"maxReadingSpeed":0,"lastStatisticModified":1,"deviceId":"android","deviceName":"Android","readingTimeByHour":{},"timeZone":null}],"mangaText":[]}}}"#.utf8)
+        let key = HttpStatisticsLane.prefix + "android/2026-10.json"
+        _ = try await kv.put(key: key, contentType: "application/json", body: fixture)
+        var meta = await kv.metadata(key)!
+        let errors = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        XCTAssertTrue(errors.isEmpty, "\(errors)")
+        let kept = try StatisticsHistory.historyRoot("manga", directory: root)
+        XCTAssertEqual(ReadingStatisticsStore.contentType(root: kept), .mokuro)
+        try ReadingStatisticsStore.save([row("2026-10-01", seconds: 120, device: "ios")], root: kept, scheduleSync: false)
+        meta = await kv.metadata(key)!
+        _ = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        let uploaded = try await kv.get(key: HttpStatisticsLane.prefix + "ios/2026-10.json")!
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: uploaded.body) as? [String: Any])
+        let books = try XCTUnwrap(object["books"] as? [String: [String: Any]])
+        XCTAssertEqual(books["manga"]?["contentType"] as? String, "Mokuro")
+    }
+    @MainActor func testUnsuccessfulOwnShardReadWithoutETagCannotOverwriteServerHistory() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let kept = try StatisticsHistory.historyRoot("fixture", directory: root)
+        try ReadingStatisticsStore.save([row("2026-10-01", seconds: 120, device: "ios")], root: kept, scheduleSync: false)
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"))
+        let key = HttpStatisticsLane.prefix + "ios/2026-10.json", unreadable = Data("bad JSON".utf8)
+        _ = try await kv.put(key: key, contentType: "application/json", body: unreadable)
+        let errors = await lane.run(transport: kv, listing: [key: HttpSyncKvKeyMeta(key: key, lastModified: "2026-10-01T00:00:00Z", size: unreadable.count)], flush: true, retryFailed: true)
+        XCTAssertFalse(errors.isEmpty)
+        let server = try await kv.get(key: key)
+        XCTAssertEqual(server?.body, unreadable)
+    }
+    @MainActor func testUnreadableMetadataCannotRemoveBookFromOwnPublishedMonth() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let installed = root.appendingPathComponent("fixture")
+        try FileManager.default.createDirectory(at: installed, withIntermediateDirectories: true)
+        try BookStorage.save(BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, syncId: "fixture"), inside: installed, as: FileNames.metadata)
+        try ReadingStatisticsStore.save([row("2026-10-01", seconds: 120, device: "ios")], root: installed, scheduleSync: false)
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"))
+        _ = await lane.run(transport: kv, listing: [:], flush: true)
+        let key = HttpStatisticsLane.prefix + "ios/2026-10.json"
+        let before = try await kv.get(key: key)!
+        try Data("broken".utf8).write(to: installed.appendingPathComponent(FileNames.metadata))
+        let meta = await kv.metadata(key)!
+        let errors = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        XCTAssertFalse(errors.isEmpty)
+        let after = try await kv.get(key: key)!
+        XCTAssertEqual(before.body, after.body)
+    }
+
 }
 
 private actor DayParityKV: HttpSyncKvTransport {

@@ -21,34 +21,16 @@ nonisolated struct MangaStatisticsBlob: Codable {
         var remoteSize: Int
         var remoteStamp: String
         var remoteETag: String? = nil
+        var pendingUpload: Bool? = nil
     }
     private var busy: Set<String> = []
     private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-    private var scheduled: [String: Task<Void, Never>] = [:]
-    private var failures = 0
-    private var retryAfter = Date.distantPast
 
     func schedule(root: URL, delay: Duration = .seconds(30)) {
-        let key = root.path
-        scheduled[key]?.cancel()
-        scheduled[key] = Task { [weak self] in
-            do { try await Task.sleep(for: delay) } catch { return }
-            guard let self else { return }
-            self.scheduled[key] = nil
-            guard Date() >= self.retryAfter else { return }
-            let config = HttpSyncSettingsStore.shared.currentConfig()
-            guard config.isConfigured, let book = BookStorage.loadMetadata(root: root), let id = syncId(for: book) else { return }
-            do {
-                try await self.exchange(root: root, syncId: id, transport: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token))
-                self.failures = 0
-            } catch {
-                self.failures += 1
-                if self.failures >= 3 { self.retryAfter = Date().addingTimeInterval(300); self.failures = 0 }
-            }
-        }
+        HttpStatisticsLane.shared.schedule(flush: delay < .seconds(30))
     }
 
-    func exchange(root: URL, syncId: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil) async throws {
+    func exchange(root: URL, syncId: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil, uploadLocal: Bool = true) async throws {
         let lock = root.standardizedFileURL.path
         if busy.contains(lock) { await withCheckedContinuation { waiters[lock, default: []].append($0) } }
         busy.insert(lock)
@@ -59,32 +41,34 @@ nonisolated struct MangaStatisticsBlob: Codable {
         }
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         try ReadingStatisticsStore.migrate(root: root)
-        try await exchangeReading(root: root, id: syncId, transport: transport, listing: listing)
-        if ContentType.detect(bookDir: root) == .mokuro {
-            try await exchangeText(root: root, id: syncId, transport: transport, listing: listing)
+        try await exchangeReading(root: root, id: syncId, transport: transport, listing: listing, uploadLocal: uploadLocal)
+        if ReadingStatisticsStore.contentType(root: root) == .mokuro {
+            try await exchangeText(root: root, id: syncId, transport: transport, listing: listing, uploadLocal: uploadLocal)
         }
     }
 
-    private func exchangeReading(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?) async throws {
-        try await exchangeRows(root: root, key: "books/\(id)/statistics", transport: transport, listing: listing,
-            load: { ReadingStatisticsStore.reading(root: root) },
+    private func exchangeReading(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool) async throws {
+        try await exchangeRows(root: root, key: "books/\(id)/statistics", transport: transport, listing: listing, uploadLocal: uploadLocal,
+            load: { try ReadingStatisticsStore.strictReading(root: root) },
             save: { try ReadingStatisticsStore.save($0, root: root, scheduleSync: false) },
             merge: Statistics.merged,
             encode: { try self.encode(ReadingStatisticsBlob(syncId: id, entries: $0)) },
             decode: { data in
                 let blob = try JSONDecoder().decode(ReadingStatisticsBlob.self, from: data)
+                if blob.version > 2 { throw HttpSyncError("Statistics need a newer app", skip: true) }
                 guard (1...2).contains(blob.version), blob.syncId == id else { throw HttpSyncError("Unsupported reading statistics for \(id)") }
                 return blob.entries
             })
     }
-    private func exchangeText(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?) async throws {
-        try await exchangeRows(root: root, key: "books/\(id)/manga_statistics", transport: transport, listing: listing,
-            load: { ReadingStatisticsStore.text(root: root) },
+    private func exchangeText(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool) async throws {
+        try await exchangeRows(root: root, key: "books/\(id)/manga_statistics", transport: transport, listing: listing, uploadLocal: uploadLocal,
+            load: { try ReadingStatisticsStore.strictText(root: root) },
             save: { try ReadingStatisticsStore.saveText($0, root: root, scheduleSync: false) },
             merge: MangaTextStatistic.merged,
             encode: { try self.encode(MangaStatisticsBlob(syncId: id, entries: $0)) },
             decode: { data in
                 let blob = try JSONDecoder().decode(MangaStatisticsBlob.self, from: data)
+                if blob.version > 2 { throw HttpSyncError("Statistics need a newer app", skip: true) }
                 guard (1...2).contains(blob.version), blob.syncId == id else { throw HttpSyncError("Unsupported manga statistics for \(id)") }
                 return blob.entries
             })
@@ -117,9 +101,9 @@ nonisolated struct MangaStatisticsBlob: Codable {
         return try encoder.encode(value)
     }
     private func exchangeRows<T: Equatable>(root: URL, key: String, transport: any HttpSyncKvTransport,
-        listing: [String: HttpSyncKvKeyMeta]?, load: () -> [T], save: ([T]) throws -> Void,
+        listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool, load: () throws -> [T], save: ([T]) throws -> Void,
         merge: ([T]) -> [T], encode: ([T]) throws -> Data, decode: (Data) throws -> [T]) async throws {
-        let local = load()
+        let local = try load()
         let body = try encode(local)
         let localHash = hash(body)
         let stateURL = root.appendingPathComponent(Self.stateFile)
@@ -129,7 +113,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         if old?.localHash == localHash {
             if listing == nil { return }
             if let meta, old?.remoteSize == meta.size, old?.remoteStamp == meta.lastModified,
-               let etag = meta.etag, !etag.isEmpty, old?.remoteETag == etag { return }
+               let etag = meta.etag, !etag.isEmpty, old?.remoteETag == etag, old?.pendingUpload != true || !uploadLocal { return }
         }
         if listing == nil, old == nil, local.isEmpty { return }
         if let meta, (meta.size ?? 0) > 4 * 1024 * 1024 { throw HttpSyncError("Statistics exceed the size limit") }
@@ -141,7 +125,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         let remote = try fetched.map { merge(try decode($0.body)) } ?? []
         // The reader can save while GET is in flight. Re-read before merging.
         guard FileManager.default.fileExists(atPath: root.path) else { return }
-        let latest = load()
+        let latest = try load()
         let merged = merge(latest + remote)
         if merged != latest { try save(merged) }
         if merged.isEmpty && fetched == nil { return }
@@ -149,14 +133,14 @@ nonisolated struct MangaStatisticsBlob: Codable {
         let size: Int
         let stamp: String
         let etag: String?
-        if merged != remote {
+        if merged != remote && uploadLocal {
             let written = try await transport.put(key: key, contentType: "application/json; charset=utf-8", body: mergedBody)
             size = mergedBody.count; stamp = written.lastModified; etag = written.etag
         } else {
             size = fetched?.body.count ?? 0; stamp = fetched?.lastModified ?? ""; etag = fetched?.etag ?? ""
         }
         guard FileManager.default.fileExists(atPath: root.path) else { return }
-        state[key] = Stamp(localHash: hash(mergedBody), remoteSize: size, remoteStamp: stamp, remoteETag: etag)
+        state[key] = Stamp(localHash: hash(mergedBody), remoteSize: size, remoteStamp: stamp, remoteETag: etag, pendingUpload: !uploadLocal && merged != remote)
         try BookStorage.save(state, inside: root, as: Self.stateFile)
     }
 }

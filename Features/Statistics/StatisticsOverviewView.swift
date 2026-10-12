@@ -22,10 +22,10 @@ struct StatisticsOverviewView: View {
             else { StatisticsTrendsSections(reading: model.days, usage: usage) }
         }
         .navigationTitle("Statistics")
-        .onAppear { refresh() }
+        .onAppear { refresh(); Task { await HttpStatisticsLane.shared.refresh() } }
         .task { await usage.reload() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            refresh(); Task { await usage.reload(resetHour: resetHour) }
+            refresh(); Task { await HttpStatisticsLane.shared.refresh(); await usage.reload(resetHour: resetHour) }
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now in
             let day = ReadingDay.date(at: now, resetHour: resetHour)
@@ -42,15 +42,22 @@ struct StatisticsOverviewView: View {
     }
     @ViewBuilder private var overviewSections: some View {
         @Bindable var config = userConfig
+            if HttpSyncSettingsStore.shared.isConfigured {
+                Section {
+                    if let problem = HttpStatisticsLane.shared.problem { Label(problem, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary) }
+                    else if let checked = HttpStatisticsLane.shared.lastChecked { Text("Other devices checked \(checked.formatted(.relative(presentation: .named)))").font(.caption).foregroundStyle(.secondary) }
+                    else { Text("Checking other devices’ reading…").font(.caption).foregroundStyle(.secondary) }
+                }
+            }
             UsageTodaySection(reading: today, usage: usage.today)
             Section("Reading streak") {
                 let streak = StatisticsMath.streak(model.streakHistory.days, goalMinutes: goal, resetHour: resetHour)
                 LabeledContent("Current", value: "\(streak.current) days")
                 LabeledContent("Longest", value: "\(streak.longest) days")
                 LabeledContent("Daily goal", value: "\(min(120, max(1, goal))) minutes")
-                Slider(value: Binding(get: { Double(min(120, max(1, goal))) }, set: { goal = Int($0) }), in: 1...120, step: 1)
+                Slider(value: Binding(get: { Double(min(120, max(1, goal))) }, set: { StatisticsPreferencesStore.choose(goal: Int($0)) }), in: 1...120, step: 1)
                     .accessibilityLabel("Daily goal")
-                Picker("Day resets at", selection: $resetHour) {
+                Picker("Day resets at", selection: Binding(get: { resetHour }, set: { StatisticsPreferencesStore.choose(reset: $0) })) {
                     ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
                 }
                 Text("All statistics days run from the selected hour until that hour the next morning.")
@@ -108,6 +115,7 @@ struct BookStatisticsDetailView: View {
         List {
             if let item = model.books.first(where: { $0.id == bookId }) {
                 Section(item.book.title ?? "Untitled") {
+                    if item.book.folder == nil { Label("Not on this device", systemImage: "icloud").foregroundStyle(.secondary) }
                     LabeledContent("Reading time", value: StatisticsMath.duration(item.seconds))
                     LabeledContent("Characters", value: item.characters.formatted())
                     if item.isManga { LabeledContent("Pages", value: item.pages.formatted()) }

@@ -230,7 +230,9 @@ struct MangaReaderView: View {
             pageReadyTimeoutTask = nil
             aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
             Task {
+                async let statistics: Void = HttpStatisticsLane.shared.refresh()
                 await HttpSyncManager.shared.flushBookmarkSync()
+                await statistics
                 HttpSyncActiveBooks.close(syncId(for: metadata))
                 HttpSyncManager.shared.syncInBackground()
             }

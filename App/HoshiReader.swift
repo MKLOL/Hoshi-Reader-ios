@@ -65,8 +65,15 @@ struct HoshiReaderApp: App {
                 case .active:
                     LocalFileServer.shared.endBackgroundTask()
                     LocalFileServer.shared.setAudioServer(enabled: userConfig.enableLocalAudio)
-                    HttpSyncManager.shared.syncInBackground()
+                    HttpSyncManager.shared.resumePolling()
+                    Task { await HttpStatisticsLane.shared.refresh() }
                 case .background:
+                    HttpSyncManager.shared.suspendPolling()
+                    Task {
+                        async let bookmarks: Void = HttpSyncManager.shared.flushBookmarkSync()
+                        await HttpStatisticsLane.shared.refresh()
+                        await bookmarks
+                    }
                     LocalFileServer.shared.startBackgroundTask()
                 default:
                     break

@@ -258,15 +258,16 @@ nonisolated enum StatisticsMath {
         return (StatisticsMath.combine(histories.flatMap(\.days)), histories.contains { $0.estimated })
     }
     func reload(resetHour: Int = ReadingDay.resetHour) {
-        guard let root = try? BookStorage.getBooksDirectory(), let library = try? BookStorage.loadAllBooks() else { return }
-        books = library.compactMap { book in
-            guard let folder = book.folder else { return nil }
-            let url = root.appendingPathComponent(folder)
+        guard let roots = try? StatisticsHistory.roots(onError: { _, _ in }) else { return }
+        books = roots.compactMap { item in
+            let book = StatisticsHistory.metadata(for: item), url = item.root
             let reading = ReadingStatisticsStore.reading(root: url)
-            let text = book.resolvedContentType == .mokuro ? ReadingStatisticsStore.text(root: url) : []
-            let bookmark = BookStorage.loadBookmark(root: url)
-            let summary = BookReadingSummary(book: book, reading: reading, mangaText: text, finished: StatisticsMath.isFinished(bookmark: bookmark, info: BookStorage.loadBookInfo(root: url), isManga: book.resolvedContentType == .mokuro), resetHour: resetHour)
+            let isManga = ReadingStatisticsStore.contentType(root: url) == .mokuro
+            let text = isManga ? ReadingStatisticsStore.text(root: url) : []
+            var resolved = book; resolved.contentType = isManga ? .mokuro : .epub
+            let finished = item.book == nil ? (StatisticsHistory.info(url)?.progress ?? 0) >= 0.999 : StatisticsMath.isFinished(bookmark: BookStorage.loadBookmark(root: url), info: BookStorage.loadBookInfo(root: url), isManga: isManga)
+            let summary = BookReadingSummary(book: resolved, reading: reading, mangaText: text, finished: finished, resetHour: resetHour)
             return summary.seconds > 0 || summary.characters > 0 || summary.pages > 0 ? summary : nil
-        }.sorted { $0.seconds > $1.seconds }
+        }.sorted { $0.seconds == $1.seconds ? $0.id.uuidString < $1.id.uuidString : $0.seconds > $1.seconds }
     }
 }

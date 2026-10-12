@@ -269,6 +269,9 @@ class BookshelfViewModel {
     
     func deleteBook(_ book: BookMetadata) {
         do {
+            if let folder = book.folder {
+                try StatisticsHistory.retain(root: BookStorage.getBooksDirectory().appendingPathComponent(folder))
+            }
             // Stage a tombstone BEFORE removing the directory so the next HTTP sync pushes
             // `deletedAt` to the server (propagating the delete to other devices) and skips
             // re-importing this book before that push runs. Mirrors Android's
