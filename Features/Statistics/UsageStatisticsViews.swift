@@ -6,9 +6,9 @@ struct UsageTodaySection: View {
     let usage: UsageDay
     var body: some View {
         Section("Today") {
-            Text(usage.date.formatted(date: .complete, time: .omitted)).font(.caption).foregroundStyle(.secondary)
+            Text(StatisticsZone.display(usage.date)).font(.caption).foregroundStyle(.secondary)
             if let first = usage.firstActivity, let last = usage.lastActivity {
-                LabeledContent("Active", value: "\(first.formatted(date: .omitted, time: .shortened))–\(last.formatted(date: .omitted, time: .shortened))")
+                LabeledContent("Active", value: "\(StatisticsZone.display(first, dateStyle: .none, timeStyle: .short))–\(StatisticsZone.display(last, dateStyle: .none, timeStyle: .short))")
             }
             LabeledContent("Reading time", value: StatisticsMath.duration(reading.seconds))
             LabeledContent("Characters", value: reading.characters.formatted())
@@ -26,7 +26,7 @@ struct UsageTodaySection: View {
                 ForEach(usage.spans) { span in
                     VStack(alignment: .leading) {
                         Text(span.title)
-                        Text("\(span.start.formatted(date: .omitted, time: .shortened))–\(span.end.formatted(date: .omitted, time: .shortened)) · \(StatisticsMath.duration(span.seconds))").font(.caption).foregroundStyle(.secondary)
+                        Text("\(StatisticsZone.display(span.start, dateStyle: .none, timeStyle: .short))–\(StatisticsZone.display(span.end, dateStyle: .none, timeStyle: .short)) · \(StatisticsMath.duration(span.seconds))").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -47,7 +47,7 @@ struct StatisticsTrendsSections: View {
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     private func series(_ values: [Date: Double], denominator: [Date: Double]? = nil, local: Bool = false) -> [ReadingTrendPoint] {
         if local && usage.firstDay == nil { return [] }
-        return ReadingTrends.series(values: values, denominators: denominator, days: days, since: local ? usage.firstDay : nil, resetHour: resetHour)
+        return ReadingTrends.series(values: values, denominators: denominator, days: days, since: local ? usage.firstDay : nil, resetHour: resetHour, calendar: StatisticsZone.calendar)
     }
     var body: some View {
         Section {
@@ -87,7 +87,7 @@ private struct ReadingTrendChart: View {
                 .chartYAxis { AxisMarks(position: .leading) }
                 .frame(height: 170)
                 if let point {
-                    Text("\(point.date.formatted(date: .abbreviated, time: .omitted)): \(point.value.formatted(.number.precision(.fractionLength(0...2)))) · 3-day average \(point.average.formatted(.number.precision(.fractionLength(0...2))))")
+                    Text("\(StatisticsZone.display(point.date)): \(point.value.formatted(.number.precision(.fractionLength(0...2)))) · 3-day average \(point.average.formatted(.number.precision(.fractionLength(0...2))))")
                         .font(.caption).monospacedDigit()
                 }
             }

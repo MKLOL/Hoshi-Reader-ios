@@ -13,6 +13,7 @@ import EPUBKit
 struct StatisticsView: View {
     @State private var now = Date.now
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
+    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     let viewModel: ReaderViewModel
     var body: some View {
         NavigationStack {
@@ -104,7 +105,7 @@ struct StatisticsView: View {
                     Text("All Time")
                 }
             }
-            .id(ReadingDay.date(at: now, resetHour: resetHour))
+            .id(ReadingDay.key(ReadingDay.date(at: now, resetHour: resetHour)) + zoneID)
             .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now = $0 }
             .monospacedDigit()
             .navigationTitle("Statistics")

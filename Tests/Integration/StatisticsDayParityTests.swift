@@ -331,6 +331,108 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         XCTAssertEqual(before.body, after.body)
     }
 
+    func testAndroidLegacyShanghaiNoonRecoversEasternNight() {
+        let ny = TimeZone(identifier: "America/New_York")!, calendar = StatisticsZone.calendar(zone: ny)
+        var tablet = row("2026-10-03", seconds: 1162.1389999999924, count: 5000, hours: ["2026-10-03T12:00": 1162.1389999999924], device: "tablet", stamp: 1791001743483)
+        XCTAssertEqual(tablet.recordedZone(target: ny)?.secondsFromGMT(), 8 * 3600)
+        var days = ReadingDay.days(reading: [tablet], resetHour: 3, calendar: calendar)
+        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-02"])
+        XCTAssertEqual(days[0].characters, 5000)
+        tablet.timeZone = "Asia/Shanghai"
+        days = ReadingDay.days(reading: [tablet], resetHour: 0, calendar: calendar)
+        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-03"])
+        tablet.readingTimeByHour = ["2026-10-03T09:00": tablet.readingTime]
+        days = ReadingDay.days(reading: [tablet], resetHour: 0, calendar: calendar)
+        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-02"])
+    }
+    func testEachDevicesCharactersFollowItsOwnZoneAndHours() {
+        let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
+        var phone = row("2026-10-03", seconds: 3600, count: 1000, hours: ["2026-10-03T20:00": 3600])
+        phone.timeZone = "America/New_York"
+        var tablet = row("2026-10-03", seconds: 1200, count: 5000, hours: ["2026-10-03T12:00": 1200], device: "tablet")
+        tablet.timeZone = "Asia/Shanghai"
+        let days = ReadingDay.days(reading: [phone, tablet], resetHour: 3, calendar: calendar)
+        XCTAssertEqual(days.map(\.characters), [5000, 1000])
+        XCTAssertEqual(days.map(\.seconds), [1200, 3600])
+        let manga = [MangaTextStatistic(dateKey: phone.dateKey, charactersRead: 1000, deviceId: "phone"), MangaTextStatistic(dateKey: tablet.dateKey, charactersRead: 5000, deviceId: "tablet")]
+        XCTAssertEqual(ReadingDay.days(reading: [phone, tablet], text: manga, resetHour: 3, calendar: calendar).map(\.characters), [5000, 1000])
+    }
+    func testZoneEvidenceSurvivesOlderClientsAndLiveRecordingRekeysPreviousHours() throws {
+        var tagged = row("2026-10-03", seconds: 1200, hours: ["2026-10-03T12:00": 1200], stamp: 1791001743483)
+        tagged.timeZone = "Asia/Shanghai"
+        var stripped = tagged; stripped.timeZone = nil
+        XCTAssertEqual(Statistics.merged([tagged, stripped]), [tagged]); XCTAssertEqual(Statistics.merged([stripped, tagged]), [tagged])
+        XCTAssertEqual(try JSONDecoder().decode(Statistics.self, from: JSONEncoder().encode(tagged)), tagged)
+        tagged.record(in: TimeZone(identifier: "America/New_York")!)
+        XCTAssertEqual(tagged.timeZone, "America/New_York")
+        XCTAssertEqual(tagged.readingTimeByHour, ["2026-10-03T00:00": 1200])
+    }
+    func testSharedZoneDSTBoundaryAndUnrecoverableLegacyEdits() {
+        let ny = TimeZone(identifier: "America/New_York")!, calendar = StatisticsZone.calendar(zone: ny)
+        let before = ReadingDay.boundary(on: ReadingDay.parse("2026-03-07", calendar: calendar)!, resetHour: 3, calendar: calendar)
+        let after = ReadingDay.boundary(on: ReadingDay.parse("2026-03-08", calendar: calendar)!, resetHour: 3, calendar: calendar)
+        XCTAssertEqual(after.timeIntervalSince(before), 23 * 3600)
+        var edited = row("2026-10-01", seconds: 600, hours: ["2026-10-01T20:00": 600], stamp: 1791072000000)
+        XCTAssertNil(edited.recordedZone(target: ny))
+        edited.timeZone = "invalid/zone"
+        XCTAssertNil(edited.recordedZone(target: ny))
+        XCTAssertEqual(ReadingDay.days(reading: [edited], resetHour: 3, calendar: calendar).map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-01"])
+    }
+    @MainActor func testStatisticsTimeZoneSyncPreservesExplicitZoneFromOlderPeers() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "Zone." + UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let kv = DayParityKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"), defaults: defaults)
+        let key = HttpStatisticsLane.prefix + "android/settings.json"
+        let chosen = HttpStatisticsPreferences(streakMinimumMinutes: 25, dayResetHour: 3, updatedAt: 100, timeZone: "Asia/Shanghai")
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(chosen))
+        var meta = await kv.metadata(key)!
+        _ = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        XCTAssertEqual(defaults.string(forKey: StatisticsZone.key), "Asia/Shanghai")
+        var old = chosen; old.updatedAt = 101; old.timeZone = nil
+        _ = try await kv.put(key: key, contentType: "application/json", body: JSONEncoder().encode(old))
+        meta = await kv.metadata(key)!
+        _ = await lane.run(transport: kv, listing: [key: meta], flush: true)
+        XCTAssertEqual(defaults.string(forKey: StatisticsZone.key), "Asia/Shanghai")
+    }
+
+    func testAndroidFixedOffsetTagsRemainAuthoritativeAfterAggregateEdit() {
+        let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
+        for zone in ["+08:00", "+08"] {
+            var entry = row("2026-10-03", seconds: 1800, hours: ["2026-10-03T12:00": 1200], stamp: 1791072000000)
+            entry.timeZone = zone
+            let days = ReadingDay.days(reading: [entry], resetHour: 3, calendar: calendar)
+            XCTAssertEqual(days.map(\.seconds), [1200, 600], zone)
+            XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-02", "2026-10-03"])
+        }
+        XCTAssertEqual(StatisticsZone.zone("Z")?.secondsFromGMT(), 0)
+        XCTAssertEqual(StatisticsZone.zone("+05:30")?.secondsFromGMT(), 19_800)
+    }
+    @MainActor func testAggregateImportPreservesTheZoneOfRetainedHourlyEvidence() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        var own = row("2026-10-03", seconds: 1200, hours: ["2026-10-03T12:00": 1200], device: ReadingDevice.current.id)
+        own.timeZone = "Asia/Shanghai"
+        try ReadingStatisticsStore.save([own], root: root, scheduleSync: false)
+        var total = own; total.readingTime = 1800; total.readingTimeByHour = [:]; total.timeZone = nil; total.lastStatisticModified = 1791072000000
+        try ReadingStatisticsStore.applyDayTotals([total], root: root, replace: false)
+        let saved = ReadingStatisticsStore.reading(root: root)
+        XCTAssertEqual(saved[0].timeZone, "Asia/Shanghai")
+        let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
+        XCTAssertEqual(ReadingDay.days(reading: saved, resetHour: 3, calendar: calendar).map(\.seconds), [1200, 600])
+    }
+    @MainActor func testUsageRecordingStartUsesAbsoluteEventRatherThanItsFileName() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
+        let at = calendar.date(bySettingHour: 12, minute: 30, second: 0, of: ReadingDay.parse("2026-10-02", calendar: calendar)!)!
+        let event = UsageEvent(at: Int64(at.timeIntervalSince1970 * 1000), utcOffset: "+08:00", type: .lookup, term: "猫")
+        var data = try JSONEncoder().encode(event); data.append(10)
+        try data.write(to: root.appendingPathComponent("2026-10-03.ndjson"))
+        let model = UsageStatisticsModel()
+        await model.reload(resetHour: 3, now: at.addingTimeInterval(86400), log: UsageLog(directory: root))
+        XCTAssertEqual(model.firstDay, ReadingDay.parse("2026-10-02", calendar: calendar))
+        XCTAssertEqual(model.values(\.lookups)[ReadingDay.parse("2026-10-02", calendar: calendar)!], 1)
+    }
+
 }
 
 private actor DayParityKV: HttpSyncKvTransport {

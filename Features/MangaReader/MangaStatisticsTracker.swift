@@ -17,7 +17,7 @@ nonisolated struct MangaStatisticsTracker {
     var today: Statistics {
         dayTotal(at: .now)
     }
-    func dayTotal(at date: Date, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = .current) -> Statistics {
+    func dayTotal(at date: Date, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar) -> Statistics {
         let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
         let total = ReadingDay.days(reading: rows, resetHour: resetHour, calendar: calendar).first { $0.date == day }
         var result = Statistics.empty(title: title, day: ReadingDay.key(day, calendar: calendar))
@@ -25,7 +25,7 @@ nonisolated struct MangaStatisticsTracker {
         result.lastReadingSpeed = StatisticsNumbers.speed(count: result.charactersRead, seconds: result.readingTime)
         return result
     }
-    func textTotal(_ text: [MangaTextStatistic], at date: Date = .now, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = .current) -> Int {
+    func textTotal(_ text: [MangaTextStatistic], at date: Date = .now, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar) -> Int {
         let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
         return ReadingDay.days(reading: rows, text: text, resetHour: resetHour, calendar: calendar).first { $0.date == day }?.characters ?? 0
     }
@@ -69,6 +69,8 @@ nonisolated struct MangaStatisticsTracker {
         guard elapsed > 0 else { return }
         let delta = max(-session.charactersRead, currentPage - lastPageCount)
         let stamp = StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000)
+        localToday.record(in: .current)
+        session.record(in: .current)
         session.add(seconds: elapsed, count: delta, stamp: stamp)
         localToday.add(seconds: elapsed, count: delta, stamp: stamp)
         let hours = ReadingDay.hours(from: lastTimestamp, to: now)

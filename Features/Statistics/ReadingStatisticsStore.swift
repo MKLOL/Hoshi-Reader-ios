@@ -97,6 +97,8 @@ nonisolated extension Statistics {
                     // Old clients strip unknown fields. Otherwise-identical rows keep the richer
                     // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
                     if old.tieBreak == entry.tieBreak {
+                        if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone != nil && entry.timeZone == nil { continue }
+                        if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone == nil && entry.timeZone != nil { result[entry.key] = entry; continue }
                         let oldHours = old.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
                         let newHours = entry.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
                         let oldKeys = old.readingTimeByHour.keys.sorted().map { "\($0)=\(old.readingTimeByHour[$0]!)" }.joined(separator: ",")
@@ -120,6 +122,8 @@ nonisolated extension Statistics {
             if entry.altMinReadingSpeed > 0 { total.altMinReadingSpeed = total.altMinReadingSpeed == 0 ? entry.altMinReadingSpeed : min(total.altMinReadingSpeed, entry.altMinReadingSpeed) }
             total.maxReadingSpeed = max(total.maxReadingSpeed, entry.maxReadingSpeed)
         }
+        let zones = Set(merged(entries).map(\.timeZone))
+        total.timeZone = zones.count == 1 ? zones.first! : nil
         total.lastReadingSpeed = StatisticsNumbers.speed(count: total.charactersRead, seconds: total.readingTime)
         return total
     }
@@ -255,13 +259,16 @@ extension Notification.Name {
             if own?.readingTime == time && own?.charactersRead == count { continue }
             var row = total
             row.readingTime = time; row.charactersRead = count
-            if !total.readingTimeByHour.isEmpty && others.allSatisfy({ abs($0.readingTime - $0.readingTimeByHour.values.reduce(0, +)) < 0.001 }) {
+            let hoursFromTotal = !total.readingTimeByHour.isEmpty && others.allSatisfy({ abs($0.readingTime - $0.readingTimeByHour.values.reduce(0, +)) < 0.001 })
+            if hoursFromTotal {
                 row.readingTimeByHour = total.readingTimeByHour.mapValues { $0 }
                 for (hour, seconds) in otherTotals.readingTimeByHour {
                     row.readingTimeByHour[hour] = max(0, (row.readingTimeByHour[hour] ?? 0) - seconds)
                 }
             } else { row.readingTimeByHour = own?.readingTimeByHour ?? [:] }
             if row.readingTimeByHour.values.reduce(0, +) > time + 0.001 { row.readingTimeByHour = [:] }
+            row.readingTimeByHour = row.readingTimeByHour.filter { $0.value > 0 }
+            row.timeZone = row.readingTimeByHour.isEmpty ? nil : ((hoursFromTotal ? total.timeZone : nil) ?? own?.timeZone ?? own?.recordedZone(target: .current)?.identifier ?? TimeZone.current.identifier)
             row.lastReadingSpeed = StatisticsNumbers.speed(count: count, seconds: time)
             row.deviceId = device.id; row.deviceName = device.name
             row.lastStatisticModified = max(total.lastStatisticModified, StatisticsNumbers.nextStamp(own?.lastStatisticModified ?? 0))

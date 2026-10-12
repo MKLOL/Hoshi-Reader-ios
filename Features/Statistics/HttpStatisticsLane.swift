@@ -37,7 +37,7 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
         defaults.set(min(120, max(1, value.streakMinimumMinutes)), forKey: ReadingDay.goalKey)
         defaults.set(min(23, max(0, value.dayResetHour)), forKey: ReadingDay.resetKey)
         defaults.set(value.updatedAt, forKey: stampKey)
-        if let zone = value.timeZone, TimeZone(identifier: zone) != nil { defaults.set(zone, forKey: zoneKey) }
+        if let zone = value.timeZone, StatisticsZone.zone(zone) != nil { defaults.set(zone, forKey: zoneKey) }
         NotificationCenter.default.post(name: .readingStatisticsChanged, object: nil)
     }
     static func choose(goal: Int? = nil, reset: Int? = nil, zone: String? = nil) {
@@ -270,7 +270,7 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
                 if chosen != local { StatisticsPreferencesStore.save(chosen, defaults: defaults); local = StatisticsPreferencesStore.load(defaults: defaults) }
             }
             // Old peers omit the zone; retain the newest explicit zone independently.
-            let zones = choices.filter { $0.1.timeZone.flatMap(TimeZone.init(identifier:)) != nil } + (local.timeZone == nil ? [] : [(own.id, local)])
+            let zones = choices.filter { StatisticsZone.zone($0.1.timeZone) != nil } + (local.timeZone == nil ? [] : [(own.id, local)])
             if let zone = zones.max(by: { $0.1.updatedAt == $1.1.updatedAt ? $0.0 < $1.0 : $0.1.updatedAt < $1.1.updatedAt })?.1.timeZone, zone != local.timeZone {
                 local.timeZone = zone; StatisticsPreferencesStore.save(local, defaults: defaults)
             }

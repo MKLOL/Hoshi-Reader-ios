@@ -118,14 +118,14 @@ nonisolated enum ReadingTrends {
 @Observable @MainActor final class UsageStatisticsModel {
     var events: [UsageEvent] = []
     var firstDay: Date?
-    var today = UsageDay(date: Calendar.current.startOfDay(for: .now))
+    var today = UsageDay(date: ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour))
     private var counts: [Date: UsageDay] = [:]
     private var reloadGeneration = 0
     func reload(resetHour: Int = ReadingDay.resetHour, now: Date = .now, log: UsageLog = .shared) async {
         reloadGeneration += 1
         let generation = reloadGeneration
         let snapshot = await log.read(now: now)
-        let calendar = Calendar.current
+        let calendar = StatisticsZone.calendar
         let readingToday = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         let summaries = await Task.detached {
             let dates = (0...92).map { calendar.date(byAdding: .day, value: -$0, to: readingToday)! }
@@ -133,11 +133,7 @@ nonisolated enum ReadingTrends {
         }.value
         guard generation == reloadGeneration else { return }
         events = snapshot.events
-        firstDay = snapshot.firstDay.map { first in
-            // If the first file is still available, its first event gives the real reading day.
-            snapshot.events.first(where: { calendar.isDate($0.date, inSameDayAs: first) })
-                .map { ReadingDay.date(at: $0.date, resetHour: resetHour, calendar: calendar) } ?? first
-        }
+        firstDay = snapshot.firstDay.map { ReadingDay.date(at: $0, resetHour: resetHour, calendar: calendar) }
         counts = summaries
         today = summaries[readingToday] ?? UsageDay(date: readingToday)
     }

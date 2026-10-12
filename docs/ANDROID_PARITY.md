@@ -6,7 +6,9 @@ Android audit target: `a35bd97e` (0.12.4), from the previously ported `2cf591e0`
 | --- | --- |
 | `b7df55d2`, `18f2a9fd`, `48a2ffda` | Retained statistics for deleted and never-downloaded books; Android-compatible device/month shards and bidirectional legacy history; synced streak goal/reset; current-history status; periodic persistence while reading; independent bookmark transfers; bounded final history flush and paused foreground polling. Legacy bookmarks exchange only during bootstrap, and download counts reflect actual position changes. |
 
-Two independent reviewers checked this feature and rechecked their fixes. Focused statistics suites passed 45 tests. The real-server integration regression also covers obsolete malformed legacy bookmarks during a metadata reconcile. Current final verification is recorded at the end of this follow-up once all slices are complete.
+| `3de13704` | Shared Eastern Time reading days; synced IANA/fixed-offset zone; device-specific character allocations; recovery of older local-hour records; consistent Today, streak, charts and reader sheets; aggregate imports preserve recording zones. |
+
+Two independent reviewers checked this feature and rechecked their fixes. Focused statistics suites passed 45 tests. Two further reviewers cleared the shared-zone slice and its fixed-offset, import, DST and first-usage-date regressions. The real-server integration regression also covers obsolete malformed legacy bookmarks during a metadata reconcile. Current final verification is recorded at the end of this follow-up once all slices are complete.
 
 ---
 

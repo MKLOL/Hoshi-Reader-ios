@@ -35,12 +35,13 @@ nonisolated struct Statistics: Codable, Equatable, Sendable {
     var deviceName: String? = nil
     /// Counted seconds by local ISO date/hour, shared with Android; missing hours are legacy evidence.
     var readingTimeByHour: [String: Double] = [:]
+    var timeZone: String? = nil
 }
 
 nonisolated extension Statistics {
     private enum CodingKeys: String, CodingKey {
         case title, dateKey, charactersRead, readingTime, minReadingSpeed, altMinReadingSpeed
-        case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour
+        case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour, timeZone
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -55,6 +56,7 @@ nonisolated extension Statistics {
         lastStatisticModified = try values.decodeIfPresent(Int.self, forKey: .lastStatisticModified) ?? 0
         deviceId = try values.decodeIfPresent(String.self, forKey: .deviceId)
         deviceName = try values.decodeIfPresent(String.self, forKey: .deviceName)
+        timeZone = try values.decodeIfPresent(String.self, forKey: .timeZone)
         readingTimeByHour = try values.decodeIfPresent([String: Double].self, forKey: .readingTimeByHour) ?? [:]
     }
     func encode(to encoder: Encoder) throws {
@@ -70,6 +72,7 @@ nonisolated extension Statistics {
         try values.encode(lastStatisticModified, forKey: .lastStatisticModified)
         try values.encodeIfPresent(deviceId, forKey: .deviceId)
         try values.encodeIfPresent(deviceName, forKey: .deviceName)
+        try values.encodeIfPresent(timeZone, forKey: .timeZone)
         if !readingTimeByHour.isEmpty { try values.encode(readingTimeByHour, forKey: .readingTimeByHour) }
     }
 }

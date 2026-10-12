@@ -63,7 +63,10 @@ nonisolated final class UsageLog: @unchecked Sendable {
             queue.async { [self] in
                 let files = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
                     .filter { $0.pathExtension == "ndjson" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-                let first = files.compactMap { StatisticsMath.date($0.deletingPathExtension().lastPathComponent) }.first
+                let first: Date? = files.first.flatMap { file in
+                    guard let data = try? Data(contentsOf: file) else { return nil }
+                    return data.split(separator: 10).compactMap { try? JSONDecoder().decode(UsageEvent.self, from: Data($0)) }.map(\.date).min()
+                }
                 let since = Calendar.current.date(byAdding: .day, value: -historyDays, to: now) ?? now
                 var events: [UsageEvent] = []
                 for file in files {

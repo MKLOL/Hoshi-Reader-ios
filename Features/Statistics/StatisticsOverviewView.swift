@@ -10,6 +10,7 @@ struct StatisticsOverviewView: View {
     @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
     @AppStorage(ReadingDay.goalKey) private var goal = 10
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
+    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     private var today: DailyReading { model.days.first { $0.date == readingDate } ?? DailyReading(date: readingDate) }
 
     var body: some View {
@@ -21,6 +22,8 @@ struct StatisticsOverviewView: View {
             if selectedTab == 0 { overviewSections }
             else { StatisticsTrendsSections(reading: model.days, usage: usage) }
         }
+        .environment(\.calendar, StatisticsZone.calendar)
+        .environment(\.timeZone, StatisticsZone.calendar.timeZone)
         .navigationTitle("Statistics")
         .onAppear { refresh(); Task { await HttpStatisticsLane.shared.refresh() } }
         .task { await usage.reload() }
@@ -35,6 +38,7 @@ struct StatisticsOverviewView: View {
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in refresh() }
         .onChange(of: resetHour) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
+        .onChange(of: zoneID) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
     }
     private func refresh() {
         readingDate = ReadingDay.date(at: .now, resetHour: resetHour)
@@ -60,6 +64,12 @@ struct StatisticsOverviewView: View {
                 Picker("Day resets at", selection: Binding(get: { resetHour }, set: { StatisticsPreferencesStore.choose(reset: $0) })) {
                     ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
                 }
+                Picker("Reading time zone", selection: Binding(get: { zoneID }, set: { StatisticsPreferencesStore.choose(zone: $0) })) {
+                    ForEach(Array(Set([StatisticsZone.defaultID, TimeZone.current.identifier, zoneID])).sorted(), id: \.self) { zone in
+                        Text(zone.replacingOccurrences(of: "_", with: " ")).tag(zone)
+                    }
+                }
+                Text("Every device counts reading days in this time zone.").font(.caption).foregroundStyle(.secondary)
                 Text("All statistics days run from the selected hour until that hour the next morning.")
                     .font(.caption).foregroundStyle(.secondary)
                 if model.streakHistory.estimated {
@@ -103,7 +113,8 @@ struct StatisticsOverviewView: View {
     }
 
     private static func hourLabel(_ hour: Int) -> String {
-        ReadingDay.boundary(on: .now, resetHour: hour).formatted(date: .omitted, time: .shortened)
+        let utc = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
+        return StatisticsZone.display(ReadingDay.boundary(on: Date(timeIntervalSince1970: 0), resetHour: hour, calendar: utc), dateStyle: .none, timeStyle: .short, calendar: utc)
     }
 }
 
@@ -111,6 +122,7 @@ struct BookStatisticsDetailView: View {
     let bookId: UUID
     @State private var model = StatisticsOverview()
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
+    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     var body: some View {
         List {
             if let item = model.books.first(where: { $0.id == bookId }) {
@@ -119,10 +131,10 @@ struct BookStatisticsDetailView: View {
                     LabeledContent("Reading time", value: StatisticsMath.duration(item.seconds))
                     LabeledContent("Characters", value: item.characters.formatted())
                     if item.isManga { LabeledContent("Pages", value: item.pages.formatted()) }
-                    if let first = item.days.first(where: { $0.seconds > 0 }) { LabeledContent("Started", value: first.date.formatted(date: .abbreviated, time: .omitted)) }
+                    if let first = item.days.first(where: { $0.seconds > 0 }) { LabeledContent("Started", value: StatisticsZone.display(first.date)) }
                     if let last = item.days.last(where: { $0.seconds > 0 }) {
-                        LabeledContent("Last read", value: last.date.formatted(date: .abbreviated, time: .omitted))
-                        if item.finished { LabeledContent("Finished", value: last.date.formatted(date: .abbreviated, time: .omitted)) }
+                        LabeledContent("Last read", value: StatisticsZone.display(last.date))
+                        if item.finished { LabeledContent("Finished", value: StatisticsZone.display(last.date)) }
                     }
                     let count = item.isManga ? item.pages : item.characters
                     let pace = StatisticsNumbers.speed(count: count, seconds: item.seconds)
@@ -132,7 +144,7 @@ struct BookStatisticsDetailView: View {
                     LabeledContent("Days read", value: daysRead.formatted())
                     if daysRead > 0 { LabeledContent("Average time per day", value: StatisticsMath.duration(item.seconds / Double(daysRead))) }
                     if let best = item.days.max(by: { $0.seconds < $1.seconds }) {
-                        LabeledContent("Best day", value: "\(best.date.formatted(date: .abbreviated, time: .omitted)) · \(StatisticsMath.duration(best.seconds))")
+                        LabeledContent("Best day", value: "\(StatisticsZone.display(best.date)) · \(StatisticsMath.duration(best.seconds))")
                     }
                 }
                 Section("Last 16 weeks") { ReadingHeatmap(days: item.days) }
@@ -140,16 +152,19 @@ struct BookStatisticsDetailView: View {
                 Section("History") {
                     ForEach(item.days.reversed()) { day in
                         VStack(alignment: .leading) {
-                            Text(day.date.formatted(date: .abbreviated, time: .omitted))
+                            Text(StatisticsZone.display(day.date))
                             Text("\(StatisticsMath.duration(day.seconds)) · \(day.characters.formatted()) characters").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
             }
         }
+        .environment(\.calendar, StatisticsZone.calendar)
+        .environment(\.timeZone, StatisticsZone.calendar.timeZone)
         .navigationTitle("Book statistics")
         .onAppear { model.reload(resetHour: resetHour) }
         .onChange(of: resetHour) { _, _ in model.reload(resetHour: resetHour) }
+        .onChange(of: zoneID) { _, _ in model.reload(resetHour: resetHour) }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in model.reload(resetHour: resetHour) }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload(resetHour: resetHour) }
     }
@@ -171,7 +186,7 @@ struct DeviceReadingSection: View {
                         LabeledContent("Characters", value: device.characters.formatted())
                         if device.pages > 0 { LabeledContent("Pages", value: device.pages.formatted()) }
                         if showBookCount { LabeledContent("Books", value: device.books.formatted()) }
-                        if let last = device.lastRead { LabeledContent("Last read", value: last.formatted(date: .abbreviated, time: .omitted)) }
+                        if let last = device.lastRead { LabeledContent("Last read", value: StatisticsZone.display(last)) }
                     }
                 }
             }
@@ -182,8 +197,9 @@ struct DeviceReadingSection: View {
 struct ReadingHeatmap: View {
     let days: [DailyReading]
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
+    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     var body: some View {
-        let calendar = Calendar.current
+        let calendar = StatisticsZone.calendar
         let today = ReadingDay.date(at: .now, resetHour: resetHour)
         let mondayOffset = (calendar.component(.weekday, from: today) + 5) % 7
         let start = calendar.date(byAdding: .day, value: -(15 * 7 + mondayOffset), to: today)!
@@ -197,7 +213,7 @@ struct ReadingHeatmap: View {
                         RoundedRectangle(cornerRadius: 2)
                             .fill(date > today ? Color.clear : seconds == 0 ? Color.secondary.opacity(0.12) : Color.accentColor.opacity(0.25 + 0.75 * seconds / max(1, maximum)))
                             .aspectRatio(1, contentMode: .fit)
-                            .accessibilityLabel("\(date.formatted(date: .abbreviated, time: .omitted)): \(StatisticsMath.duration(seconds))")
+                            .accessibilityLabel("\(StatisticsZone.display(date)): \(StatisticsMath.duration(seconds))")
                     }
                 }
             }
@@ -210,8 +226,8 @@ struct WeekdayReadingChart: View {
     var body: some View {
         Chart(0..<7, id: \.self) { offset in
             let weekday = (offset + 1) % 7 + 1
-            let seconds = days.filter { Calendar.current.component(.weekday, from: $0.date) == weekday }.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }
-            BarMark(x: .value("Weekday", Calendar.current.shortWeekdaySymbols[weekday - 1]), y: .value("Minutes", seconds / 60))
+            let seconds = days.filter { StatisticsZone.calendar.component(.weekday, from: $0.date) == weekday }.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }
+            BarMark(x: .value("Weekday", StatisticsZone.calendar.shortWeekdaySymbols[weekday - 1]), y: .value("Minutes", seconds / 60))
         }.frame(height: 150)
     }
 }

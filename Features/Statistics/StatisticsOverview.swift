@@ -2,30 +2,31 @@ import Foundation
 
 /// A reading day is a local wall-clock date, never a fixed 24-hour offset (DST can change its length).
 nonisolated enum ReadingDay {
+    static var calendar: Calendar { StatisticsZone.calendar }
     static let resetKey = "statistics.dayResetHour"
     static let goalKey = "statistics.dailyGoalMinutes"
     static var resetHour: Int { resetHour(defaults: .standard) }
     static func resetHour(defaults: UserDefaults) -> Int {
         defaults.object(forKey: resetKey) == nil ? 3 : min(23, max(0, defaults.integer(forKey: resetKey)))
     }
-    static func date(at instant: Date, resetHour: Int, calendar: Calendar = .current) -> Date {
+    static func date(at instant: Date, resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> Date {
         let day = calendar.startOfDay(for: instant)
         return calendar.component(.hour, from: instant) < min(23, max(0, resetHour))
             ? calendar.date(byAdding: .day, value: -1, to: day)! : day
     }
-    static func boundary(on day: Date, resetHour: Int, calendar: Calendar = .current) -> Date {
+    static func boundary(on day: Date, resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> Date {
         calendar.date(bySettingHour: min(23, max(0, resetHour)), minute: 0, second: 0, of: calendar.startOfDay(for: day))!
     }
     private static func gregorian(_ calendar: Calendar) -> Calendar {
         var value = Calendar(identifier: .gregorian); value.timeZone = calendar.timeZone; return value
     }
-    static func key(_ date: Date, calendar: Calendar = .current) -> String {
+    static func key(_ date: Date, calendar: Calendar = StatisticsZone.calendar) -> String {
         let formatter = DateFormatter()
         formatter.calendar = gregorian(calendar); formatter.timeZone = calendar.timeZone
         formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
     }
-    static func parse(_ key: String, calendar: Calendar = .current) -> Date? {
+    static func parse(_ key: String, calendar: Calendar = StatisticsZone.calendar) -> Date? {
         let formatter = DateFormatter()
         formatter.calendar = gregorian(calendar); formatter.timeZone = calendar.timeZone
         formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"; formatter.isLenient = false
@@ -33,7 +34,7 @@ nonisolated enum ReadingDay {
         return date
     }
     /// Hour keys deliberately have no zone: both clients interpret the reader's recorded local date/hour.
-    static func hour(_ key: String, calendar: Calendar = .current) -> (date: Date, hour: Int)? {
+    static func hour(_ key: String, calendar: Calendar = StatisticsZone.calendar) -> (date: Date, hour: Int)? {
         // Parse wall-clock text in UTC first so a historical hour survives a later timezone
         // change or a DST gap in the current zone; only its date and hour are significant.
         var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -74,36 +75,41 @@ nonisolated enum ReadingDay {
     }
     /// Preserve calendar-day storage and redistribute only presentation. Unknown time stays on its own
     /// date. Characters follow each calendar date's time, with largest-remainder rounding preserving totals.
-    static func days(reading: [Statistics], text: [MangaTextStatistic]? = nil, resetHour: Int, calendar: Calendar = .current) -> [DailyReading] {
+    static func days(reading: [Statistics], text: [MangaTextStatistic]? = nil, resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> [DailyReading] {
         let reset = min(23, max(0, resetHour)), rows = Statistics.merged(reading)
-        var seconds: [Date: Double] = [:], shares: [String: [Date: Double]] = [:]
+        var seconds: [Date: Double] = [:], shares: [String: [Date: Double]] = [:], dateShares: [String: [Date: Double]] = [:]
         for row in rows {
             guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
             let previous = calendar.date(byAdding: .day, value: -1, to: date)!
-            let hours = reset == 0 ? [] : row.readingTimeByHour.compactMap { key, value -> (Date, Double)? in
+            let recorded = row.recordedZone(target: calendar.timeZone)
+            let convert = recorded != nil && recorded != calendar.timeZone
+            let hours = reset == 0 && !convert ? [] : row.readingTimeByHour.compactMap { key, value -> (Date, Double)? in
                 guard value.isFinite, value > 0, let hour = hour(key, calendar: calendar), hour.date == date || hour.date == previous else { return nil }
-                return (hourDay(hour, reset: reset, calendar: calendar), value)
+                guard let moved = StatisticsZone.convert(key, from: recorded, to: calendar) else { return nil }
+                return (hourDay(moved, reset: reset, calendar: calendar), value)
             }
             let known = hours.reduce(0.0) { StatisticsNumbers.adding($0, $1.1) }
             let scale = known > row.readingTime ? row.readingTime / known : 1
             func credit(_ day: Date, _ value: Double) {
                 guard value > 0 else { return }
                 seconds[day] = StatisticsNumbers.adding(seconds[day] ?? 0, value)
-                shares[row.dateKey, default: [:]][day] = StatisticsNumbers.adding(shares[row.dateKey]?[day] ?? 0, value)
+                shares[row.key, default: [:]][day] = StatisticsNumbers.adding(shares[row.key]?[day] ?? 0, value)
+                dateShares[row.dateKey, default: [:]][day] = StatisticsNumbers.adding(dateShares[row.dateKey]?[day] ?? 0, value)
             }
             for (day, value) in hours { credit(day, value * scale) }
             credit(date, max(0, row.readingTime - known * scale))
         }
         var byDate: [String: Int] = [:]
         if let text {
-            for row in MangaTextStatistic.merged(text) { byDate[row.dateKey] = StatisticsNumbers.adding(byDate[row.dateKey] ?? 0, row.charactersRead) }
+            for row in MangaTextStatistic.merged(text) { byDate[row.key] = StatisticsNumbers.adding(byDate[row.key] ?? 0, row.charactersRead) }
         } else {
-            for row in rows { byDate[row.dateKey] = StatisticsNumbers.adding(byDate[row.dateKey] ?? 0, row.charactersRead) }
+            for row in rows { byDate[row.key] = StatisticsNumbers.adding(byDate[row.key] ?? 0, row.charactersRead) }
         }
         var characters: [Date: Int] = [:]
         for (key, count) in byDate where count > 0 {
-            guard let date = parse(key, calendar: calendar) else { continue }
-            let dayShares = shares[key, default: [:]], total = dayShares.values.reduce(0.0, StatisticsNumbers.adding)
+            let dateKey = String(key.prefix(10))
+            guard let date = parse(dateKey, calendar: calendar) else { continue }
+            let dayShares = shares[key] ?? dateShares[dateKey] ?? [:], total = dayShares.values.reduce(0.0, StatisticsNumbers.adding)
             if total == 0 { characters[date] = StatisticsNumbers.adding(characters[date] ?? 0, count); continue }
             let exact = dayShares.mapValues { min(Double(count), Double(count) * ($0 / total)) }
             var allocations = exact.mapValues { min(count, StatisticsNumbers.integer($0)) }
@@ -122,14 +128,15 @@ nonisolated enum ReadingDay {
         }
     }
     /// Missing hour evidence receives streak credit on both plausible dates, never duplicated totals.
-    static func streakHistory(_ rows: [Statistics], resetHour: Int, calendar: Calendar = .current) -> (days: [DailyReading], estimated: Bool) {
+    static func streakHistory(_ rows: [Statistics], resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> (days: [DailyReading], estimated: Bool) {
         let reset = min(23, max(0, resetHour))
         var result: [Date: Double] = [:], estimated = false
         func credit(_ day: Date, _ value: Double) { if value > 0 { result[day] = StatisticsNumbers.adding(result[day] ?? 0, value) } }
         for row in Statistics.merged(rows) {
             guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
+            let recorded = row.recordedZone(target: calendar.timeZone)
             let hours = row.readingTimeByHour.compactMap { key, value -> (Date, Double)? in
-                guard value.isFinite, value > 0, let hour = hour(key, calendar: calendar) else { return nil }
+                guard value.isFinite, value > 0, let hour = StatisticsZone.convert(key, from: recorded, to: calendar) else { return nil }
                 return (hourDay(hour, reset: reset, calendar: calendar), value)
             }
             let known = hours.reduce(0.0) { StatisticsNumbers.adding($0, $1.1) }
@@ -229,7 +236,7 @@ nonisolated enum StatisticsMath {
             DailyReading(date: date, seconds: rows.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }, characters: rows.reduce(0) { StatisticsNumbers.adding($0, $1.characters) })
         }.sorted { $0.date < $1.date }
     }
-    static func streak(_ days: [DailyReading], goalMinutes: Int, now: Date = .now, resetHour: Int = 0, calendar: Calendar = .current) -> (current: Int, longest: Int) {
+    static func streak(_ days: [DailyReading], goalMinutes: Int, now: Date = .now, resetHour: Int = 0, calendar: Calendar = StatisticsZone.calendar) -> (current: Int, longest: Int) {
         let today = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         let eligible = Set(days.filter { $0.date <= today && $0.seconds >= Double(min(120, max(1, goalMinutes))) * 60 }.map(\.date))
         var cursor = eligible.contains(today) ? today : calendar.date(byAdding: .day, value: -1, to: today)!
