@@ -58,35 +58,143 @@ nonisolated final class UsageLog: @unchecked Sendable {
             } catch { /* Logging cannot interrupt reading. */ }
         }
     }
-    func read(historyDays: Int = 92, now: Date = .now) async -> (events: [UsageEvent], firstDay: Date?) {
-        await withCheckedContinuation { continuation in
+    private static func validDevice(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= 64 && id.contains { $0 != "." } && id.utf8.allSatisfy { (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || [45,46,95].contains($0) }
+    }
+    struct DayFile: Sendable {
+        let day: String
+        let file: URL
+        let stamp: String
+    }
+    private func prepareDirectory() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var root = directory, values = URLResourceValues(); values.isExcludedFromBackup = true
+        try root.setResourceValues(values)
+    }
+    func ownFiles() async throws -> [DayFile] {
+        try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
-                let files = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
-                    .filter { $0.pathExtension == "ndjson" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-                let first: Date? = files.first.flatMap { file in
-                    guard let data = try? Data(contentsOf: file) else { return nil }
-                    return data.split(separator: 10).compactMap { try? JSONDecoder().decode(UsageEvent.self, from: Data($0)) }.map(\.date).min()
-                }
-                let since = Calendar.current.date(byAdding: .day, value: -historyDays, to: now) ?? now
-                var events: [UsageEvent] = []
-                for file in files {
-                    guard let date = StatisticsMath.date(file.deletingPathExtension().lastPathComponent), date >= Calendar.current.startOfDay(for: since),
-                          let handle = try? FileHandle(forReadingFrom: file) else { continue }
-                    defer { try? handle.close() }
-                    var pending = Data()
-                    while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-                        pending.append(chunk)
-                        while let end = pending.firstIndex(of: 10) {
-                            if let event = try? JSONDecoder().decode(UsageEvent.self, from: pending[..<end]) { events.append(event) }
-                            pending.removeSubrange(...end)
-                        }
-                        if pending.count > 1024 * 1024 { pending.removeAll() }
+                do {
+                    guard FileManager.default.fileExists(atPath: directory.path) else { continuation.resume(returning: []); return }
+                    let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
+                    let result = try files.filter { $0.pathExtension == "ndjson" }.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { file -> DayFile? in
+                        let day = file.deletingPathExtension().lastPathComponent
+                        guard ReadingDay.parse(day) != nil else { return nil }
+                        let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                        return DayFile(day: day, file: file, stamp: "\(day):\(values.fileSize ?? 0):\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)")
                     }
-                }
-                continuation.resume(returning: (events.sorted { $0.at < $1.at }, first))
+                    continuation.resume(returning: result)
+                } catch { continuation.resume(throwing: error) }
             }
         }
     }
+    func bytes(files: [DayFile]) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    var result = Data()
+                    for file in files {
+                        let data = try Data(contentsOf: file.file)
+                        guard result.count + data.count <= UsageGzip.expandedLimit else { throw HttpSyncError("Usage log exceeds the size limit") }
+                        result.append(data)
+                        if result.last != 10 { result.append(10) }
+                    }
+                    continuation.resume(returning: result)
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    func store(days: [String: Data], device: String?, mergeOwn: Bool) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                do {
+                    try prepareDirectory()
+                    let folder: URL
+                    if let device {
+                        guard Self.validDevice(device) else { throw HttpSyncError("Invalid usage device ID") }
+                        folder = directory.appendingPathComponent("devices").appendingPathComponent(device)
+                    } else { folder = directory }
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    var changed = false
+                    for (day, data) in days {
+                        guard day.count == 10, ReadingDay.parse(day) != nil else { throw HttpSyncError("Invalid usage day") }
+                        let file = folder.appendingPathComponent(day + ".ndjson")
+                        let exists = FileManager.default.fileExists(atPath: file.path)
+                        let old = exists ? try Data(contentsOf: file) : Data()
+                        var next = data
+                        if mergeOwn {
+                            var known = Set(old.split(separator: 10).map(Data.init))
+                            next = old
+                            if !next.isEmpty && next.last != 10 { next.append(10) }
+                            for line in data.split(separator: 10) where known.insert(Data(line)).inserted { next.append(contentsOf: line); next.append(10) }
+                        }
+                        if next != old { try next.write(to: file, options: .atomic); changed = true }
+                    }
+                    if changed { NotificationCenter.default.post(name: .usageLogChanged, object: nil) }
+                    continuation.resume()
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    func clearDeviceDays() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                do {
+                    let folder = directory.appendingPathComponent("devices")
+                    if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
+                    NotificationCenter.default.post(name: .usageLogChanged, object: nil)
+                    continuation.resume()
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    func hasOwnDays(_ days: [String]) -> Bool {
+        days.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0 + ".ndjson").path) }
+    }
+    func hasDeviceDays(_ days: [String], device: String) -> Bool {
+        days.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent("devices").appendingPathComponent(device).appendingPathComponent($0 + ".ndjson").path) }
+    }
+    func read(historyDays: Int = 92, now: Date = .now) async -> (events: [UsageEvent], firstDay: Date?) {
+        await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                var folders: [(URL, String)] = [(directory, "local")]
+                let devices = directory.appendingPathComponent("devices")
+                for folder in (try? FileManager.default.contentsOfDirectory(at: devices, includingPropertiesForKeys: nil)) ?? [] where Self.validDevice(folder.lastPathComponent) {
+                    folders.append((folder, "device:" + folder.lastPathComponent))
+                }
+                // File labels are each writer's local dates. Include adjacent labels; event instants
+                // determine the actual reading day in the chosen statistics zone.
+                let since = StatisticsZone.calendar.date(byAdding: .day, value: -(historyDays + 2), to: now) ?? now
+                let sinceKey = ReadingDay.key(since)
+                var events: [UsageEvent] = [], first: Date?
+                for (folder, namespace) in folders {
+                    let files = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "ndjson" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+                    for (index, file) in files.enumerated() {
+                        guard file.deletingPathExtension().lastPathComponent >= sinceKey || index == 0, let handle = try? FileHandle(forReadingFrom: file) else { continue }
+                        defer { try? handle.close() }
+                        var pending = Data(), fileFirst: Date?
+                        while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+                            pending.append(chunk)
+                            while let end = pending.firstIndex(of: 10) {
+                                if var event = try? JSONDecoder().decode(UsageEvent.self, from: pending[..<end]) {
+                                    fileFirst = min(fileFirst ?? event.date, event.date)
+                                    if event.date >= since {
+                                        event.session = namespace + "|" + (event.session ?? "")
+                                        events.append(event)
+                                    }
+                                }
+                                pending.removeSubrange(...end)
+                            }
+                            if pending.count > 1024 * 1024 { pending.removeAll() }
+                        }
+                        if let fileFirst { first = min(first ?? fileFirst, fileFirst) }
+                    }
+                }
+                continuation.resume(returning: (events.sorted { $0.at == $1.at ? ($0.session ?? "") < ($1.session ?? "") : $0.at < $1.at }, first))
+            }
+        }
+    }
+
 }
 
 extension Notification.Name {

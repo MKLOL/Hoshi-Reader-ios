@@ -1,9 +1,11 @@
-*Last updated: March 22 2026*
+*Last updated: October 12 2026*
 # Privacy Policy
 
 Your data stays on your device unless you use the features below.
 
 **Google Drive Sync** - If enabled and when syncing a book, the book title, reading progress, statistics, and book cover can be uploaded to your Google Drive. The app can only access files that were created by the Google Cloud Project and cannot read any other files in your Drive. 
+
+**HTTP Sync** - When configured, books, reading progress, reading statistics, streak settings and reading activity are sent to your chosen sync server. Activity includes reading sessions, looked-up words and manga bubble text used for translation. Device logs are excluded from system backups. Other devices’ cached activity is removed when switching sync accounts.
 
 **Audio** - When you play word audio or have Anki audio export configured, the word and reading are sent to a Cloudflare Worker by default. The default audio source can be disabled, and additional user-configurable audio sources can be added.
 

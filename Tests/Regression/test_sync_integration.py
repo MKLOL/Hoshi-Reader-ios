@@ -171,6 +171,8 @@ class IosSyncIntegration(unittest.TestCase):
                     "testBookmarkTurnedOnThisDeviceSurvivesAFreshInstall",
                     "testCorruptStatisticsDoNotBlockBookmarkOrSettingsSync",
                     "testUnchangedBookMapRecoversMissingReadingAndMangaHistoryWithoutPayloadDownloads",
+                    "testValidMapsIgnoreCorruptObsoleteLegacyBookmarksDuringMetadataSync",
+                    "testAndroidUsageKeysSyncWithoutPayloadReconcile",
                 ],
                 "HttpSyncTransferTests": [
                     "testNativeBackgroundDownloadCancelsResumesAndPreservesExactBytes",

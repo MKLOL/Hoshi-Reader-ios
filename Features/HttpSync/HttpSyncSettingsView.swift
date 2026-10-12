@@ -99,6 +99,10 @@ struct HttpSyncSettingsView: View {
         .navigationTitle("HTTP Sync")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { tokenField = store.token }
+        .onDisappear {
+            manager.syncInBackground()
+            HttpStatisticsLane.shared.schedule(flush: true)
+        }
         .task { interrupted = await manager.interruptedDownloadSummary() }
         .onChange(of: manager.isSyncing) { _, _ in
             Task { interrupted = await manager.interruptedDownloadSummary() }

@@ -34,6 +34,12 @@ struct HoshiReaderApp: App {
         _ = DictionaryManager.shared
         configureTabBarAppearance()
         #if DEBUG
+        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_STATISTICS"] == "1" {
+            HttpSyncSettingsStore.shared.token = ""
+            UserDefaults.standard.set(StatisticsZone.defaultID, forKey: StatisticsZone.key)
+            UserDefaults.standard.set(3, forKey: ReadingDay.resetKey)
+            UserDefaults.standard.set(10, forKey: ReadingDay.goalKey)
+        }
         OfflineLlmLaunchSelfTest.startIfRequested()
         #endif
     }
@@ -53,6 +59,8 @@ struct HoshiReaderApp: App {
                 #if DEBUG
                 if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_PODCAST"] == "1" {
                     PodcastTranscriptUITestFixture()
+                } else if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_STATISTICS"] == "1" {
+                    StatisticsUITestFixture()
                 } else { bookshelf }
                 #else
                 bookshelf

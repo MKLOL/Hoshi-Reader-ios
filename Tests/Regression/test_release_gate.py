@@ -67,8 +67,9 @@ class ReleaseGateTests(unittest.TestCase):
     def test_ui_gate_must_execute_its_named_case_and_pass(self):
         import json
         playback_only = "Test Case '-[HoshiReaderUITests.PodcastTranscriptUITests testTimestampPlaybackWordLookupEnglishAndFollowing]' passed\n** TEST SUCCEEDED **"
-        success = playback_only + "\nTest Case '-[HoshiReaderUITests.PodcastTranscriptUITests testReaderAppearanceIsAvailableInsideTranscript]' passed"
-        for log, status, expected in [(success, 0, 0), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
+        podcasts_only = playback_only + "\nTest Case '-[HoshiReaderUITests.PodcastTranscriptUITests testReaderAppearanceIsAvailableInsideTranscript]' passed"
+        success = podcasts_only + "\nTest Case '-[HoshiReaderUITests.StatisticsSyncUITests testSyncedActivityStreakControlsRetainedHistoryAndTrends]' passed"
+        for log, status, expected in [(success, 0, 0), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
             with self.subTest(status=status, log=log), tempfile.TemporaryDirectory() as directory:
                 calls = []
                 def run(command, **kwargs):
@@ -84,4 +85,5 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertIn("tools/sync-test-server", calls[0])
                 self.assertIn("Tests/Regression", calls[1])
                 self.assertIn("-only-testing:HoshiReaderUITests/PodcastTranscriptUITests", calls[2])
+                self.assertIn("-only-testing:HoshiReaderUITests/StatisticsSyncUITests", calls[2])
                 self.assertEqual(calls[-1], ["xcrun", "simctl", "delete", "owned-device"])

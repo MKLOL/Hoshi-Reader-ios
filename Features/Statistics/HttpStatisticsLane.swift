@@ -80,7 +80,9 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
     private let device: ReadingDevice?
     private let defaults: UserDefaults
     private let clock: () -> Date
-    init(directory: URL? = nil, device: ReadingDevice? = nil, defaults: UserDefaults = .standard, now: @escaping () -> Date = Date.init) {
+    private let usageLane: HttpUsageLane?
+    init(directory: URL? = nil, device: ReadingDevice? = nil, defaults: UserDefaults = .standard, now: @escaping () -> Date = Date.init, usageLane: HttpUsageLane? = nil) {
+        self.usageLane = directory == nil ? (usageLane ?? .shared) : usageLane
         self.clock = now
         self.directory = directory; self.device = device; self.defaults = defaults
     }
@@ -100,6 +102,7 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
         return (parts[0], month)
     }
     func schedule(flush: Bool = false) {
+        guard HttpSyncSettingsStore.shared.isConfigured else { return }
         if flush { scheduled?.cancel(); scheduled = nil }
         guard scheduled == nil else { return } // First dirty save sets a deadline; subsequent saves cannot postpone it.
         scheduled = Task { @MainActor [weak self] in
@@ -283,9 +286,13 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
                     failures.removeValue(forKey: settingsKey)
                 } catch { fail(settingsKey, listing[settingsKey]?.etag, error) }
             }
+            if let usageLane {
+                errors += await usageLane.run(transport: transport, listing: listing, deviceID: own.id, scope: scope, flush: flush, retryFailed: retryFailed)
+            }
             try FileManager.default.createDirectory(at: booksDirectory, withIntermediateDirectories: true)
             try BookStorage.save(index, inside: booksDirectory, as: file.lastPathComponent)
             problem = failures.values.compactMap(\.message).first.map { "Some reading history could not be synced: " + $0 }
+            if let usageProblem = usageLane?.problem { problem = usageProblem }
             if !rootErrors.isEmpty { problem = "Some retained reading history could not be read." }
             if problem == nil { lastChecked = now }
         } catch { errors.append(error.localizedDescription); markFailed(error) }

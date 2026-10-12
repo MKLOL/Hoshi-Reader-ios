@@ -4,6 +4,8 @@
 
 ### Added
 
+- Today, repeated words, manga bubble and translation counts, reading timelines and trends include activity from every device using HTTP sync. Logs upload as compressed daily files and compact older months automatically.
+
 - HTTP sync keeps reading history for every book, including books never downloaded here and books deleted from any device. Statistics shows when other devices were checked and marks books that are no longer installed.
 - Streak goals, day reset settings and reading time zones sync across devices. Every device counts the same Eastern Time days by default, including recoverable older readings recorded in another zone. Reading time is sent while you read, with independent bookmark transfers and a final flush when leaving the reader.
 
@@ -15,6 +17,7 @@
 
 ### Fixed
 
+- Statistics stays responsive while browsing per-device reading history.
 - Downloaded font collections use the selected reading face in native sentence text, including regular Klee and the horizontal Kyokasho variant.
 - Book downloads continue through background suspension and retain resumable progress after interruptions.
 - Recover missing reading history even when the library otherwise appears unchanged, and preserve updates made while statistics are syncing.

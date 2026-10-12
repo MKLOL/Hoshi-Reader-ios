@@ -34,7 +34,7 @@ struct UsageTodaySection: View {
                 Text("Words looked up more than once").font(.headline)
                 ForEach(usage.repeated, id: \.word) { word in LabeledContent(word.word, value: word.count.formatted()) }
             }
-            Text("Lookups, bubbles and the timeline count this device. The reading log stays on this device and is excluded from sync and backups.")
+            Text("Lookups, bubbles and the timeline include synced activity from every device. With HTTP sync, reading activity and looked-up text sync to your chosen server. Logs stay out of system backups.")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -62,7 +62,7 @@ struct StatisticsTrendsSections: View {
         ReadingTrendChart(title: "Lookups per manga bubble", points: series(usage.values(\.mangaLookups), denominator: usage.values(\.revealed), local: true))
         ReadingTrendChart(title: "Translations pressed", points: series(usage.values(\.translated).merging(usage.values(\.screenshots), uniquingKeysWith: +), local: true))
         ReadingTrendChart(title: "Translations per manga bubble", points: series(usage.values(\.translated), denominator: usage.values(\.revealed), local: true))
-        Section { Text("Lookup and translation trends count this device, starting when its private reading log began. Per-bubble averages divide the three-day totals.").font(.caption).foregroundStyle(.secondary) }
+        Section { Text("Lookup and translation trends include synced activity from every device, starting when recording began. Per-bubble averages divide the three-day totals.").font(.caption).foregroundStyle(.secondary) }
     }
 }
 

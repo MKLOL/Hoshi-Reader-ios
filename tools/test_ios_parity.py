@@ -63,17 +63,18 @@ def main():
             "-destination", f"platform=iOS Simulator,id={device}",
             "-derivedDataPath", env.get("HOSHI_DERIVED_DATA", str(ROOT / "build/DD-sim")),
             "-only-testing:HoshiReaderUITests/PodcastTranscriptUITests",
+            "-only-testing:HoshiReaderUITests/StatisticsSyncUITests",
         ] + shlex.split(env["HOSHI_XCODEBUILD_ARGS"])
-        log = ROOT / "build/ios-podcast-ui.log"
+        log = ROOT / "build/ios-parity-ui.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("w") as output:
             ui = subprocess.run(command, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT, check=False, timeout=900)
         output = log.read_text()
-        required = ("testTimestampPlaybackWordLookupEnglishAndFollowing", "testReaderAppearanceIsAvailableInsideTranscript")
-        passed = all(any("PodcastTranscriptUITests" in line and method in line and "passed" in line
-                         for line in output.splitlines()) for method in required)
+        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"))
+        passed = all(any(suite in line and method in line and "passed" in line
+                         for line in output.splitlines()) for suite, method in required)
         if ui.returncode or "** TEST SUCCEEDED **" not in output or not passed:
-            print(f"Podcast UI regression gate failed; see {log}", file=sys.stderr)
+            print(f"iOS UI regression gate failed; see {log}", file=sys.stderr)
             return ui.returncode or 1
         return 0
     finally:

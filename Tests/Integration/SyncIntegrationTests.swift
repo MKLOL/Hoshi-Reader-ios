@@ -257,6 +257,25 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.path.hasSuffix(key) && $0.method == "GET" }, "maps replace per-book bookmark exchange after bootstrap")
     }
 
+
+    @MainActor func testAndroidUsageKeysSyncWithoutPayloadReconcile() async throws {
+        try await prepare(); await syncNow()
+        let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Fixtures/usage/android-day.ndjson.gz")
+        let key = HttpUsageLane.prefix + "android/2026-10-04" + HttpUsageLane.suffix
+        _ = try await client.put(key: key, contentType: "application/gzip", body: Data(contentsOf: fixture))
+        try await clearServerRequests(); await syncNow()
+        XCTAssertTrue(HttpSyncManager.shared.lastErrors.isEmpty, "\(HttpSyncManager.shared.lastErrors)")
+        let snapshot = await UsageLog.shared.read(now: Date(timeIntervalSince1970: 1791043200))
+        XCTAssertEqual(snapshot.events.filter { $0.at == 1791043200000 && $0.term == "猫" }.count, 1)
+        let requests = try await serverRequests()
+        XCTAssertTrue(requests.contains { $0.method == "GET" && $0.path.hasSuffix(key) })
+        XCTAssertFalse(requests.contains { $0.path.hasSuffix(".zip") || $0.path.hasSuffix("/metadata") })
+        try await clearServerRequests(); await syncNow()
+        let unchanged = try await serverRequests()
+        XCTAssertFalse(unchanged.contains { $0.path.hasSuffix(key) })
+    }
+
     private struct LocalBook {
         let metadata: BookMetadata
         let root: URL

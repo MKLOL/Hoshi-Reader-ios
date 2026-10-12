@@ -25,7 +25,7 @@ struct StatisticsOverviewView: View {
         .environment(\.calendar, StatisticsZone.calendar)
         .environment(\.timeZone, StatisticsZone.calendar.timeZone)
         .navigationTitle("Statistics")
-        .onAppear { refresh(); Task { await HttpStatisticsLane.shared.refresh() } }
+        .onAppear { refresh(); HttpSyncManager.shared.syncInBackground(); Task { await HttpStatisticsLane.shared.refresh() } }
         .task { await usage.reload() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             refresh(); Task { await HttpStatisticsLane.shared.refresh(); await usage.reload(resetHour: resetHour) }
@@ -34,7 +34,7 @@ struct StatisticsOverviewView: View {
             let day = ReadingDay.date(at: now, resetHour: resetHour)
             if day != readingDate { refresh(); Task { await usage.reload(resetHour: resetHour) } }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .usageLogChanged).receive(on: RunLoop.main)) { _ in Task { await usage.reload() } }
+        .onReceive(NotificationCenter.default.publisher(for: .usageLogChanged).receive(on: RunLoop.main).debounce(for: .milliseconds(200), scheduler: RunLoop.main)) { _ in Task { await usage.reload() } }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in refresh() }
         .onChange(of: resetHour) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
@@ -56,19 +56,20 @@ struct StatisticsOverviewView: View {
             UsageTodaySection(reading: today, usage: usage.today)
             Section("Reading streak") {
                 let streak = StatisticsMath.streak(model.streakHistory.days, goalMinutes: goal, resetHour: resetHour)
-                LabeledContent("Current", value: "\(streak.current) days")
-                LabeledContent("Longest", value: "\(streak.longest) days")
-                LabeledContent("Daily goal", value: "\(min(120, max(1, goal))) minutes")
+                LabeledContent("Current", value: streak.current == 1 ? "1 day" : "\(streak.current) days")
+                LabeledContent("Longest", value: streak.longest == 1 ? "1 day" : "\(streak.longest) days")
+                LabeledContent("Daily goal", value: goal == 1 ? "1 minute" : "\(min(120, max(1, goal))) minutes")
                 Slider(value: Binding(get: { Double(min(120, max(1, goal))) }, set: { StatisticsPreferencesStore.choose(goal: Int($0)) }), in: 1...120, step: 1)
                     .accessibilityLabel("Daily goal")
                 Picker("Day resets at", selection: Binding(get: { resetHour }, set: { StatisticsPreferencesStore.choose(reset: $0) })) {
                     ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
-                }
+                }.accessibilityIdentifier("statistics-day-reset")
                 Picker("Reading time zone", selection: Binding(get: { zoneID }, set: { StatisticsPreferencesStore.choose(zone: $0) })) {
                     ForEach(Array(Set([StatisticsZone.defaultID, TimeZone.current.identifier, zoneID])).sorted(), id: \.self) { zone in
                         Text(zone.replacingOccurrences(of: "_", with: " ")).tag(zone)
                     }
                 }
+                .accessibilityIdentifier("statistics-time-zone")
                 Text("Every device counts reading days in this time zone.").font(.caption).foregroundStyle(.secondary)
                 Text("All statistics days run from the selected hour until that hour the next morning.")
                     .font(.caption).foregroundStyle(.secondary)

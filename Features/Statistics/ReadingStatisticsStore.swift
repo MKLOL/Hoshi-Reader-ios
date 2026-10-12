@@ -53,8 +53,8 @@ nonisolated struct ReadingDevice: Codable, Equatable, Sendable {
         // upgrades, but give a different physical device its own statistics bucket after restore.
         let changedDevice = vendorID != nil && previousVendor != nil && vendorID != previousVendor
         let id = changedDevice ? UUID().uuidString.lowercased() : defaults.string(forKey: "statistics.deviceId") ?? UUID().uuidString.lowercased()
-        defaults.set(id, forKey: "statistics.deviceId")
-        if let vendorID { defaults.set(vendorID, forKey: "statistics.deviceVendorId") }
+        if defaults.string(forKey: "statistics.deviceId") != id { defaults.set(id, forKey: "statistics.deviceId") }
+        if let vendorID, previousVendor != vendorID { defaults.set(vendorID, forKey: "statistics.deviceVendorId") }
         return ReadingDevice(id: id, name: name)
     }
 }

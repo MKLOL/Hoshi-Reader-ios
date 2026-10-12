@@ -5,10 +5,14 @@ Android audit target: `a35bd97e` (0.12.4), from the previously ported `2cf591e0`
 | Android commits | iOS behavior |
 | --- | --- |
 | `b7df55d2`, `18f2a9fd`, `48a2ffda` | Retained statistics for deleted and never-downloaded books; Android-compatible device/month shards and bidirectional legacy history; synced streak goal/reset; current-history status; periodic persistence while reading; independent bookmark transfers; bounded final history flush and paused foreground polling. Legacy bookmarks exchange only during bootstrap, and download counts reflect actual position changes. |
-
 | `3de13704` | Shared Eastern Time reading days; synced IANA/fixed-offset zone; device-specific character allocations; recovery of older local-hour records; consistent Today, streak, charts and reader sheets; aggregate imports preserve recording zones. |
+| `0969e228` | All-device usage events: lookups, repeated words, manga reveals, translations and timeline/trends. Gzip day/month keys match Java/Android, own history merges before upload, completed months compact safely, account changes retire remote caches, and large-log processing runs off the UI thread. |
 
-Two independent reviewers checked this feature and rechecked their fixes. Focused statistics suites passed 45 tests. Two further reviewers cleared the shared-zone slice and its fixed-offset, import, DST and first-usage-date regressions. The real-server integration regression also covers obsolete malformed legacy bookmarks during a metadata reconcile. Current final verification is recorded at the end of this follow-up once all slices are complete.
+Two independent reviewers checked each of the three feature slices and rechecked the confirmed fixes. Coverage includes retained-history recovery, Android enum casing, concurrent sync, fixed offsets, DST, legacy zone inference, character allocation, Java-produced gzip, rollback repair, account isolation and safe month compaction. Native UI checks also exposed and fixed repeated device-identity writes that could stall Statistics.
+
+The complete `tools/test_ios_parity.py` gate passed: 19 KV-server contract tests, 100 regression checks, 172 hosted XCTest cases against the real local server, and all three required native UI scenarios, with no failures or skips. The Statistics scenario also passed on an iPad simulator; rendered phone and tablet screens, including tablet landscape, were inspected. A Release configuration build for arm64 iOS Simulator passed. The gate now requires the Statistics scenario alongside the existing transcript regressions.
+
+Physical-device suspension and relaunch remain a device check. History and activity persist locally before synchronization; reader exit and background transitions use a cancellable, bounded execution allowance. iOS does not promise a background sync while the app is suspended.
 
 ---
 
