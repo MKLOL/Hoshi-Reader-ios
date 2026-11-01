@@ -26,7 +26,7 @@ final class PodcastTranscriptUITests: XCTestCase {
         XCTAssertTrue(wait { hide.value as? String != initial })
         toggle()
         XCTAssertTrue(wait { hide.value as? String == initial })
-        app.buttons["Close appearance"].tap()
+        app.buttons["close-reader-settings"].tap()
         XCTAssertTrue(appearance.waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons["podcast-play-pause"].label, "Play")
     }

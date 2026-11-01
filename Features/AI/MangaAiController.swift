@@ -51,7 +51,11 @@ final class MangaAiController {
     }
 
     /// The current popup state. `idle` means the popup is hidden.
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle { didSet { onStateChanged?(state, activeBackendName) } }
+    private var onStateChanged: ((State, String) -> Void)?
+    private let isWorker: Bool
+    private var followedRequest: AiChatRequest?
+    private let followerId = UUID()
     /// True while the popup should be presented (any non-idle state).
     var isPresented: Bool { state != .idle }
     /// Backend for the current/most-recent request. The popup used to hard-code "ChatGPT" even
@@ -87,7 +91,8 @@ final class MangaAiController {
          history: AiChatHistoryStore = .shared,
          offlineSettings: OfflineTranslationSettingsStore = .shared,
          offlineManager: OfflineLlmManager = .shared,
-         offlineDownloads: ModelDownloadManager = .shared) {
+         offlineDownloads: ModelDownloadManager = .shared, isWorker: Bool = false) {
+        self.isWorker = isWorker
         self.settings = settings
         self.history = history
         self.offlineSettings = offlineSettings
@@ -120,11 +125,38 @@ final class MangaAiController {
             self?.ask(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book, forceLive: true)
         }
 
+        if !isWorker, let existing = AiChatRequests.shared.reusable(
+            key: AiChatRequests.key(book: book, address: sentenceId ?? blockId, text: trimmed), force: forceLive
+        ) {
+            follow(existing)
+            return
+        }
+
         // A pre-translated bubble is served immediately, online or not — it is the same tutor
         // format, already paid for, and instant. A live request only happens when the user
         // explicitly asks for one.
         if !forceLive,
            serveOfflinePretranslation(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book) {
+            return
+        }
+
+        if !isWorker {
+            let item = AiChatRequests.shared.request(
+                key: AiChatRequests.key(book: book, address: sentenceId ?? blockId, text: trimmed),
+                bookKey: AiChatRequests.bookKey(book), bubbleText: trimmed, force: forceLive
+            ) { [settings, history, offlineSettings, offlineManager, offlineDownloads] item in
+                let worker = MangaAiController(settings: settings, history: history,
+                    offlineSettings: offlineSettings, offlineManager: offlineManager,
+                    offlineDownloads: offlineDownloads, isWorker: true)
+                item.worker = worker
+                worker.onEntryPersisted = { book, entry in HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry) }
+                worker.onStateChanged = { [weak item] state, backend in
+                    guard let item else { return }
+                    AiChatRequests.shared.update(item, state: state, backend: backend)
+                }
+                worker.ask(bubbleText: trimmed, blockId: blockId, sentenceId: sentenceId, book: book, forceLive: forceLive)
+            }
+            follow(item)
             return
         }
 
@@ -318,6 +350,25 @@ final class MangaAiController {
     /// exchange with the screenshot attached, and updates `state`.
     func translateCrop(image: AiChatImage, book: BookMetadata) {
         lastRequest = { [weak self] in self?.translateCrop(image: image, book: book) }
+        if !isWorker {
+            let item = AiChatRequests.shared.request(
+                key: AiChatRequests.key(book: book, address: "image", text: image.base64Data),
+                bookKey: AiChatRequests.bookKey(book), bubbleText: "Screenshot translation"
+            ) { [settings, history, offlineSettings, offlineManager, offlineDownloads] item in
+                let worker = MangaAiController(settings: settings, history: history,
+                    offlineSettings: offlineSettings, offlineManager: offlineManager,
+                    offlineDownloads: offlineDownloads, isWorker: true)
+                item.worker = worker
+                worker.onEntryPersisted = { book, entry in HttpSyncManager.shared.onChatEntryPersisted(book: book, entry: entry) }
+                worker.onStateChanged = { [weak item] state, backend in
+                    guard let item else { return }
+                    AiChatRequests.shared.update(item, state: state, backend: backend)
+                }
+                worker.translateCrop(image: image, book: book)
+            }
+            follow(item)
+            return
+        }
         let model = settings.model
         let provider = ChatModelCatalog.provider(forModelId: model)
         activeBackendName = provider.displayName
@@ -367,6 +418,7 @@ final class MangaAiController {
 
     /// Re-runs the most recent request (the popup's Retry button). No-op if there's nothing to retry.
     func retry() {
+        if let request = followedRequest { request.retry?(); follow(request); return }
         lastRequest?()
     }
 
@@ -377,11 +429,16 @@ final class MangaAiController {
 
     /// Cancels any in-flight request without dismissing the popup.
     func cancel() {
+        requestGeneration &+= 1
+        followedRequest?.observers.removeValue(forKey: followerId)
+        followedRequest = nil
         task?.cancel()
         task = nil
     }
 
     private func beginRequest() -> Int {
+        followedRequest?.observers.removeValue(forKey: followerId)
+        followedRequest = nil
         task?.cancel()
         task = nil
         requestGeneration &+= 1
@@ -398,7 +455,7 @@ final class MangaAiController {
         }
     }
 
-    /// Dismisses the popup and cancels any in-flight request.
+    /// Detaches the popup; the app-owned worker keeps running and saving its reply.
     func dismiss() {
         cancel()
         state = .idle
@@ -409,6 +466,21 @@ final class MangaAiController {
     func browseHistory() {
         cancel()
         state = .browsingHistory
+    }
+
+    func follow(_ request: AiChatRequest) {
+        cancel()
+        followedRequest = request
+        isShowingPretranslation = false
+        activeBackendName = request.backendName
+        state = request.state
+        if !request.isRunning { request.seen = true }
+        request.observers[followerId] = { [weak self, weak request] in
+            guard let self, let request, self.followedRequest === request else { return }
+            self.activeBackendName = request.backendName
+            self.state = request.state
+            if !request.isRunning { request.seen = true }
+        }
     }
 
     // MARK: - Persistence

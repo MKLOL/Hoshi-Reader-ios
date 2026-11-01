@@ -37,6 +37,13 @@ struct PopupCardsView: View {
                     .background(.secondary.opacity(0.08))
                     .accessibilityIdentifier("card-preview")
                 Form {
+                    Section("Dictionary behavior") {
+                        Toggle("Full-width dictionary", isOn: Bindable(userConfig).popupFullWidth)
+                        Toggle("Swipe to Dismiss", isOn: Bindable(userConfig).popupSwipeToDismiss)
+                        if userConfig.popupSwipeToDismiss {
+                            Stepper("Swipe Threshold: \(userConfig.popupSwipeThreshold)", value: Bindable(userConfig).popupSwipeThreshold, in: 20...60, step: 5)
+                        }
+                    }
                     Section {
                         control("Width", key: \.width, fallback: defaults.width, range: 160...1600, step: 10, points: true, id: "card-width")
                         control("Height", key: \.height, fallback: defaults.height, range: 120...2000, step: 10, points: true, id: "card-height")

@@ -886,6 +886,7 @@ assertEqual(
               }};
               global.window = {{
                 hoshiManga: {{
+                  bubbleText: (box) => box.querySelector('p').textContent,
                   hostOffsetTop: () => 0,
                   hostTappableTopInset: () => topInset,
                   hostScale: () => 1,
@@ -943,7 +944,7 @@ assertEqual(
                 querySelector: (selector) => selector === 'p' ? text : null,
                 closest: (selector) => selector === '.frame' ? frame : null,
               }};
-              placeActions(box);
+              placeActions.call(window.hoshiManga, box);
               return {{
                 left: Number.parseInt(actions.style.left, 10),
                 top: Number.parseInt(actions.style.top, 10),

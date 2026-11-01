@@ -26,6 +26,7 @@ struct SentenceReaderView: View {
     let backgroundColor: Color
     let foregroundColor: Color
     var usage: ReaderUsageSession? = nil
+    var readerModel: ReaderViewModel? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(UserConfig.self) private var userConfig
@@ -35,6 +36,9 @@ struct SentenceReaderView: View {
     @State private var translations: SentenceTranslationSource?
     @State private var translation: SentenceTranslation?
     @State private var translationExpanded = false
+    @State private var bookFinished = false
+    @State private var readingProgress: SentenceReadingProgress?
+    @AppStorage("sentenceReaderLayout") private var paneLayout = "stacked"
     @State private var showAppearance = false
     @State private var popups: [PopupItem] = []
     @State private var highlight: NSRange?
@@ -61,8 +65,9 @@ struct SentenceReaderView: View {
                 popupStack(screenSize: geometry.size)
             }
             .coordinateSpace(name: Self.rootSpace)
+            .consumesOutsideLookupTouches(isActive: isLookingUp || popups.contains(where: \.showPopup), dismiss: dismissPopups)
         }
-        .onDisappear { closePopups() }
+        .onDisappear { closePopups(); readerModel?.persistReadingTime() }
         .task { await load() }
         .onChange(of: position) { _, new in
             translationExpanded = false
@@ -72,6 +77,15 @@ struct SentenceReaderView: View {
                 return translations?.translation(for: sentence)
             }
             if let new { SentenceReaderPositionStore.save(new, bookKey: bookKey) } // queued off the main actor
+        }
+        .onChange(of: readerModel?.index) { _, _ in refreshFromBookmark() }
+        .onChange(of: readerModel?.currentProgress) { _, _ in refreshFromBookmark() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            guard let readerModel else { return }
+            Task {
+                await readerModel.syncAfterForeground()
+                refreshFromBookmark()
+            }
         }
         .sheet(isPresented: $showAppearance) {
             AppearanceView(userConfig: userConfig, showDismiss: true)
@@ -90,13 +104,7 @@ struct SentenceReaderView: View {
             VStack(spacing: 0) {
                 header(sentenceBook)
                     .dismissesPopupsOnTap(dismissPopups)
-                sentenceArea(sentenceBook)
-                TranslationPanel(
-                    markdown: translation?.markdownResponse,
-                    isExpanded: $translationExpanded,
-                    foregroundColor: foregroundColor
-                )
-                .dismissesPopupsOnTap(dismissPopups)
+                sentencePanes(sentenceBook)
                 bottomBar(sentenceBook)
                     .dismissesPopupsOnTap(dismissPopups)
             }
@@ -128,7 +136,18 @@ struct SentenceReaderView: View {
                     .font(.caption.monospacedDigit())
                     .opacity(0.7)
             }
-            Button { showAppearance = true } label: {
+            Menu {
+                Button { paneLayout = "stacked"; dismissPopups() } label: {
+                    Label("Above and below", systemImage: paneLayout == "stacked" ? "checkmark" : "rectangle.split.1x2")
+                }
+                Button { paneLayout = "side-by-side"; dismissPopups() } label: {
+                    Label("Side by side", systemImage: paneLayout == "side-by-side" ? "checkmark" : "rectangle.split.2x1")
+                }
+            } label: {
+                Image(systemName: paneLayout == "side-by-side" ? "rectangle.split.2x1" : "rectangle.split.1x2")
+            }
+            .accessibilityLabel("Sentence layout")
+            Button { dismissPopups(); showAppearance = true } label: {
                 Image(systemName: "textformat.size").font(.headline)
             }
             .accessibilityLabel("Appearance")
@@ -136,6 +155,30 @@ struct SentenceReaderView: View {
         .foregroundStyle(foregroundColor)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    /// Each pane scrolls independently, leaving long Japanese text and translation tables reachable.
+    private func sentencePanes(_ sentenceBook: SentenceBook) -> some View {
+        GeometryReader { geometry in
+            if translationExpanded && paneLayout == "side-by-side" {
+                HStack(spacing: 0) {
+                    sentenceArea(sentenceBook).frame(width: geometry.size.width / 2)
+                    translationPanel.frame(width: geometry.size.width / 2)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    sentenceArea(sentenceBook)
+                        .frame(height: translationExpanded ? geometry.size.height / 2 : nil)
+                    translationPanel
+                }
+            }
+        }
+    }
+
+    private var translationPanel: some View {
+        TranslationPanel(markdown: translation?.markdownResponse, isExpanded: $translationExpanded,
+            foregroundColor: foregroundColor)
+            .dismissesPopupsOnTap(dismissPopups)
     }
 
     @ViewBuilder
@@ -218,11 +261,18 @@ struct SentenceReaderView: View {
             .disabled(userConfig.fontSize >= Self.fontSizeRange.upperBound)
             .accessibilityLabel("Larger text")
 
-            Button { move(to: next) } label: {
-                Image(systemName: "chevron.right").font(.title3)
+            if let next {
+                Button { move(to: next) } label: {
+                    Image(systemName: "chevron.right").font(.title3)
+                }
+                .accessibilityLabel("Next sentence")
+            } else if position != nil, readerModel != nil {
+                Button { finishBook(sentenceBook) } label: {
+                    Image(systemName: bookFinished ? "checkmark.circle.fill" : "checkmark.circle").font(.title3)
+                }
+                .disabled(bookFinished)
+                .accessibilityLabel(bookFinished ? "Book finished" : "Finish book")
             }
-            .disabled(next == nil)
-            .accessibilityLabel("Next sentence")
         }
         .tint(foregroundColor)
         .foregroundStyle(foregroundColor)
@@ -252,7 +302,7 @@ struct SentenceReaderView: View {
         // Detached so a novel's segmentation and the blob decode stay off the main actor, but
         // tied to this view's `.task`: leaving the screen cancels the work instead of letting it
         // finish and write into a dismissed view.
-        let work = Task.detached(priority: .userInitiated) { () -> (SentenceBook, SentenceTranslationSource?, SentencePosition?, SentenceTranslation?)? in
+        let work = Task.detached(priority: .userInitiated) { () -> (SentenceBook, SentenceTranslationSource?, SentencePosition?, SentenceTranslation?, SentencePosition?)? in
             let segmented = SentenceReaderLoader.segment(sources: sources)
             guard !Task.isCancelled else { return nil }
             var source: SentenceTranslationSource?
@@ -264,13 +314,14 @@ struct SentenceReaderView: View {
                ) {
                 source = SentenceTranslationSource(folder: folder, syncId: bookSyncId, spineCount: spineCount)
             }
+            let saved = SentenceReaderPositionStore.load(bookKey: key)
             let start = SentenceNavigation.initialPosition(
                 in: segmented,
-                saved: SentenceReaderPositionStore.load(bookKey: key),
+                saved: saved,
                 bookmark: anchor
             )
             let first = start.flatMap { segmented.sentence(at: $0) }.flatMap { source?.translation(for: $0) }
-            return (segmented, source, start, first)
+            return (segmented, source, start, first, saved)
         }
         let loaded = await withTaskCancellationHandler {
             await work.value
@@ -280,16 +331,61 @@ struct SentenceReaderView: View {
         guard let loaded, !Task.isCancelled else { return }
 
         translations = loaded.1
-        position = loaded.2
-        translation = loaded.3
         state = .ready(loaded.0)
+        if let readerModel {
+            let mapping = readerModel.sentenceProgress(for: loaded.0)
+            readingProgress = mapping
+            let anchor = SentenceBookmarkAnchor(chapterIndex: readerModel.index, progress: readerModel.currentProgress)
+            let migrationKey = "sentenceSharedBookmark.\(bookKey)"
+            if !UserDefaults.standard.bool(forKey: migrationKey), let cursor = loaded.4,
+               let point = mapping.at(cursor), point.characterCount > readerModel.currentCharacter {
+                // Adopt an older separate sentence cursor once. From here on the shared bookmark wins.
+                position = cursor
+                readerModel.prepareSentenceProgress(point)
+                readerModel.saveSentenceProgress(point)
+            } else {
+                position = mapping.initialPosition(saved: loaded.4, bookmark: anchor)
+            }
+            if let position, let point = mapping.at(position) { readerModel.prepareSentenceProgress(point) }
+            UserDefaults.standard.set(true, forKey: migrationKey)
+            bookFinished = readerModel.currentProgress >= 1 && readerModel.index == mapping.completionPoint?.chapterIndex && position.map(mapping.isLast) == true
+        } else {
+            position = loaded.2
+        }
+        translation = position.flatMap { loaded.0.sentence(at: $0) }.flatMap { translations?.translation(for: $0) }
     }
 
     // MARK: - Actions
 
     private func move(to next: SentencePosition?) {
+        if popups.contains(where: \.showPopup) { dismissPopups(); return }
         guard let next, next != position else { return }
+        dismissPopups()
+        bookFinished = false
         position = next
+        if let readerModel, let point = readingProgress?.at(next) {
+            readerModel.saveSentenceProgress(point)
+        }
+    }
+
+    private func finishBook(_ sentenceBook: SentenceBook) {
+        guard let readerModel, let position, let mapping = readingProgress else { return }
+        guard mapping.isLast(position), let end = mapping.completionPoint else { return }
+        dismissPopups()
+        readerModel.saveSentenceProgress(end)
+        readerModel.persistReadingTime()
+        bookFinished = true
+    }
+
+    private func refreshFromBookmark() {
+        guard let readerModel, let mapping = readingProgress else { return }
+        let anchor = SentenceBookmarkAnchor(chapterIndex: readerModel.index, progress: readerModel.currentProgress)
+        let restored = mapping.initialPosition(saved: position, bookmark: anchor)
+        if restored != position, let restored, let point = mapping.at(restored) {
+            readerModel.prepareSentenceProgress(point)
+        }
+        position = restored
+        bookFinished = readerModel.currentProgress >= 1 && readerModel.index == mapping.completionPoint?.chapterIndex && position.map(mapping.isLast) == true
     }
 
     private func stepFontSize(_ delta: Int) {
@@ -341,10 +437,13 @@ struct SentenceReaderView: View {
 
     /// The reader's lookup, minus the web view: same engine, same styles, same stacked popups.
     @State private var lookupGeneration = 0
+    @State private var isLookingUp = false
     private func handleTextSelection(_ selection: SelectionData) async -> Int? {
         guard !Task.isCancelled else { return nil }
         lookupGeneration += 1
         let generation = lookupGeneration
+        isLookingUp = true
+        defer { if lookupGeneration == generation { isLookingUp = false } }
         let snapshot = await LookupEngine.shared.lookupAsync(
             selection.text,
             maxResults: userConfig.maxResults,
@@ -388,6 +487,7 @@ struct SentenceReaderView: View {
 
     private func closePopups() {
         lookupGeneration += 1
+        isLookingUp = false
         guard !popups.isEmpty else { return }
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
@@ -399,6 +499,7 @@ struct SentenceReaderView: View {
 
     private func closeChildPopups(parent: Int) {
         lookupGeneration += 1
+        isLookingUp = false
         var popupIds: Set<UUID> = []
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices.dropFirst(parent + 1) {
@@ -463,7 +564,7 @@ private struct TranslationPanel: View {
                     .padding(.horizontal, 16)
                     .padding(.bottom, 16)
                 }
-                .frame(maxHeight: 240)
+                .frame(maxHeight: .infinity)
             }
         }
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))

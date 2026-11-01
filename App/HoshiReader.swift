@@ -14,6 +14,8 @@ import WebKit
 struct HoshiReaderApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @Environment(\.scenePhase) private var scenePhase
+    // Capture first-use evidence before migration and dictionary startup create their folders.
+    @State private var firstLaunchSetup = FirstLaunchSetup()
     @State private var userConfig = UserConfig()
     @State private var pendingImportURL: URL?
     @State private var pendingRemoteImportURL: URL?
@@ -75,6 +77,7 @@ struct HoshiReaderApp: App {
                     LocalFileServer.shared.setAudioServer(enabled: userConfig.enableLocalAudio)
                     HttpSyncManager.shared.resumePolling()
                     Task { await HttpStatisticsLane.shared.refresh() }
+                    AnonymousStatsReporter.shared.onForeground()
                 case .background:
                     HttpSyncManager.shared.suspendPolling()
                     Task {
@@ -115,6 +118,10 @@ struct HoshiReaderApp: App {
                 pendingTab: $pendingTab,
                 pendingNewsURL: $pendingNewsURL
             )
+            .sheet(isPresented: Binding(
+                get: { firstLaunchSetup.step != .hidden && !HoshiAutomation.isTesting },
+                set: { _ in }
+            )) { FirstLaunchSetupView(setup: firstLaunchSetup) }
     }
 
     private func handleURL(_ url: URL) {

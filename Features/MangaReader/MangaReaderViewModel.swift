@@ -60,10 +60,12 @@ final class MangaReaderViewModel {
     private var bookmarkSaveTask: Task<Void, Never>?
     private var pendingBookmarkPage: Int?
     private let bookmarkDebounce: Duration = .milliseconds(400)
+    private var positionSession: ReadingPositionSession?
 
     /// Off-main LRU cache of generated page HTML + warmed adjacent image files. The live page
     /// reuses HTML the adjacent-page preloader already built; see `MangaPageRenderCache`.
-    private let renderCache = MangaPageRenderCache()
+    private let imageLoader = MangaImageLoader()
+    private let renderCache: MangaPageRenderCache
     /// Tracks the most recent preload so a fast second page turn cancels the prior preload.
     private var preloadTask: Task<Void, Never>?
     /// Bumped on every `renderCurrentPage`; lets a slow build for a stale page be discarded if a
@@ -75,6 +77,7 @@ final class MangaReaderViewModel {
 
     init(metadata: BookMetadata) {
         self.metadata = metadata
+        self.renderCache = MangaPageRenderCache(imageLoader: imageLoader)
         self.twoPageEnabled = UserDefaults.standard.bool(forKey: Self.twoPageKey(metadata.id))
     }
 
@@ -100,12 +103,15 @@ final class MangaReaderViewModel {
             book = parsedBook
             bookRoot = root
             controller.bookRootForScheme = root
+            controller.imageLoader = imageLoader
+            await imageLoader.configure(root: root, declaredPaths: Set(parsedBook.pages.map { $0.imagePath.trimmingPrefixSlash() }))
             // Mark this book as the most recently opened so "Recent" sort floats it to the front of
             // its shelf. Mirrors the EPUB reader (ReaderLoaderViewModel.loadBook); the bookshelf
             // re-reads metadata from disk on its next loadBooks().
             metadata.lastAccess = Date()
             try? BookStorage.save(metadata, inside: root, as: FileNames.metadata)
-            let restored = BookStorage.loadBookmark(root: root)?.chapterIndex ?? 0
+            if let id = syncId(for: metadata) { positionSession = ReadingPositionRepository.shared.open(bookId: id, root: root) }
+            let restored = (positionSession?.initialBookmark ?? BookStorage.loadBookmark(root: root))?.chapterIndex ?? 0
             pageIndex = max(0, min(restored, max(0, parsedBook.pages.count - 1)))
             isReady = true
             setUpStatistics(title: parsedBook.title, root: root, userConfig: userConfig)
@@ -193,56 +199,64 @@ final class MangaReaderViewModel {
         var allowedPaths = Set([page.imagePath.trimmingPrefixSlash()])
         if let leftPage { allowedPaths.insert(leftPage.imagePath.trimmingPrefixSlash()) }
 
+        let adjacentIndexes = adjacentIndexes(currentIndex: rightIndex, pageCount: book.pages.count, twoPage: twoPage)
+        let imageIndexes = ([rightIndex] + adjacentIndexes).flatMap { candidate in
+            twoPage && candidate + 1 < book.pages.count ? [candidate, candidate + 1] : [candidate]
+        }
+        for imageIndex in imageIndexes { allowedPaths.insert(book.pages[imageIndex].imagePath.trimmingPrefixSlash()) }
+        let priorityIndexes = Array(imageIndexes.dropFirst(twoPage && leftPage != nil ? 2 : 1).prefix(twoPage ? 2 : 1)) + imageIndexes
+        let wantedPaths = priorityIndexes.map { book.pages[$0].imagePath.trimmingPrefixSlash() }
+        preloadTask?.cancel()
         renderGeneration += 1
         let generation = renderGeneration
 
         // Build (or reuse) the HTML off the main actor via the render cache, then load. On a
         // preload hit this resolves immediately; on a miss the (possibly large) build happens on
         // the actor's executor so the main thread never blocks. A newer render supersedes this one.
-        Task { [renderCache] in
+        Task { [renderCache, imageLoader] in
+            guard self.renderGeneration == generation else { return }
+            await imageLoader.setWindow(wantedPaths)
             let html = await renderCache.htmlFor(page: page, leftPage: leftPage, config: config)
             guard self.renderGeneration == generation else { return }
             let loadToken = controller.load(html: html, allowedImagePaths: allowedPaths)
             onLoadToken?(loadToken)
-            self.preloadAdjacentPages(config: config)
+            self.preloadAdjacentPages(config: config, controller: controller, loadToken: loadToken, generation: generation)
         }
 
         scheduleBookmark(page: index)
     }
 
-    /// Proactively builds + caches HTML for the ±1 neighbour pages and warms their image files so
-    /// the next page turn is instant. Runs off the main actor; superseded by the next page turn.
-    private func preloadAdjacentPages(config: MangaPageRenderConfig) {
+    /// HTML preparation, encoded reads and WebKit decoding are independent background work.
+    /// A new render cancels its predecessor before it can enqueue more speculative images.
+    private func preloadAdjacentPages(config: MangaPageRenderConfig, controller: MangaWebViewController,
+                                      loadToken: Int, generation: Int) {
         guard let book, !book.pages.isEmpty else { return }
         let twoPage = twoPageActive
-        let indexes: [Int]
-        if twoPage {
-            // Neighbours are the prev/next spreads (±2 from this spread's start).
-            let start = Self.spreadStart(pageIndex)
-            indexes = [start + 2, start - 2].filter { $0 >= 0 && $0 < book.pages.count }
-        } else {
-            indexes = mangaAdjacentPreloadIndexes(currentIndex: pageIndex, pageCount: book.pages.count)
+        let current = twoPage ? Self.spreadStart(pageIndex) : pageIndex
+        let indexes = adjacentIndexes(currentIndex: current, pageCount: book.pages.count, twoPage: twoPage)
+        let pages = indexes.flatMap { index -> [MokuroPage] in
+            twoPage && index + 1 < book.pages.count ? [book.pages[index], book.pages[index + 1]] : [book.pages[index]]
         }
-        guard !indexes.isEmpty else { return }
-        // Resolve image files on the main actor (needs bookRoot), then hand the URLs to the actor.
-        // For a spread also resolve each neighbour's left-page partner so it can be warmed too.
-        var imageFiles: [Int: URL] = [:]
-        for index in indexes {
-            if let file = imageFile(forPageIndex: index) { imageFiles[index] = file }
-            if twoPage, index + 1 < book.pages.count, let file = imageFile(forPageIndex: index + 1) {
-                imageFiles[index + 1] = file
+        preloadTask = Task(priority: .utility) { [renderCache, imageLoader, book] in
+            async let html: Void = renderCache.preloadAdjacentPages(book: book, pageIndexes: indexes, twoPage: twoPage, config: config)
+            var candidates: [MangaImageDecodeCandidate] = []
+            for page in pages {
+                guard !Task.isCancelled else { return }
+                if let source = await imageLoader.source(relativePath: page.imagePath.trimmingPrefixSlash()) {
+                    candidates.append(MangaImageDecodeCandidate(url: source.url, width: page.imageWidth, height: page.imageHeight))
+                }
             }
+            guard !Task.isCancelled, self.renderGeneration == generation else { return }
+            controller.setPredecodeScript(MangaImagePredecode.script(pageIndex: current, candidates: candidates), for: loadToken)
+            await imageLoader.prepare(pages.map { $0.imagePath.trimmingPrefixSlash() })
+            _ = await html
         }
-        preloadTask?.cancel()
-        preloadTask = Task(priority: .utility) { [renderCache, book] in
-            await renderCache.preloadAdjacentPages(
-                book: book,
-                pageIndexes: indexes,
-                twoPage: twoPage,
-                config: config,
-                imageFiles: imageFiles
-            )
-        }
+    }
+
+    private func adjacentIndexes(currentIndex: Int, pageCount: Int, twoPage: Bool) -> [Int] {
+        if !twoPage { return mangaAdjacentPreloadIndexes(currentIndex: currentIndex, pageCount: pageCount) }
+        return [currentIndex + 2, currentIndex - 2, currentIndex + 4, currentIndex - 4, currentIndex + 6]
+            .filter { $0 >= 0 && $0 < pageCount }
     }
 
     private func renderConfig(screenSize: CGSize, userConfig: UserConfig) -> MangaPageRenderConfig {
@@ -256,7 +270,8 @@ final class MangaReaderViewModel {
             showActionButtons: userConfig.mangaShowActionButtons,
             selectionScript: Self.selectionScript,
             showCopyButton: userConfig.mangaShowCopyButton,
-            enlargeSmallText: userConfig.mangaEnlargeSmallText
+            enlargeSmallText: userConfig.mangaEnlargeSmallText,
+            showFurigana: userConfig.mangaShowFurigana
         )
     }
 
@@ -287,6 +302,7 @@ final class MangaReaderViewModel {
         // The view observes pageIndex to drive the directional page-turn slide and re-render.
         persistStatistics()
         pageIndex = index
+        writeBookmark(page: index, action: isTurn ? "pageTurn" : "jump")
     }
 
     // MARK: Image file resolution (for screenshot crop)
@@ -375,14 +391,8 @@ final class MangaReaderViewModel {
     // MARK: Bookmark persistence (debounced)
 
     private func scheduleBookmark(page: Int) {
-        pendingBookmarkPage = page
-        bookmarkSaveTask?.cancel()
-        bookmarkSaveTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(for: self.bookmarkDebounce)
-            if Task.isCancelled { return }
-            self.writeBookmark(page: page)
-        }
+        // Rendering, appearance changes and opening a book do not constitute navigation.
+        // goToPage commits actual turns immediately, before a render can be cancelled.
     }
 
     /// Cancels the in-flight adjacent-page preload, if any (e.g. on reader close). The preload is a
@@ -390,6 +400,8 @@ final class MangaReaderViewModel {
     func cancelPreload() {
         preloadTask?.cancel()
         preloadTask = nil
+        renderGeneration += 1
+        Task { await imageLoader.cancelPreparation() }
     }
 
     /// Flushes any pending debounced bookmark write immediately (e.g. on reader close).
@@ -407,11 +419,12 @@ final class MangaReaderViewModel {
         bookmarkSaveTask?.cancel()
         bookmarkSaveTask = nil
         pendingBookmarkPage = nil
-        guard let restored = BookStorage.loadBookmark(root: bookRoot)?.chapterIndex else { return }
+        if let id = syncId(for: metadata) { positionSession = ReadingPositionRepository.shared.open(bookId: id, root: bookRoot) }
+        guard let restored = (positionSession?.initialBookmark ?? BookStorage.loadBookmark(root: bookRoot))?.chapterIndex else { return }
         pageIndex = max(0, min(restored, max(0, book.pages.count - 1)))
     }
 
-    private func writeBookmark(page: Int) {
+    private func writeBookmark(page: Int, action: String = "pageTurn") {
         guard let bookRoot, pageCount > 0 else { return }
         let total = pageCount
         let bookmark = Bookmark(
@@ -420,7 +433,12 @@ final class MangaReaderViewModel {
             characterCount: page + 1,
             lastModified: Date()
         )
-        try? BookStorage.save(bookmark, inside: bookRoot, as: FileNames.bookmark)
+        if let positionSession {
+            guard let event = positionSession.navigate(bookmark: bookmark, action: action) else { return }
+            _ = ReadingPositionRepository.shared.record(root: bookRoot, event: event)
+        } else {
+            try? BookStorage.save(bookmark, inside: bookRoot, as: FileNames.bookmark)
+        }
         // Fire-and-forget push to the HTTP KV sync server (no-op unless sync is enabled).
         HttpSyncManager.shared.onPageTurnPersisted(book: metadata)
     }

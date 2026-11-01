@@ -13,7 +13,7 @@ nonisolated let httpSyncMapPrefix = "sync/maps/"
 nonisolated let httpSyncBooksMapKey = "sync/maps/books.json"
 // Read-only migration key used by early development builds.
 nonisolated func httpNeedsFullReconcile(_ key: String) -> Bool {
-    !key.hasPrefix("sync/maps/") && !(key.hasPrefix("books/") && ["/statistics", "/manga_statistics", "/bookmark"].contains { key.hasSuffix($0) })
+    !key.hasPrefix("app/reader_settings/") && !key.hasPrefix("sync/maps/") && !(key.hasPrefix("books/") && ["/statistics", "/manga_statistics", "/bookmark"].contains { key.hasSuffix($0) })
 }
 nonisolated let httpSyncBookmarksMapKey = "sync/maps/bookmarks.json"
 nonisolated let httpSyncBookmarksMapPrefix = "sync/maps/bookmarks/"
@@ -305,7 +305,8 @@ final class HttpSyncBatchState {
         let ids = Set(localBooks.compactMap { syncId(for: $0) })
         let hashes = cachedLocalBookHashes(books: localBooks)
         let missingHash = ids.subtracting(hashes.keys).contains { !HttpSyncActiveBooks.contains($0) }
-        let mismatch = ids != Set(remoteBooks.keys) || missingHash || hashes.contains { id, sha in
+        let knownIds = ids.union(HttpSyncCloudBooks.shared.records.map(\.syncId).filter { remoteBooks[$0] != nil })
+        let mismatch = knownIds != Set(remoteBooks.keys) || missingHash || hashes.contains { id, sha in
             !HttpSyncActiveBooks.contains(id) && remoteBooks[id] != sha
         } || hasDirtyLocalPayload(books: localBooks)
         return HttpSyncMapChanges(
@@ -351,6 +352,9 @@ final class HttpSyncBatchState {
         let local = readLocalBookmarks(books: localBooks)
         let owned = merge(remote: before.ownedBookmarks, local: local)
         var books = cachedLocalBookHashes(books: localBooks)
+        for record in HttpSyncCloudBooks.shared.records where books[record.syncId] == nil {
+            if let remoteHash = before.books[record.syncId] { books[record.syncId] = remoteHash }
+        }
         for (id, remoteHash) in before.books where HttpSyncActiveBooks.contains(id) && books[id] != nil {
             books[id] = remoteHash
         }

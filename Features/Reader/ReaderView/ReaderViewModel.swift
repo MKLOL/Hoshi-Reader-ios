@@ -89,6 +89,11 @@ class ReaderViewModel {
     let rootURL: URL
     var index: Int = 0
     var currentProgress: Double = 0.0
+    private(set) var sentenceModeActive = false
+    private var sentenceCharacter: Int?
+    private var positionSession: ReadingPositionSession?
+    private var pendingPageTurn = false
+    private var importRegistration: UUID?
     var activeSheet: ActiveSheet?
     var isLoading = true
     var bookInfo: BookInfo
@@ -206,6 +211,18 @@ class ReaderViewModel {
         
         highlights = BookStorage.loadHighlights(root: rootURL) ?? []
 
+        if let id = syncId(for: book) {
+            positionSession = ReadingPositionRepository.shared.open(bookId: id, root: rootURL)
+            if let restored = positionSession?.initialBookmark {
+                index = restored.chapterIndex
+                currentProgress = restored.progress
+            }
+            resetTrackingBaseline()
+        }
+        importRegistration = ReadingImportCoordinator.shared.register(root: rootURL,
+            before: { [weak self] in self?.persistReadingTime() },
+            after: { [weak self] in self?.reloadAfterTtuImport() })
+
         preloadSentenceTranslationsAndReloadIfNeeded()
     }
     
@@ -219,6 +236,7 @@ class ReaderViewModel {
     }
     
     var currentCharacter: Int {
+        if sentenceModeActive, let sentenceCharacter { return sentenceCharacter }
         guard document.spine.items.indices.contains(index),
               let manifestItem = document.manifest.items[document.spine.items[index].idref],
               let chapterInfo = bookInfo.chapterInfo[manifestItem.path] else {
@@ -331,11 +349,14 @@ class ReaderViewModel {
     }
     
     func updateProgress(_ progress: Double) {
+        guard !sentenceModeActive else { return }
         currentProgress = progress
     }
     
     func saveBookmark(progress: Double) {
-        persistBookmark(progress: progress)
+        guard !sentenceModeActive else { return }
+        persistBookmark(progress: progress, captureNavigation: pendingPageTurn)
+        pendingPageTurn = false
         let position = "\(index):\(currentCharacter)"
         if let previous = lastUsagePosition, previous != position {
             usage?.record(.page, source: usageJumpPending ? "jump" : nil, chapter: index + 1, character: currentCharacter)
@@ -344,7 +365,60 @@ class ReaderViewModel {
         lastUsagePosition = position
         flushStats()
     }
+
+    func beginPageTurn() { pendingPageTurn = true }
     
+    func beginSentenceMode() {
+        flushStats()
+        closePopups()
+        sentenceModeActive = true
+        sasayakiPlayer.visualUpdatesSuspended = true
+        sentenceCharacter = nil
+    }
+
+    func sentenceProgress(for sentenceBook: SentenceBook) -> SentenceReadingProgress {
+        var metrics: [Int: SentenceChapterMetric] = [:]
+        for (index, item) in document.spine.items.enumerated() {
+            guard let path = document.manifest.items[item.idref]?.path,
+                  let info = bookInfo.chapterInfo[path] else { continue }
+            metrics[index] = SentenceChapterMetric(start: info.currentTotal, count: info.chapterCount)
+        }
+        return SentenceReadingProgress(book: sentenceBook, metrics: metrics, characterCount: bookInfo.characterCount)
+    }
+
+    /// Opening/restoring a sentence changes the statistics baseline, without publishing a
+    /// navigation or crediting the jump from an ordinary page's position inside that sentence.
+    func prepareSentenceProgress(_ point: SentenceProgressPoint) {
+        guard sentenceModeActive else { return }
+        flushStats()
+        sentenceCharacter = point.characterCount
+        resetTrackingBaseline()
+    }
+
+    /// Keep sentence turns on the same durable bookmark, statistics and sync path as page turns.
+    func saveSentenceProgress(_ point: SentenceProgressPoint) {
+        guard sentenceModeActive else { return }
+        index = point.chapterIndex
+        sentenceCharacter = point.characterCount
+        persistBookmark(progress: point.progress, action: point.progress >= 1 ? "finishBook" : "sentenceTurn")
+        usage?.record(.page, source: "sentence", chapter: index + 1, character: currentCharacter)
+        lastUsagePosition = "\(index):\(currentCharacter)"
+        if !isTracking, enableStatistics,
+           UserDefaults.standard.string(forKey: "statisticsAutostartMode") == StatisticsAutostartMode.pageturn.rawValue {
+            startTracking()
+        }
+        flushStats()
+    }
+
+    func endSentenceMode() {
+        flushStats()
+        sentenceModeActive = false
+        sasayakiPlayer.visualUpdatesSuspended = false
+        sentenceCharacter = nil
+        resetTrackingBaseline()
+        loadCurrentChapter()
+    }
+
     func jumpToCharacter(_ characterCount: Int) {
         guard let result = bookInfo.resolveCharacterPosition(characterCount) else { return }
         recordPosition()
@@ -383,6 +457,7 @@ class ReaderViewModel {
     
     func syncProgressAfterLinkJump(_ progress: Double) {
         usageJumpPending = true
+        pendingPageTurn = true
         saveBookmark(progress: progress)
         resetTrackingBaseline()
     }
@@ -402,10 +477,13 @@ class ReaderViewModel {
     }
     
     private var lookupGeneration = 0
+    private(set) var isLookingUp = false
     func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool, autoPause: Bool) async -> Int? {
         guard !Task.isCancelled else { return nil }
         lookupGeneration += 1
         let generation = lookupGeneration
+        isLookingUp = true
+        defer { if lookupGeneration == generation { isLookingUp = false } }
         if autoPause, sasayakiPlayer.isPlaying { sasayakiPlayer.togglePlayback(); wasPaused = true }
         let snapshot = await LookupEngine.shared.lookupAsync(selection.text, maxResults: maxResults, scanLength: scanLength)
         guard !Task.isCancelled, lookupGeneration == generation else { return nil }
@@ -453,6 +531,7 @@ class ReaderViewModel {
     
     func closePopups() {
         lookupGeneration += 1
+        isLookingUp = false
         let generation = lookupGeneration
         let popupIds = Set(popups.map(\.id))
         withAnimation(.default.speed(2.4)) {
@@ -472,6 +551,7 @@ class ReaderViewModel {
     
     func closeChildPopups(parent: Int) {
         lookupGeneration += 1
+        isLookingUp = false
         var popupIds: Set<UUID> = []
         withAnimation(.default.speed(2.4)) {
             for index in popups.indices.dropFirst(parent + 1) {
@@ -488,8 +568,9 @@ class ReaderViewModel {
     }
     
     func startTracking() {
-        usage?.reading(true)
         isTracking = true
+        isPaused = UIApplication.shared.applicationState != .active
+        usage?.reading(!isPaused)
         lastTimestamp = .now
         lastCount = currentCharacter
         readingTracker?.start(currentPage: currentCharacter)
@@ -510,7 +591,10 @@ class ReaderViewModel {
     func stopTracking() {
         guard isTracking else { return }
         flushStats()
-        readingTracker?.pause(currentPage: currentCharacter)
+        // A reader window can close while inactive; pause must not accrue that background gap.
+        let stoppedAt = Date.now
+        if isPaused { readingTracker?.resetBaseline(currentPage: currentCharacter, now: stoppedAt) }
+        readingTracker?.pause(currentPage: currentCharacter, now: stoppedAt)
         usage?.reading(false)
         isTracking = false
         statisticsTask?.cancel()
@@ -585,16 +669,22 @@ class ReaderViewModel {
         resetTrackingBaseline()
     }
     
-    private func persistBookmark(progress: Double) {
+    private func persistBookmark(progress: Double, captureNavigation: Bool = true, action: String = "pageTurn") {
         currentProgress = progress
         bridge.updateProgress(progress)
+        guard captureNavigation else { return }
         let bookmark = Bookmark(
             chapterIndex: index,
             progress: progress,
             characterCount: currentCharacter,
             lastModified: Date()
         )
-        try? BookStorage.save(bookmark, inside: rootURL, as: FileNames.bookmark)
+        if let positionSession {
+            guard let event = positionSession.navigate(bookmark: bookmark, action: action) else { return }
+            _ = ReadingPositionRepository.shared.record(root: rootURL, event: event)
+        } else {
+            try? BookStorage.save(bookmark, inside: rootURL, as: FileNames.bookmark)
+        }
         scheduleAutoExport()
         HttpSyncManager.shared.onPageTurnPersisted(book: book)
     }
@@ -604,6 +694,7 @@ class ReaderViewModel {
         sasayakiPlayer.prepareTransition()
         self.index = index
         persistBookmark(progress: progress)
+        pendingPageTurn = false
         if let url = currentChapterURL {
             let cues = sasayakiPlayer.hasMatch ? sasayakiPlayer.cues(for: index) : nil
             let highlights = chapterHighlights()
@@ -627,6 +718,7 @@ class ReaderViewModel {
         if let bookmark = BookStorage.loadBookmark(root: rootURL) {
             index = bookmark.chapterIndex
             currentProgress = bookmark.progress
+            sentenceCharacter = nil
         }
         if enableStatistics {
             loadStatistics()
@@ -637,11 +729,29 @@ class ReaderViewModel {
     }
 
     func reloadAfterHttpBookmark() {
-        guard let bookmark = BookStorage.loadBookmark(root: rootURL) else { return }
+        if let id = syncId(for: book) { positionSession = ReadingPositionRepository.shared.open(bookId: id, root: rootURL) }
+        guard let bookmark = positionSession?.initialBookmark ?? BookStorage.loadBookmark(root: rootURL) else { return }
         index = bookmark.chapterIndex
         currentProgress = bookmark.progress
-        loadCurrentChapter()
+        sentenceCharacter = nil
+        if !sentenceModeActive { loadCurrentChapter() }
         resetTrackingBaseline()
+    }
+
+    func reloadAfterTtuImport() {
+        // The import coordinator already flushed the live tracker before replacing disk rows.
+        // Rebuilding directly avoids saving the retired in-memory rows over the import.
+        if enableStatistics {
+            readingTracker = MangaStatisticsTracker(title: document.title ?? "",
+                initialStatistics: ReadingStatisticsStore.reading(root: rootURL), enabled: true, device: .current)
+            if isTracking { readingTracker?.start(currentPage: currentCharacter) }
+        }
+        reloadAfterHttpBookmark()
+        if syncAudioBook { sasayakiPlayer.reloadPlayback() }
+    }
+
+    isolated deinit {
+        if let importRegistration { ReadingImportCoordinator.shared.unregister(importRegistration) }
     }
     
     private func scheduleAutoExport() {

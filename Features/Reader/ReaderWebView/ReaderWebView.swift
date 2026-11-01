@@ -345,7 +345,7 @@ struct ReaderWebView: UIViewRepresentable {
                     shouldSyncProgressAfterRestore = false
                     syncLinkJumpProgress()
                 }
-                UIView.animate(withDuration: 0.25) {
+                UIView.animate(withDuration: parent.userConfig.disablePageTurnAnimation ? 0 : 0.25) {
                     message.webView?.alpha = 1
                 }
                 parent.onRestoreCompleted()
@@ -489,6 +489,7 @@ struct ReaderWebView: UIViewRepresentable {
             
             let css = """
             \(fontFaceCss)
+            \(ReaderTextStyle.wordLayoutCSS)
             :root {
                 --hoshi-sasayaki-text-color: \(UIColor(parent.sasayakiTextColor).hexString);
                 --hoshi-sasayaki-background-color: \(UIColor(parent.sasayakiBackgroundColor).hexString);
@@ -647,6 +648,7 @@ struct ReaderWebView: UIViewRepresentable {
                 \(spacerJs)
                 \(selectionJs)
                 \(readerJs)
+                \(ReaderTextStyle.textLayoutScript)
                 \(highlightsJs)
                 \(translationsJs)
                 window.hoshiReader.pageHeight = \(pageHeight);
@@ -693,9 +695,12 @@ struct ReaderWebView: UIViewRepresentable {
                     });
                 });
                 
+                if (document.fonts) imagePromises.push(document.fonts.ready);
                 Promise.all(imagePromises).then(() => {
                     return new Promise(resolve => setTimeout(resolve, 50));
                 }).then(() => {
+                    try { window.hoshiTextLayout?.prepare(window.hoshiReader, true); }
+                    catch (error) { console.error('hoshiTextLayout', error); }
                     window.hoshiReader.buildNodeOffsets();
                     \(highlightsSetupScript)
                     \(translationsSetupScript)

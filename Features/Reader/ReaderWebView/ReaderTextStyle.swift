@@ -29,6 +29,28 @@ import Foundation
         return declarations
     }
 
+    static var wordLayoutCSS: String {
+        """
+        body { word-break: normal !important; overflow-wrap: break-word !important; }
+        .hoshi-word { display: inline !important; white-space: nowrap !important; overflow-wrap: normal !important; }
+        .hoshi-sentence-block-break {
+            break-before: column !important; -webkit-column-break-before: always !important;
+            -webkit-margin-before: 0 !important; margin-block-start: 0 !important;
+        }
+        .hoshi-sentence-page-break {
+            display: block !important; width: 0 !important; height: 0 !important;
+            margin: 0 !important; padding: 0 !important; line-height: 0 !important;
+            break-before: column !important; -webkit-column-break-before: always !important;
+        }
+        .hoshi-sentence-break-host { display: contents !important; }
+        """
+    }
+
+    static var textLayoutScript: String {
+        guard let url = Bundle.main.url(forResource: "textlayout", withExtension: "js") else { return "" }
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
     static func rubyCSS(hidden: Bool) -> String {
         """
         ruby > rt, ruby > rp {

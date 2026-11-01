@@ -36,12 +36,13 @@ nonisolated struct Statistics: Codable, Equatable, Sendable {
     /// Counted seconds by local ISO date/hour, shared with Android; missing hours are legacy evidence.
     var readingTimeByHour: [String: Double] = [:]
     var timeZone: String? = nil
+    var importedBaseline: ImportedReadingBaseline? = nil
 }
 
 nonisolated extension Statistics {
     private enum CodingKeys: String, CodingKey {
         case title, dateKey, charactersRead, readingTime, minReadingSpeed, altMinReadingSpeed
-        case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour, timeZone
+        case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour, timeZone, importedBaseline
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -54,8 +55,12 @@ nonisolated extension Statistics {
         lastReadingSpeed = try values.decodeIfPresent(Int.self, forKey: .lastReadingSpeed) ?? 0
         maxReadingSpeed = try values.decodeIfPresent(Int.self, forKey: .maxReadingSpeed) ?? 0
         lastStatisticModified = try values.decodeIfPresent(Int.self, forKey: .lastStatisticModified) ?? 0
+        guard (0...253_402_300_799_999).contains(lastStatisticModified) else {
+            throw DecodingError.dataCorruptedError(forKey: .lastStatisticModified, in: values, debugDescription: "Invalid statistics clock")
+        }
         deviceId = try values.decodeIfPresent(String.self, forKey: .deviceId)
         deviceName = try values.decodeIfPresent(String.self, forKey: .deviceName)
+        importedBaseline = try values.decodeIfPresent(ImportedReadingBaseline.self, forKey: .importedBaseline)
         timeZone = try values.decodeIfPresent(String.self, forKey: .timeZone)
         readingTimeByHour = try values.decodeIfPresent([String: Double].self, forKey: .readingTimeByHour) ?? [:]
     }
@@ -73,6 +78,7 @@ nonisolated extension Statistics {
         try values.encodeIfPresent(deviceId, forKey: .deviceId)
         try values.encodeIfPresent(deviceName, forKey: .deviceName)
         try values.encodeIfPresent(timeZone, forKey: .timeZone)
+        try values.encodeIfPresent(importedBaseline, forKey: .importedBaseline)
         if !readingTimeByHour.isEmpty { try values.encode(readingTimeByHour, forKey: .readingTimeByHour) }
     }
 }

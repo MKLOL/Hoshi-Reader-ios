@@ -9,6 +9,7 @@
 import SwiftUI
 
 struct AdvancedView: View {
+    @State private var anonymousStats = AnonymousStatsReporter.shared
     var body: some View {
         List {
             Section {
@@ -35,13 +36,6 @@ struct AdvancedView: View {
             }
             
             Section {
-                NavigationLink {
-                    MangaReaderSettingsView()
-                } label: {
-                    Label("Manga Reader", systemImage: "book.pages")
-                }
-                .foregroundStyle(.primary)
-
                 NavigationLink {
                     AiSettingsView()
                 } label: {
@@ -78,6 +72,14 @@ struct AdvancedView: View {
                     Label("AnkiConnect", systemImage: "app.connected.to.app.below.fill")
                 }
                 .foregroundStyle(.primary)
+            }
+
+            Section {
+                Toggle("Share anonymous usage statistics", isOn: Binding(
+                    get: { anonymousStats.enabled }, set: { anonymousStats.setEnabled($0) }
+                ))
+            } footer: {
+                Text("A random install ID, app and iOS version, device model, screen size, language, library counts, sync on/off and reader layout, about once a day. No book titles, reading text, account or sync token. The first report waits 20 hours; turning this off deletes the ID.")
             }
             
             Section {

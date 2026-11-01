@@ -146,8 +146,12 @@ window.hoshiTranslations = {
     },
 
     apply(anchors) {
+        const layoutPosition = window.hoshiTextLayout?.position?.(window.hoshiReader);
         this.clear();
-        if (!anchors || !anchors.length) return 0;
+        if (!anchors || !anchors.length) {
+            window.hoshiTextLayout?.refresh?.(window.hoshiReader, layoutPosition);
+            return 0;
+        }
 
         const chapter = this.scanChapter();
         if (!chapter.ends.length) return 0;
@@ -181,6 +185,7 @@ window.hoshiTranslations = {
         // The DOM changed, so anything that caches node offsets has to be rebuilt.
         window.hoshiReader.buildNodeOffsets();
         window.hoshiReader.refreshSasayakiCues?.();
+        window.hoshiTextLayout?.refresh?.(window.hoshiReader, layoutPosition);
         return this.buttons.length;
     },
 

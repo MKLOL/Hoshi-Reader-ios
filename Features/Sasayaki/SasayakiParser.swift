@@ -34,7 +34,7 @@ struct SasayakiParser {
                 // not crash the import. parseTimestamp returns nil on anything unparseable.
                 guard times.count >= 2,
                       let startTime = parseTimestamp(times[0]),
-                      let endTime = parseTimestamp(times[1]) else {
+                      let endTime = parseTimestamp(times[1]), endTime > startTime else {
                     return nil
                 }
                 let text = lines[2].trimmingCharacters(in: .whitespaces)
@@ -55,7 +55,9 @@ struct SasayakiParser {
         guard parts.count == 3,
               let hours = Double(parts[0]),
               let minutes = Double(parts[1]),
-              let seconds = Double(parts[2]) else {
+              let seconds = Double(parts[2]),
+              hours.isFinite, hours >= 0, minutes.isFinite, (0..<60).contains(minutes),
+              seconds.isFinite, (0..<60).contains(seconds) else {
             return nil
         }
         return hours * 3600 + minutes * 60 + seconds

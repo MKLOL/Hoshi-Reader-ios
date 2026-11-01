@@ -1,18 +1,9 @@
-//
-//  MangaReaderSettingsView.swift
-//  Hoshi Reader
-//
-//  Copyright © 2026 Manhhao.
-//  SPDX-License-Identifier: GPL-3.0-or-later
-//
-//  Settings for the mokuro manga reader. Mirrors the Android reader toggles
-//  (`features/reader/ReaderSettings.kt`): single-tap lookup, the Noto Sans JP OCR font, and
-//  scanning non-Japanese text. Each is persisted in `UserConfig` and read by
-//  `MangaReaderViewModel` when building each page's HTML.
-//
+// Copyright © 2026 Manhhao.
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 import SwiftUI
 
+/// Format-specific controls share the same persisted preferences as the live reader.
 struct MangaReaderSettingsView: View {
     @Environment(UserConfig.self) private var userConfig
 
@@ -20,36 +11,33 @@ struct MangaReaderSettingsView: View {
         @Bindable var userConfig = userConfig
         List {
             Section {
-                Toggle("Single-tap Lookup", isOn: $userConfig.mangaSingleTapLookup)
-            } footer: {
-                Text("Look up a bubble on the first tap. When off, the first tap reveals the text and a second tap looks it up.")
-            }
-
-            Section {
-                Toggle("Use Japanese sans-serif font", isOn: $userConfig.mangaUseNotoSansJpFont)
-            } footer: {
-                Text("Render OCR text with a Japanese sans-serif font.")
-            }
-
-            Section {
-                Toggle("Scan Non-Japanese Text", isOn: $userConfig.mangaScanNonJapaneseText)
-            } footer: {
-                Text("Allow the dictionary scanner to select non-Japanese text in bubbles.")
-            }
-
-            Section {
+                Toggle("Show Furigana", isOn: $userConfig.mangaShowFurigana)
+                    .accessibilityIdentifier("manga-show-furigana")
                 Toggle("Enlarge Small Text", isOn: $userConfig.mangaEnlargeSmallText)
-            } footer: {
-                Text("Enlarge small revealed manga text for readability. Turn off to keep the original OCR size; translation and dictionary cards are unchanged.")
+                Toggle("Use Japanese sans-serif font", isOn: $userConfig.mangaUseNotoSansJpFont)
+            } header: { Text("Recognized text") } footer: {
+                Text("Generate readings offline for revealed Japanese text. Small text can be enlarged for readability; turning enlargement off preserves its original OCR size.")
             }
 
             Section {
+                Toggle("Single-tap Lookup", isOn: $userConfig.mangaSingleTapLookup)
                 Toggle("Show translation button", isOn: $userConfig.mangaShowActionButtons)
                 Toggle("Show Copy button", isOn: $userConfig.mangaShowCopyButton)
-            } footer: {
-                Text("Show quick actions after revealing a speech bubble. Turn this off if the buttons get in the way while reading.")
+                Toggle("Scan Non-Japanese Text", isOn: $userConfig.mangaScanNonJapaneseText)
+            } header: { Text("Bubble actions") } footer: {
+                Text("Single-tap lookup reveals and looks up a bubble on the first tap. When off, the first tap reveals the text and a second tap looks it up.")
+            }
+
+            Section("Page turning") {
+                Toggle("Disable page-turn animation", isOn: $userConfig.disablePageTurnAnimation)
+            }
+
+            Section("Related settings") {
+                NavigationLink("App & reading") { AppReadingSettingsView(userConfig: userConfig) }
+                NavigationLink("Popup Cards") { PopupCardsView(userConfig: userConfig) }
             }
         }
-        .navigationTitle("Manga Reader")
+        .navigationTitle("Manga")
+        .accessibilityIdentifier("manga-settings")
     }
 }

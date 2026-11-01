@@ -31,6 +31,8 @@ nonisolated enum MangaPageHtml {
     /// `hoshi-img://manga/<relative image path>` requests off disk.
     static let baseURLString = "hoshi-img://manga/"
     private static let mangaMaxSelectionLength = 16
+    private static let furiganaScript = Bundle.main.url(forResource: "furigana", withExtension: "js")
+        .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
 
     /// Builds the full HTML document for `page`.
     ///
@@ -59,7 +61,9 @@ nonisolated enum MangaPageHtml {
         useNotoSansJpFont: Bool = false,
         showActionButtons: Bool = true,
         showCopyButton: Bool = false,
-        enlargeSmallText: Bool = true
+        enlargeSmallText: Bool = true,
+        showFurigana: Bool = true,
+        imageSources: [String: String] = [:]
     ) -> String {
         // Each page is fitted with `object-fit: contain` into its share of the viewport, baked into
         // the CSS as definite px sizes (no vw/vh, no JS). In a two-page spread (`leftPage != nil`)
@@ -78,12 +82,12 @@ nonisolated enum MangaPageHtml {
         if let leftPage {
             frames += frameHtml(page: leftPage, availableWidth: perPageWidth,
                                 viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
-                                showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText)
+                                showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana, imageURL: imageSources[leftPage.imagePath])
             frames += "\n"
         }
         frames += frameHtml(page: page, availableWidth: perPageWidth,
                             viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
-                            showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText)
+                            showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana, imageURL: imageSources[page.imagePath])
 
         let css = pageCss(
             backgroundCssColor: backgroundCssColor,
@@ -120,7 +124,9 @@ nonisolated enum MangaPageHtml {
         // — see the `.ocr-box` branch there. A messageHandlers shim that used to live here
         // never fired reliably and has been removed.
         \(selectionScript)
+        \(furiganaScript)
         \(mangaTapHandlerScript)
+        window.hoshiManga && window.hoshiManga.applyFurigana();
         window.hoshiManga && window.hoshiManga.setSingleTapLookup(\(singleTapLookup));
         window.hoshiManga && window.hoshiManga.installTapListener(\(mangaMaxSelectionLength));
         </script>
@@ -141,7 +147,9 @@ nonisolated enum MangaPageHtml {
         shortSide: Double,
         longSide: Double,
         showActionButtons: Bool,
-        enlargeSmallText: Bool
+        enlargeSmallText: Bool,
+        showFurigana: Bool,
+        imageURL: String?
     ) -> String {
         let imageWidth = max(page.imageWidth, 1)
         let imageHeight = max(page.imageHeight, 1)
@@ -157,7 +165,7 @@ nonisolated enum MangaPageHtml {
         )
         let boxes = page.textBoxes
             .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight,
-                               readabilityFitScale: readabilityFitScale, pageIndex: page.index, enlargeSmallText: enlargeSmallText) }
+                               readabilityFitScale: readabilityFitScale, pageIndex: page.index, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana) }
             .joined(separator: "\n")
         let uiTestBoxes = uiTestActionBoxesHtml(
             imageWidth: imageWidth,
@@ -166,7 +174,7 @@ nonisolated enum MangaPageHtml {
             enlargeSmallText: enlargeSmallText
         )
         let actionButtons = showActionButtons ? actionButtonsHtml : ""
-        let imageSrc = escapeAttribute(encodeImagePath(page.imagePath))
+        let imageSrc = escapeAttribute(imageURL ?? encodeImagePath(page.imagePath))
         return """
           <div class="frame" style="width: \(frameWidthCss)px; height: \(frameHeightCss)px;" data-page-index="\(page.index)" data-image-width="\(imageWidth)" data-image-height="\(imageHeight)">
             <img class="page-image" src="\(imageSrc)" alt="">
@@ -278,6 +286,15 @@ nonisolated enum MangaPageHtml {
         .ocr-box p {
           margin: 0;
         }
+        .ocr-box.has-furigana { line-height: 1.7; padding: 0.5em 0.15em 0.15em; }
+        .ocr-box.has-furigana.vertical { padding: 0.15em 0.5em 0.15em 0.15em; }
+        .ocr-box.has-furigana:not(.revealed) { overflow: hidden; }
+        .ocr-box.has-furigana ruby { ruby-position: over; }
+        .ocr-box.has-furigana rt {
+          font-size: 0.5em; line-height: 1; -webkit-user-select: none; user-select: none;
+        }
+        .ocr-box.revealed.has-furigana p, .ocr-box.revealed.has-furigana rt { background: #fff; }
+        .ocr-box.furigana-scroll p { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; }
         .ocr-actions {
           display: none;
           /* One frame-level toolbar host, not a child of the OCR box. Ultra-thin OCR boxes can be
@@ -350,7 +367,8 @@ nonisolated enum MangaPageHtml {
         readabilityFitScale: Double,
         extraAttributes: String = "",
         pageIndex: Int? = nil,
-        enlargeSmallText: Bool = true
+        enlargeSmallText: Bool = true,
+        showFurigana: Bool = false
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
         let topPct = percent(box.top, imageHeight)
@@ -383,13 +401,21 @@ nonisolated enum MangaPageHtml {
         let verticalClass = box.vertical ? " vertical" : ""
         // Join with literal `\n` so the shared selection scanner sees mokuro's line boundaries
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
-        let text = box.lines.map(escapeHtmlText).joined(separator: "\n")
+        let canonicalText = box.lines.joined(separator: "\n")
+        let text = escapeHtmlText(canonicalText)
+        // The render cache runs off the main actor. Readings address the unmodified OCR UTF-16
+        // text; the established shared segmenter aligns kana when constructing native ruby.
+        let annotations = showFurigana ? (try? JapaneseFurigana.annotations(for: canonicalText)) ?? [] : []
+        let readings = annotations.map { ["start": $0.start, "length": $0.length, "reading": $0.reading] as [String: Any] }
+        let readingsJSON = (try? JSONSerialization.data(withJSONObject: readings))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         // The bubble's mokuro address, used to look up its pre-computed offline translation. Same
         // form on every platform and in the desktop tool: `p{pageIndex}b{blockIndex}`.
         let blockAttribute = pageIndex.map { " data-hoshi-block=\"p\($0)b\(box.blockIndex)\"" } ?? ""
         return """
             <div class="ocr-box\(verticalClass)"\(blockAttribute) \(extraAttributes) role="button" tabindex="0" \
-        aria-pressed="false" style="left: \(leftPct)%; top: \(topPct)%; \
+        data-ocr-text="\(escapeAttribute(canonicalText))" data-readings="\(escapeAttribute(readingsJSON))" \
+        aria-label="\(escapeAttribute(canonicalText))" aria-pressed="false" style="left: \(leftPct)%; top: \(topPct)%; \
         width: \(widthPct)%; height: \(heightPct)%; --hoshi-drawn-fs: \(drawnCqw)cqw; \
         --hoshi-reveal-fs: \(revealCqw)cqw;">\
         <p>\(text)</p></div>
@@ -499,6 +525,7 @@ nonisolated enum MangaPageHtml {
           this.hostTappableTopInsetValue = (typeof tappableTopInset === 'number' && isFinite(tappableTopInset))
             ? Math.max(0, tappableTopInset)
             : 0;
+          this.notifyScrollableBubbleRegions();
         },
         setSingleTapLookup: function(enabled) {
           this.singleTapLookupValue = !!enabled;
@@ -608,9 +635,136 @@ nonisolated enum MangaPageHtml {
             bottom: Math.min(imageHeight, Math.ceil((cropBottom - frameRect.top) / frameRect.height * imageHeight))
           };
         },
+        // Canonical source remains separate from ruby so copy, translation, stats and lookup
+        // all use exactly the original OCR, including line boundaries and Unicode offsets.
+        bubbleText: function(box) {
+          return box && typeof box.dataset.ocrText === 'string' ? box.dataset.ocrText : '';
+        },
+        applyFurigana: function() {
+          if (typeof segmentFurigana !== 'function') return;
+          document.querySelectorAll('.ocr-box[data-readings]').forEach(function(box) {
+            var original = box.dataset.ocrText, annotations;
+            try { annotations = JSON.parse(box.dataset.readings); } catch (_) { return; }
+            if (typeof original !== 'string' || !Array.isArray(annotations)) return;
+            var paragraph = box.querySelector('p'), content = document.createDocumentFragment(), offset = 0;
+            annotations.forEach(function(annotation) {
+              var start = annotation.start, length = annotation.length, reading = annotation.reading;
+              if (!Number.isInteger(start) || !Number.isInteger(length) || start < offset || length <= 0 ||
+                  start > original.length || length > original.length - start || typeof reading !== 'string') return;
+              content.append(document.createTextNode(original.slice(offset, start)));
+              segmentFurigana(original.slice(start, start + length), reading, {strict: true}).forEach(function(segment) {
+                if (!segment[1]) { content.append(document.createTextNode(segment[0])); return; }
+                var ruby = document.createElement('ruby'), base = document.createElement('span'), rt = document.createElement('rt');
+                base.textContent = segment[0]; rt.textContent = segment[1];
+                ruby.append(base, rt); content.append(ruby);
+              });
+              offset = start + length;
+            });
+            content.append(document.createTextNode(original.slice(offset)));
+            paragraph.replaceChildren(content);
+            box.classList.toggle('has-furigana', paragraph.querySelector('rt') !== null);
+            paragraph.addEventListener('scroll', function() {
+              if (window.hoshiSelection) window.hoshiSelection.clearSelection();
+              window.hoshiManga.placeActions(box);
+            }, {passive: true});
+          });
+        },
+        prepareReveal: function(box) {
+          if (box.classList.contains('has-furigana')) box.dataset.furiganaOriginalStyle = box.getAttribute('style') || '';
+        },
+        // Grow the revealed plate for native ruby at the user's chosen glyph size. Oversized
+        // text scrolls inside its own paragraph instead of turning the surrounding manga page.
+        fitFurigana: function(box) {
+          if (!box.classList.contains('has-furigana') || box.dataset.furiganaFitted === '1') return;
+          box.dataset.furiganaFitted = '1';
+          var text = box.querySelector('p'), vv = window.visualViewport;
+          var viewLeft = (vv ? vv.offsetLeft : 0) + 2, viewTop = (vv ? vv.offsetTop : 0) + 2;
+          var viewWidth = Math.max(1, (vv ? vv.width : window.innerWidth) - 4);
+          var frame = box.closest('.frame'), actions = frame && frame.querySelector('.ocr-actions');
+          var actionHeight = 0;
+          if (actions) {
+            var previousDisplay = actions.style.display;
+            actions.style.display = 'flex'; actionHeight = actions.getBoundingClientRect().height;
+            actions.style.display = previousDisplay;
+          }
+          var viewHeight = Math.max(1, (vv ? vv.height : window.innerHeight) - 10 - actionHeight);
+          var vertical = box.classList.contains('vertical');
+          var range = document.createRange(); range.selectNodeContents(text);
+          function paintedRect() {
+            var rect = range.getBoundingClientRect();
+            var result = {left:rect.left, top:rect.top, right:rect.right, bottom:rect.bottom};
+            text.querySelectorAll('rt').forEach(function(rt) {
+              Array.from(rt.getClientRects()).forEach(function(r) {
+                result.left = Math.min(result.left, r.left); result.top = Math.min(result.top, r.top);
+                result.right = Math.max(result.right, r.right); result.bottom = Math.max(result.bottom, r.bottom);
+              });
+            });
+            return result;
+          }
+          var painted = paintedRect();
+          if ((!vertical && painted.right - painted.left > viewWidth) || (vertical && painted.bottom - painted.top > viewHeight)) {
+            box.classList.add('wrap');
+            if (vertical) box.style.height = viewHeight + 'px'; else box.style.width = viewWidth + 'px';
+          }
+          for (var i = 0; i < 3; i++) {
+            var rect = box.getBoundingClientRect(); painted = paintedRect();
+            var style = window.getComputedStyle(box);
+            var width = Math.max(rect.width, vertical ? rect.right - painted.left + parseFloat(style.paddingLeft)
+              : painted.right - rect.left + parseFloat(style.paddingRight));
+            var height = Math.max(rect.height, painted.bottom - rect.top + parseFloat(style.paddingBottom));
+            box.style.width = Math.min(viewWidth, width) + 'px'; box.style.height = Math.min(viewHeight, height) + 'px';
+          }
+          var rect = box.getBoundingClientRect();
+          var left = Math.max(viewLeft, Math.min(rect.left, viewLeft + viewWidth - rect.width));
+          var top = Math.max(viewTop, Math.min(rect.top, viewTop + viewHeight - rect.height));
+          box.style.left = (box.offsetLeft + left - rect.left) + 'px'; box.style.top = (box.offsetTop + top - rect.top) + 'px';
+          painted = paintedRect(); rect = box.getBoundingClientRect();
+          if (painted.left < rect.left - 0.5 || painted.top < rect.top - 0.5 || painted.right > rect.right + 0.5 || painted.bottom > rect.bottom + 0.5) {
+            box.classList.add('furigana-scroll'); text.scrollLeft = 0; text.scrollTop = 0;
+          }
+        },
+        notifyScrollableBubbleRegions: function() {
+          var h = handlers();
+          if (!h || !h.hoshiManga) return;
+          var regions = [], manga = this;
+          document.querySelectorAll('.ocr-box.revealed.furigana-scroll p').forEach(function(p) {
+            if (p.scrollWidth <= p.clientWidth + 1 && p.scrollHeight <= p.clientHeight + 1) return;
+            regions.push(manga.hostRectFromViewportRect(p.getBoundingClientRect()));
+          });
+          h.hoshiManga.postMessage({event:'scrollableBubbleRegions', regions:regions});
+        },
+        annotationBaseHit: function(box, x, y) {
+          var annotations = box.querySelectorAll('rt');
+          for (var i = 0; i < annotations.length; i++) {
+            var rects = annotations[i].getClientRects();
+            for (var j = 0; j < rects.length; j++) {
+              var r = rects[j];
+              if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+              var base = annotations[i].parentElement.querySelector('span');
+              var node = base && base.firstChild;
+              if (node && node.nodeType === Node.TEXT_NODE && node.textContent) return {node:node, offset:0};
+            }
+          }
+          return null;
+        },
+        selectBaseHit: function(hit, maxLength) {
+          var range = document.createRange();
+          range.setStart(hit.node, hit.offset);
+          range.setEnd(hit.node, hit.offset + String.fromCodePoint(hit.node.textContent.codePointAt(hit.offset)).length);
+          var rect = range.getBoundingClientRect();
+          return window.hoshiSelection.selectText(rect.left + rect.width / 2, rect.top + rect.height / 2, maxLength);
+        },
         clearRevealed: function() {
           var revealed = document.querySelectorAll('.ocr-box.revealed');
           for (var i = 0; i < revealed.length; i++) {
+            var paragraph = revealed[i].querySelector('p');
+            if (paragraph) { paragraph.scrollLeft = 0; paragraph.scrollTop = 0; }
+            if (typeof revealed[i].dataset.furiganaOriginalStyle === 'string') {
+              revealed[i].setAttribute('style', revealed[i].dataset.furiganaOriginalStyle);
+              delete revealed[i].dataset.furiganaOriginalStyle;
+              delete revealed[i].dataset.furiganaFitted;
+            }
+            revealed[i].classList.remove('furigana-scroll');
             revealed[i].classList.remove('revealed');
             revealed[i].setAttribute('aria-pressed', 'false');
             // Drop any inline font the wrap fallback pinned at reveal size, so the
@@ -619,6 +773,7 @@ nonisolated enum MangaPageHtml {
             revealed[i].classList.remove('wrap');
             delete revealed[i].dataset.wrapTried;
           }
+          this.notifyScrollableBubbleRegions();
           var hosts = document.querySelectorAll('.ocr-actions');
           for (var h = 0; h < hosts.length; h++) {
             this.hideActions(hosts[h]);
@@ -707,10 +862,23 @@ nonisolated enum MangaPageHtml {
             for (var i = 0; i < clientRects.length; i++) {
               addRect(clientRects[i]);
             }
+            var annotations = text.querySelectorAll('rt');
+            for (var r = 0; r < annotations.length; r++) {
+              var rubyRects = annotations[r].getClientRects();
+              for (var j = 0; j < rubyRects.length; j++) addRect(rubyRects[j]);
+            }
             range.detach && range.detach();
           }
           if (!rects.length) {
             addRect(text.getBoundingClientRect());
+          }
+          if (box.classList.contains('furigana-scroll')) {
+            var clip = text.getBoundingClientRect();
+            rects = rects.map(function(rect) {
+              var left = Math.max(clip.left, rect.left), top = Math.max(clip.top, rect.top);
+              var right = Math.min(clip.right, rect.right), bottom = Math.min(clip.bottom, rect.bottom);
+              return {left:left, top:top, right:right, bottom:bottom, width:right-left, height:bottom-top};
+            }).filter(function(rect) { return rect.width > 0 && rect.height > 0; });
           }
           return rects;
         },
@@ -747,7 +915,7 @@ nonisolated enum MangaPageHtml {
           if (!actions) return;
           var gap = 4;
           var bubbleText = box.querySelector('p');
-          actions.dataset.bubbleText = bubbleText ? (bubbleText.textContent || '') : '';
+          actions.dataset.bubbleText = this.bubbleText(box);
           // Carry the bubble's mokuro address so the AI request can find its pre-computed
           // offline translation without re-matching on text.
           actions.dataset.blockId = (box.dataset && box.dataset.hoshiBlock) || '';
@@ -960,7 +1128,7 @@ nonisolated enum MangaPageHtml {
             var textRect = hostRect(window.hoshiManga.renderedBoxRect(box));
             results.push({
               id: box.dataset.hoshiUiTest || '',
-              text: text ? (text.textContent || '') : '',
+              text: this.bubbleText(box),
               box: boxRect,
               textRect: textRect,
               textRects: textRects,
@@ -1101,21 +1269,28 @@ nonisolated enum MangaPageHtml {
             directBox;
           if (box) {
             var alreadyRevealed = box.classList.contains('revealed');
+            var initialHit = !alreadyRevealed && this.singleTapLookupValue && window.hoshiSelection
+              ? (this.annotationBaseHit(box, x, y) || window.hoshiSelection.getCharacterAtPoint(x, y)) : null;
             if (!alreadyRevealed) {
               window.hoshiManga.clearRevealed();
               // Reveal BEFORE the wrap fallback: the fallback fits from the computed
               // font-size, which only becomes the boosted reveal size once .revealed applies.
+              window.hoshiManga.prepareReveal(box);
               box.classList.add('revealed');
               var revealedText = box.querySelector('p');
-              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'bubbleRevealed', text: revealedText ? (revealedText.textContent || '') : '', blockId: box.dataset.hoshiBlock || ''});
+              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'bubbleRevealed', text: window.hoshiManga.bubbleText(box), blockId: box.dataset.hoshiBlock || ''});
               window.hoshiManga.tryWrapFallback(box);
+              window.hoshiManga.fitFurigana(box);
+              window.hoshiManga.notifyScrollableBubbleRegions();
               box.setAttribute('aria-pressed', 'true');
               window.hoshiManga.placeActions(box);
             } else {
               window.hoshiManga.placeActions(box);
             }
             if (alreadyRevealed || window.hoshiManga.singleTapLookupValue) {
-              return window.hoshiSelection.selectText(x, y, maxLength);
+              if (initialHit) return this.selectBaseHit(initialHit, maxLength);
+              var annotationHit = this.annotationBaseHit(box, x, y);
+              return annotationHit ? this.selectBaseHit(annotationHit, maxLength) : window.hoshiSelection.selectText(x, y, maxLength);
             }
             return '__revealed__';
           }

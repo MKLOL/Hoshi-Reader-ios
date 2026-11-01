@@ -47,7 +47,7 @@ struct BookshelfView: View {
                 NavigationStack(path: $navigationPath) {
                     ScrollView {
                         let sections = viewModel.shelfSections(sortedBy: userConfig.bookshelfSortOption, showReading: userConfig.bookshelfShowReading)
-                        if viewModel.books.isEmpty {
+                        if viewModel.books.isEmpty && HttpSyncCloudBooks.shared.records.isEmpty {
                             ContentUnavailableView {
                                 Label("No Books", systemImage: "books.vertical")
                             } description: {
@@ -71,6 +71,7 @@ struct BookshelfView: View {
                                 }
                             }
                         }
+                        CloudBookshelfView(installedBooks: viewModel.books, sortOption: userConfig.bookshelfSortOption)
                     }
                     .navigationTitle("Books")
                     .scrollIndicators(.hidden)
@@ -157,9 +158,19 @@ struct BookshelfView: View {
                         Button {
                             showAppearance = true
                         } label: {
-                            Label("Appearance", systemImage: "paintpalette")
+                            Label("App & reading", systemImage: "paintpalette")
                         }
                         .foregroundStyle(.primary)
+                        NavigationLink {
+                            MangaReaderSettingsView()
+                        } label: {
+                            Label("Manga", systemImage: "book.pages")
+                        }.accessibilityIdentifier("settings-manga")
+                        NavigationLink {
+                            AppearanceView(userConfig: userConfig, showDismiss: false)
+                        } label: {
+                            Label("EPUB", systemImage: "book")
+                        }.accessibilityIdentifier("settings-epub")
                         Button {
                             showAdvanced = true
                         } label: {
@@ -198,7 +209,7 @@ struct BookshelfView: View {
                         AboutView()
                     }
                     .navigationDestination(isPresented: $showAppearance) {
-                        AppearanceView(userConfig: userConfig, showDismiss: false)
+                        AppReadingSettingsView(userConfig: userConfig)
                     }
                 }
             }

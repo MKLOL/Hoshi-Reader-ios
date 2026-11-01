@@ -4,6 +4,13 @@
 
 ### Added
 
+- First-launch setup can save a shared sync token and install the recommended JMdict and Jiten dictionaries. Missing setup is offered again after a restore.
+- Manga available on your sync server appear under **Not downloaded**. Tap a cover to download with progress, cancellation and retry; interrupted downloads resume, and reading data arrives before the manga opens.
+- Manga OCR bubbles show offline furigana by default. Long text scrolls inside its bubble, and nearby pages prepare three ahead and two behind for faster turns.
+- Sentence reading offers stacked and side-by-side Japanese/English panes. Sentence turns update the regular bookmark and reading statistics, and **Finish book** records completion.
+- Manga, EPUB, shared appearance, Popup Cards and Sasayaki reading preferences sync across devices, including resets to defaults. Custom font files still need importing on each device.
+- Optional anonymous usage reporting has a 20-hour first-report delay and a switch in **Settings → Advanced**. Reports exclude reading content, titles, credentials and sync addresses; turning it off removes the local report identifier.
+
 - Today, repeated words, manga bubble and translation counts, reading timelines and trends include activity from every device using HTTP sync. Logs upload as compressed daily files and compact older months automatically.
 
 - HTTP sync keeps reading history for every book, including books never downloaded here and books deleted from any device. Statistics shows when other devices were checked and marks books that are no longer installed.
@@ -15,7 +22,18 @@
 - See transfer speed and estimated remaining time during HTTP sync, cancel a sync, and remove inactive interrupted downloads from HTTP settings.
 - Choose whether manga enlarges small OCR text. The Translate button is slightly larger when displayed alone.
 
+### Changed
+
+- Reading options are grouped under **App & reading**, **Manga**, **EPUB** and **Popup Cards**.
+- Closing a translation popup or leaving its reader keeps the request running and saves its reply to history. The history button shows running or unseen replies, and failed requests offer Retry. iOS background execution remains subject to the system's time allowance.
+- Reading positions retain recent navigation and causal heads from each device. Reopening a book preserves its timestamp; backward moves, offline navigation and explicit ッツ imports survive synchronization.
+- Normal EPUB pages keep Japanese words and ruby together and prefer sentence boundaries while preserving publisher line breaks and illustrations.
+
 ### Fixed
+
+- The first tap outside a dictionary popup closes it before another word or reader control acts.
+- Audiobooks keep playing through chapter restoration and incoming reading positions; Anki audio preparation runs off the main thread.
+- Importing the same ッツ statistics on multiple devices counts the shared history once. Imports preserve current reading, cleared imported history stays cleared after sync, and finished books retain 100% progress.
 
 - Statistics stays responsive while browsing per-device reading history.
 - Downloaded font collections use the selected reading face in native sentence text, including regular Klee and the horizontal Kyokasho variant.

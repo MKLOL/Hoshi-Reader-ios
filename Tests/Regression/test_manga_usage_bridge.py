@@ -23,7 +23,7 @@ class MangaUsageBridgeTests(unittest.TestCase):
         function box(block, text) {
           const classes = new Set();
           const value = {
-            dataset: block ? {hoshiBlock: block} : {}, id: '',
+            dataset: {ocrText:text, ...(block ? {hoshiBlock:block} : {})}, id: '',
             textContent: text + 'TranslateCopy',
             querySelector: selector => selector === 'p' ? {textContent:text} : null,
             classList: {contains:v=>classes.has(v), add:v=>classes.add(v), remove:v=>classes.delete(v)},
@@ -40,6 +40,8 @@ class MangaUsageBridgeTests(unittest.TestCase):
           hoshiManga:{
             clearRevealed:()=>boxes.forEach(box=>box.classList.remove('revealed')),
             revealedBoxAt:()=>null, hitSlopBoxAt:()=>null,
+            prepareReveal(){}, fitFurigana(){}, notifyScrollableBubbleRegions(){},
+            annotationBaseHit(){return null;}, bubbleText:box=>box.dataset.ocrText,
             tryWrapFallback(){}, placeActions(){}, singleTapLookupValue:false
           }
         };

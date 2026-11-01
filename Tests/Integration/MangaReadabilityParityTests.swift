@@ -8,11 +8,11 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
                    textBoxes: [MokuroTextBox(left: 60, top: 120, width: 160, height: 60,
                                            fontSize: 8, vertical: false, lines: ["こんにちは。"])])
     }
-    private func config(enlarge: Bool = true, copy: Bool = false) -> MangaPageRenderConfig {
+    private func config(enlarge: Bool = true, copy: Bool = false, furigana: Bool = true) -> MangaPageRenderConfig {
         MangaPageRenderConfig(backgroundCssColor: "#000", scanNonJapaneseText: false,
             viewportCssWidth: 320, viewportCssHeight: 640, singleTapLookup: false,
             useNotoSansJpFont: false, showActionButtons: true, selectionScript: "",
-            showCopyButton: copy, enlargeSmallText: enlarge)
+            showCopyButton: copy, enlargeSmallText: enlarge, showFurigana: furigana)
     }
 
     @MainActor func testSmallTextPreferenceDefaultsOnAndPersistsIndependentlyOfCardSettings() {
@@ -88,6 +88,112 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(pair["copyHidden"] as? Bool, false)
         XCTAssertEqual(one["copyHidden"] as? Bool, true)
         XCTAssertEqual(one["overlap"] as? Bool, false)
+    }
+
+    @MainActor func testMangaReadingPreferencesPersistWithSafeDefaults() {
+        let defaults = UserDefaults.standard
+        let keys = ["mangaShowFurigana", "disablePageTurnAnimation"]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        let settings = UserConfig()
+        XCTAssertTrue(settings.mangaShowFurigana)
+        XCTAssertFalse(settings.disablePageTurnAnimation)
+        settings.mangaShowFurigana = false
+        settings.disablePageTurnAnimation = true
+        XCTAssertFalse(UserConfig().mangaShowFurigana)
+        XCTAssertTrue(UserConfig().disablePageTurnAnimation)
+    }
+
+    @MainActor func testGeneratedRubyPreservesCanonicalOCRAndCachedPreferenceChanges() async throws {
+        let text = "😀学校に行きます。\n本を読む。"
+        let page = MokuroPage(index: 0, imagePath: "fixture.png", imageWidth: 320, imageHeight: 640,
+            textBoxes: [MokuroTextBox(left: 60, top: 120, width: 160, height: 100,
+                fontSize: 16, vertical: false, lines: text.components(separatedBy: "\n"))])
+        let cache = MangaPageRenderCache()
+        let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
+        defer { browser.close() }
+        let probe = """
+        (() => {
+          const box = document.querySelector('.ocr-box'), manga = window.hoshiManga;
+          manga.prepareReveal(box); box.classList.add('revealed'); manga.fitFurigana(box); manga.placeActions(box);
+          const clone = box.querySelector('p').cloneNode(true);
+          clone.querySelectorAll('rt, rp').forEach(node => node.remove());
+          return { source:manga.bubbleText(box), base:clone.textContent,
+            action:document.querySelector('.ocr-actions').dataset.bubbleText,
+            readings:Array.from(box.querySelectorAll('rt')).map(rt => rt.textContent),
+            bases:Array.from(box.querySelectorAll('ruby span')).map(base => base.textContent) };
+        })()
+        """
+        for enabled in [true, false, true] {
+            try await load(await cache.htmlFor(page: page, config: config(enlarge: false, copy: true, furigana: enabled)), in: browser)
+            let result = try await browser.web.evaluateJavaScript(probe)
+            let fields = try XCTUnwrap(result as? [String: Any])
+            XCTAssertEqual(fields["source"] as? String, text)
+            XCTAssertEqual(fields["base"] as? String, text)
+            XCTAssertEqual(fields["action"] as? String, text)
+            let readings = try XCTUnwrap(fields["readings"] as? [String])
+            XCTAssertEqual(readings.contains("がっこう"), enabled)
+            XCTAssertEqual((fields["bases"] as? [String])?.contains("学校"), enabled)
+            if !enabled { XCTAssertTrue(readings.isEmpty) }
+        }
+    }
+
+    @MainActor func testLongRubyBubbleScrollsWithoutShrinkingAndReopensAtBeginning() async throws {
+        let page = MokuroPage(index: 0, imagePath: "fixture.png", imageWidth: 320, imageHeight: 640,
+            textBoxes: [MokuroTextBox(left: 280, top: 600, width: 30, height: 30,
+                fontSize: 24, vertical: true, lines: [String(repeating: "学校に行く。", count: 180)])])
+        let cache = MangaPageRenderCache()
+        let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
+        defer { browser.close() }
+        try await load(await cache.htmlFor(page: page, config: config(enlarge: false)), in: browser)
+        let result = try await browser.web.evaluateJavaScript("""
+        (() => {
+          const box = document.querySelector('.ocr-box'), p = box.querySelector('p'), manga = window.hoshiManga;
+          const originalRect = box.getBoundingClientRect(), font = parseFloat(getComputedStyle(box).fontSize);
+          manga.prepareReveal(box); box.classList.add('revealed'); manga.fitFurigana(box);
+          const scrolling = box.classList.contains('furigana-scroll');
+          const rect = box.getBoundingClientRect(), fittedFont = parseFloat(getComputedStyle(box).fontSize);
+          p.scrollLeft = -100; p.scrollTop = 100;
+          manga.clearRevealed();
+          const reset = box.getBoundingClientRect();
+          const restored = ['left','top','width','height'].every(key => Math.abs(reset[key] - originalRect[key]) < 0.01);
+          manga.prepareReveal(box); box.classList.add('revealed'); manga.fitFurigana(box);
+          return {scrolling, restored, font, fittedFont, left:rect.left, top:rect.top,
+            right:rect.right, bottom:rect.bottom, scrollLeft:p.scrollLeft, scrollTop:p.scrollTop};
+        })()
+        """)
+        let fields = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(fields["scrolling"] as? Bool, true)
+        XCTAssertEqual(fields["restored"] as? Bool, true)
+        XCTAssertEqual(try XCTUnwrap(fields["font"] as? Double), try XCTUnwrap(fields["fittedFont"] as? Double), accuracy: 0.01)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(fields["left"] as? Double), 0)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(fields["top"] as? Double), 0)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(fields["right"] as? Double), 320)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(fields["bottom"] as? Double), 640)
+        XCTAssertEqual(fields["scrollLeft"] as? Double, 0)
+        XCTAssertEqual(fields["scrollTop"] as? Double, 0)
+    }
+
+    func testHTMLCacheRevalidatesReplacedImageVersions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("fixture.png")
+        try Data([1, 2, 3]).write(to: file)
+        let loader = MangaImageLoader()
+        await loader.configure(root: root, declaredPaths: ["fixture.png"])
+        let cache = MangaPageRenderCache(imageLoader: loader)
+        let first = await cache.htmlFor(page: page, config: config())
+        try Data([4, 5]).write(to: file)
+        let replaced = await cache.htmlFor(page: page, config: config())
+        XCTAssertNotEqual(first, replaced)
+        let repeated = await cache.htmlFor(page: page, config: config())
+        XCTAssertEqual(replaced, repeated)
     }
 
     @MainActor private func load(_ html: String, in browser: MangaTestBrowser) async throws {

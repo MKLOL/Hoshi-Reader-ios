@@ -32,7 +32,11 @@ class BookshelfViewModel {
     
     func loadBooks() {
         do {
-            books = try BookStorage.loadAllBooks()
+            let hidden = HttpSyncCloudBooks.shared.hiddenInstalledSyncIds
+            books = try BookStorage.loadAllBooks().filter { book in
+                guard let identity = syncId(for: book) else { return true }
+                return !hidden.contains(identity)
+            }
             backfillMissingCovers()
             loadBookProgress()
             loadShelves()
@@ -475,7 +479,14 @@ class BookshelfViewModel {
             lastModified: Date()
         )
         
-        try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
+        if let id = syncId(for: book) {
+            let session = ReadingPositionRepository.shared.open(bookId: id, root: url)
+            if let event = session.navigate(bookmark: bookmark, action: "markRead") {
+                _ = ReadingPositionRepository.shared.record(root: url, event: event)
+            }
+        } else {
+            try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
+        }
         HttpSyncManager.shared.onPageTurnPersisted(book: book)
         loadBookProgress()
     }

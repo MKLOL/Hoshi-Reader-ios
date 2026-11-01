@@ -40,6 +40,7 @@ struct MangaReaderView: View {
     @State private var focusMode = false
     @State private var showGoToPageDialog = false
     @State private var screenshotCropMode = false
+    @State private var showMangaSettings = false
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
     @State private var pageOpacity: Double = 1
@@ -180,6 +181,13 @@ struct MangaReaderView: View {
                 }
             }
         }
+        .sheet(isPresented: $showMangaSettings) {
+            NavigationStack {
+                MangaReaderSettingsView()
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showMangaSettings = false } } }
+            }
+            .environment(userConfig)
+        }
         .sheet(isPresented: $showStatisticsSheet) {
             MangaStatisticsView(model: model, userConfig: userConfig)
         }
@@ -228,7 +236,7 @@ struct MangaReaderView: View {
             model.cancelPreload() // stop warming adjacent pages once we're leaving the reader
             pageReadyTimeoutTask?.cancel()
             pageReadyTimeoutTask = nil
-            aiController.dismiss() // cancel any in-flight OpenAI request when leaving the reader
+            aiController.dismiss() // detach the popup; the app-owned request keeps running
             Task {
                 async let statistics: Void = HttpStatisticsLane.shared.refresh()
                 await HttpSyncManager.shared.flushBookmarkSync()
@@ -439,6 +447,10 @@ struct MangaReaderView: View {
             model.closePopups()
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
         }
+        .onChange(of: userConfig.mangaShowFurigana) { _, _ in
+            model.closePopups()
+            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
+        }
         .onChange(of: userConfig.mangaShowCopyButton) { _, _ in
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
         }
@@ -487,7 +499,7 @@ struct MangaReaderView: View {
         let direction: NavigationDirection = newIndex >= oldIndex ? .forward : .backward
 
         // No laid-out size yet (first render) — just swap.
-        guard lastSize.width > 0, lastSize.height > 0 else {
+        guard !userConfig.disablePageTurnAnimation, lastSize.width > 0, lastSize.height > 0 else {
             clearSlide()
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
             return
@@ -610,6 +622,14 @@ struct MangaReaderView: View {
             // Menu + (when a ChatGPT key is configured) a dedicated screenshot-translate button
             // stacked directly beneath it — matching the Android layout.
             VStack(spacing: 8) {
+                TranslationHistoryButton(book: metadata) {
+                    model.closePopups()
+                    aiController.browseHistory()
+                }
+                .font(.title3)
+                .foregroundStyle(.white)
+                .padding(12)
+                .background(Circle().fill(.black.opacity(0.28)))
                 // A real Menu anchors the dropdown to this button. The old `.confirmationDialog`
                 // presented detached (mid-screen / bottom), which is what looked wrong.
                 Menu {
@@ -630,6 +650,10 @@ struct MangaReaderView: View {
                         model.closePopups()
                         showStatisticsSheet = true
                     } label: { Label("Statistics", systemImage: "chart.bar") }
+                    Button {
+                        model.closePopups()
+                        showMangaSettings = true
+                    } label: { Label("Manga", systemImage: "gearshape") }
                     Divider()
                     Toggle(isOn: Binding(
                         get: { model.twoPageEnabled },

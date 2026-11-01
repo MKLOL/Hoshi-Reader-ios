@@ -78,6 +78,10 @@ struct MangaAiPopupView: View {
             if controller.state == .browsingHistory { showHistory = true }
             reloadHistory()
         }
+        .onChange(of: AiChatRequests.shared.revision) { _, _ in
+            guard previewEntry == nil else { return }
+            reloadHistory()
+        }
     }
 
     // MARK: - Card
@@ -280,6 +284,26 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private var historyBody: some View {
+        ForEach(AiChatRequests.shared.forBook(book).filter { request in
+            if case .result = request.state { return false }
+            return true
+        }.reversed()) { request in
+            VStack(alignment: .leading, spacing: 8) {
+                Text(request.bubbleText).modifier(CardFont(style: .body))
+                if request.isRunning {
+                    HStack { ProgressView(); Text("Translating…") }
+                } else if case .error(let message) = request.state {
+                    Text(message).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Retry") { request.retry?(); controller.follow(request); showHistory = false }
+                        Button("Dismiss") { AiChatRequests.shared.dismissFailure(request) }
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+        }
         if historyEntries.isEmpty {
             Text("No translation history for this manga yet.")
                 .modifier(CardFont(style: .subheadline))
@@ -331,6 +355,9 @@ struct MangaAiPopupView: View {
     private func reloadHistory() {
         guard let folder = book.folder else { return }
         historyEntries = AiChatHistoryStore.shared.load(folder: folder).entries
+        if showHistory || controller.state == .browsingHistory {
+            for request in AiChatRequests.shared.forBook(book) where !request.isRunning { request.seen = true }
+        }
     }
 
     private func dismiss() {

@@ -187,7 +187,9 @@ class DictionaryManager {
         }
     }
     
-    func importRecommendedDictionaries() {
+    func importRecommendedDictionaries(completion: (@MainActor (Bool) -> Void)? = nil) {
+        guard !isImporting, !isUpdating else { completion?(false); return }
+        shouldShowError = false
         let recommendedDictionaries: [(name: String, url: String, type: DictionaryType)] = [
             ("JMdict", "https://github.com/yomidevs/jmdict-yomitan/releases/latest/download/JMdict_english.json", .term),
             ("Jiten", "https://api.jiten.moe/api/frequency-list/index", .frequency),
@@ -213,6 +215,13 @@ class DictionaryManager {
                     let (data, _) = try await URLSession.shared.data(from: indexURL)
                     let remoteIndex = try JSONDecoder().decode(DictionaryIndex.self, from: data)
 
+                    // A retry keeps the dictionaries an earlier attempt already installed.
+                    let installed = await MainActor.run {
+                        let dictionaries = type == .term ? self.termDictionaries : self.frequencyDictionaries
+                        return dictionaries.contains { $0.index.title == remoteIndex.title }
+                    }
+                    if installed { continue }
+
                     await MainActor.run {
                         self.currentImport = "Downloading \(remoteIndex.title)"
                     }
@@ -236,6 +245,11 @@ class DictionaryManager {
                     if !importResult.success {
                         throw URLError(.cannotParseResponse)
                     }
+                    await MainActor.run {
+                        self.loadDictionaries()
+                        self.saveDictionaryConfig()
+                        self.rebuildLookupQuery()
+                    }
                 }
                 
                 await MainActor.run {
@@ -243,11 +257,15 @@ class DictionaryManager {
                     self.loadDictionaries()
                     self.saveDictionaryConfig()
                     self.rebuildLookupQuery()
+                    completion?(true)
                 }
             } catch {
                 await MainActor.run {
                     self.isImporting = false
-                    self.showError("failed to download dictionaries: \(error.localizedDescription)")
+                    let message = "failed to download dictionaries: \(error.localizedDescription)"
+                    if completion == nil { self.showError(message) }
+                    else { self.errorMessage = message }
+                    completion?(false)
                 }
             }
         }

@@ -1,44 +1,6 @@
 import Foundation
 import UIKit
 
-/// Imported statistics must never make arithmetic or a floating-point conversion trap.
-nonisolated enum StatisticsNumbers {
-    static func adding(_ lhs: Int, _ rhs: Int) -> Int {
-        let (value, overflow) = lhs.addingReportingOverflow(rhs)
-        return overflow ? (rhs >= 0 ? .max : .min) : value
-    }
-    static func adding(_ lhs: Double, _ rhs: Double) -> Double {
-        min(Double.greatestFiniteMagnitude, max(0, lhs) + max(0, rhs))
-    }
-    static func integer(_ value: Double) -> Int {
-        guard !value.isNaN, value > 0 else { return 0 }
-        return value >= Double(Int.max) ? .max : Int(value)
-    }
-    static func speed(count: Int, seconds: Double) -> Int {
-        seconds > 0 ? integer(Double(count) / seconds * 3600) : 0
-    }
-    static func nextStamp(_ stamp: Int) -> Int { adding(stamp, 1) }
-
-    /// Kotlin's data-class tie-break uses Double.toString: shortest decimal digits, scientific
-    /// notation below 1e-3 or at/above 1e7, uppercase E and a mandatory fractional digit. Swift
-    /// already supplies the shortest digits; only their decimal placement/notation differs.
-    static func kotlinDoubleText(_ value: Double) -> String {
-        let raw = String(value)
-        let magnitude = abs(value)
-        guard value.isFinite, magnitude > 0, magnitude < 0.001 || magnitude >= 10_000_000 else { return raw }
-        let negative = raw.hasPrefix("-")
-        let unsigned = negative ? String(raw.dropFirst()) : raw
-        let components = unsigned.lowercased().split(separator: "e")
-        let mantissa = components[0].split(separator: ".", omittingEmptySubsequences: false)
-        var digits = mantissa.joined()
-        var decimalPosition = mantissa[0].count + (components.count > 1 ? Int(components[1]) ?? 0 : 0)
-        while digits.first == "0", digits.count > 1 { digits.removeFirst(); decimalPosition -= 1 }
-        while digits.last == "0", digits.count > 1 { digits.removeLast() }
-        let leading = digits.removeFirst()
-        return (negative ? "-" : "") + String(leading) + "." + (digits.isEmpty ? "0" : digits) + "E" + String(decimalPosition - 1)
-    }
-}
-
 nonisolated struct ReadingDevice: Codable, Equatable, Sendable {
     let id: String
     let name: String
@@ -66,67 +28,6 @@ nonisolated struct MangaTextStatistic: Codable, Equatable, Sendable {
     var deviceId: String?
     var deviceName: String?
     var key: String { dateKey + "|" + (deviceId ?? "") }
-}
-
-nonisolated extension Statistics {
-    var key: String { dateKey + "|" + (deviceId ?? "") }
-    static func empty(title: String, day: String, device: ReadingDevice? = nil) -> Statistics {
-        Statistics(title: title, dateKey: day, charactersRead: 0, readingTime: 0,
-                   minReadingSpeed: 0, altMinReadingSpeed: 0, lastReadingSpeed: 0,
-                   maxReadingSpeed: 0, lastStatisticModified: 0, deviceId: device?.id, deviceName: device?.name)
-    }
-    mutating func add(seconds: Double, count: Int, stamp: Int) {
-        readingTime = StatisticsNumbers.adding(readingTime, seconds)
-        charactersRead = max(0, StatisticsNumbers.adding(charactersRead, count))
-        lastReadingSpeed = StatisticsNumbers.speed(count: charactersRead, seconds: readingTime)
-        maxReadingSpeed = max(maxReadingSpeed, lastReadingSpeed)
-        minReadingSpeed = minReadingSpeed == 0 ? lastReadingSpeed : min(minReadingSpeed, lastReadingSpeed)
-        if count != 0 { altMinReadingSpeed = altMinReadingSpeed == 0 ? lastReadingSpeed : min(altMinReadingSpeed, lastReadingSpeed) }
-        lastStatisticModified = max(stamp, StatisticsNumbers.nextStamp(lastStatisticModified))
-    }
-    // Same tie-break text as Android's ReadingStatistics data class.
-    var tieBreak: String {
-        "ReadingStatistics(title=\(title), dateKey=\(dateKey), charactersRead=\(charactersRead), readingTime=\(StatisticsNumbers.kotlinDoubleText(readingTime)), minReadingSpeed=\(minReadingSpeed), altMinReadingSpeed=\(altMinReadingSpeed), lastReadingSpeed=\(lastReadingSpeed), maxReadingSpeed=\(maxReadingSpeed), lastStatisticModified=\(lastStatisticModified), deviceId=\(deviceId ?? "null"), deviceName=\(deviceName ?? "null"))"
-    }
-    static func merged(_ entries: [Statistics]) -> [Statistics] {
-        var result: [String: Statistics] = [:]
-        for entry in entries where entry.readingTime.isFinite && entry.readingTime >= 0 && entry.charactersRead >= 0 {
-            if let old = result[entry.key] {
-                if old.lastStatisticModified > entry.lastStatisticModified { continue }
-                if old.lastStatisticModified == entry.lastStatisticModified {
-                    // Old clients strip unknown fields. Otherwise-identical rows keep the richer
-                    // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
-                    if old.tieBreak == entry.tieBreak {
-                        if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone != nil && entry.timeZone == nil { continue }
-                        if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone == nil && entry.timeZone != nil { result[entry.key] = entry; continue }
-                        let oldHours = old.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
-                        let newHours = entry.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
-                        let oldKeys = old.readingTimeByHour.keys.sorted().map { "\($0)=\(old.readingTimeByHour[$0]!)" }.joined(separator: ",")
-                        let newKeys = entry.readingTimeByHour.keys.sorted().map { "\($0)=\(entry.readingTimeByHour[$0]!)" }.joined(separator: ",")
-                        if oldHours > newHours || (oldHours == newHours && !oldKeys.utf16.lexicographicallyPrecedes(newKeys.utf16)) { continue }
-                    } else if !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16) { continue }
-                }
-            }
-            result[entry.key] = entry
-        }
-        return result.values.sorted { $0.key < $1.key }
-    }
-    static func total(_ entries: [Statistics], title: String = "", day: String = "") -> Statistics {
-        var total = empty(title: title, day: day)
-        for entry in merged(entries) {
-            total.readingTime = StatisticsNumbers.adding(total.readingTime, entry.readingTime)
-            total.readingTimeByHour = ReadingDay.sumHours([total.readingTimeByHour, entry.readingTimeByHour])
-            total.charactersRead = StatisticsNumbers.adding(total.charactersRead, entry.charactersRead)
-            total.lastStatisticModified = max(total.lastStatisticModified, entry.lastStatisticModified)
-            if entry.minReadingSpeed > 0 { total.minReadingSpeed = total.minReadingSpeed == 0 ? entry.minReadingSpeed : min(total.minReadingSpeed, entry.minReadingSpeed) }
-            if entry.altMinReadingSpeed > 0 { total.altMinReadingSpeed = total.altMinReadingSpeed == 0 ? entry.altMinReadingSpeed : min(total.altMinReadingSpeed, entry.altMinReadingSpeed) }
-            total.maxReadingSpeed = max(total.maxReadingSpeed, entry.maxReadingSpeed)
-        }
-        let zones = Set(merged(entries).map(\.timeZone))
-        total.timeZone = zones.count == 1 ? zones.first! : nil
-        total.lastReadingSpeed = StatisticsNumbers.speed(count: total.charactersRead, seconds: total.readingTime)
-        return total
-    }
 }
 
 nonisolated extension MangaTextStatistic {
@@ -245,40 +146,12 @@ extension Notification.Name {
     }
 
     static func applyDayTotals(_ totals: [Statistics], root: URL, replace: Bool) throws {
-        let device = ReadingDevice.current
         try migrate(root: root)
         try StatisticsHistory.absorbIfPresent(root: root)
-        var next = try preserveUnreadable(root: root, filename: FileNames.statistics, load: { try strictReading(root: root) })
-        for total in collapsed(totals) {
-            let others = next.filter { $0.dateKey == total.dateKey && $0.deviceId != device.id }
-            let own = next.first { $0.dateKey == total.dateKey && $0.deviceId == device.id }
-            let otherTotals = Statistics.total(others)
-            let time = max(0, total.readingTime - otherTotals.readingTime)
-            let count = max(0, total.charactersRead - otherTotals.charactersRead)
-            if own == nil && time == 0 && count == 0 { continue }
-            if own?.readingTime == time && own?.charactersRead == count { continue }
-            var row = total
-            row.readingTime = time; row.charactersRead = count
-            let hoursFromTotal = !total.readingTimeByHour.isEmpty && others.allSatisfy({ abs($0.readingTime - $0.readingTimeByHour.values.reduce(0, +)) < 0.001 })
-            if hoursFromTotal {
-                row.readingTimeByHour = total.readingTimeByHour.mapValues { $0 }
-                for (hour, seconds) in otherTotals.readingTimeByHour {
-                    row.readingTimeByHour[hour] = max(0, (row.readingTimeByHour[hour] ?? 0) - seconds)
-                }
-            } else { row.readingTimeByHour = own?.readingTimeByHour ?? [:] }
-            if row.readingTimeByHour.values.reduce(0, +) > time + 0.001 { row.readingTimeByHour = [:] }
-            row.readingTimeByHour = row.readingTimeByHour.filter { $0.value > 0 }
-            row.timeZone = row.readingTimeByHour.isEmpty ? nil : ((hoursFromTotal ? total.timeZone : nil) ?? own?.timeZone ?? own?.recordedZone(target: .current)?.identifier ?? TimeZone.current.identifier)
-            row.lastReadingSpeed = StatisticsNumbers.speed(count: count, seconds: time)
-            row.deviceId = device.id; row.deviceName = device.name
-            row.lastStatisticModified = max(total.lastStatisticModified, StatisticsNumbers.nextStamp(own?.lastStatisticModified ?? 0))
-            next.removeAll { $0.key == row.key }; next.append(row)
-        }
-        if replace {
-            let keep = Set(totals.map(\.dateKey))
-            next.removeAll { $0.deviceId == device.id && !keep.contains($0.dateKey) }
-        }
-        try BookStorage.save(Statistics.merged(next), inside: root, as: FileNames.statistics)
+        let original = try preserveUnreadable(root: root, filename: FileNames.statistics, load: { try strictReading(root: root) })
+        let next = ImportedReadingTotals.applying(totals, to: original, replace: replace)
+        guard next != original else { return }
+        try BookStorage.save(next, inside: root, as: FileNames.statistics)
         changed(root: root, scheduleSync: true)
     }
 

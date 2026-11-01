@@ -96,129 +96,137 @@ class UserConfig {
     }
     
     var theme: Themes {
-        didSet { UserDefaults.standard.set(theme.rawValue, forKey: "theme") }
+        didSet { UserDefaults.standard.set(theme.rawValue, forKey: "theme"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var uiTheme: Themes {
-        didSet { UserDefaults.standard.set(uiTheme.rawValue, forKey: "uiTheme") }
+        didSet { UserDefaults.standard.set(uiTheme.rawValue, forKey: "uiTheme"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var systemLightSepia: Bool {
-        didSet { UserDefaults.standard.set(systemLightSepia, forKey: "systemLightSepia") }
+        didSet { UserDefaults.standard.set(systemLightSepia, forKey: "systemLightSepia"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sepiaInvertInDark: Bool {
-        didSet { UserDefaults.standard.set(sepiaInvertInDark, forKey: "sepiaInvertInDark") }
+        didSet { UserDefaults.standard.set(sepiaInvertInDark, forKey: "sepiaInvertInDark"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var customBackgroundColor: Color {
-        didSet { Self.saveColor(customBackgroundColor, key: "customBackgroundColor") }
+        didSet { Self.saveColor(customBackgroundColor, key: "customBackgroundColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var customTextColor: Color {
-        didSet { Self.saveColor(customTextColor, key: "customTextColor") }
+        didSet { Self.saveColor(customTextColor, key: "customTextColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var customInfoColor: Color {
-        didSet { Self.saveColor(customInfoColor, key: "customInfoColor") }
+        didSet { Self.saveColor(customInfoColor, key: "customInfoColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var verticalWriting: Bool {
-        didSet { UserDefaults.standard.set(verticalWriting, forKey: "verticalWriting") }
+        didSet { UserDefaults.standard.set(verticalWriting, forKey: "verticalWriting"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var selectedFont: String {
-        didSet { UserDefaults.standard.set(selectedFont, forKey: "selectedFont") }
+        didSet { UserDefaults.standard.set(selectedFont, forKey: "selectedFont"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var fontSize: Int {
-        didSet { UserDefaults.standard.set(fontSize, forKey: "fontSize") }
+        didSet { UserDefaults.standard.set(fontSize, forKey: "fontSize"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerHideFurigana: Bool {
-        didSet { UserDefaults.standard.set(readerHideFurigana, forKey: "readerHideFurigana") }
+        didSet { UserDefaults.standard.set(readerHideFurigana, forKey: "readerHideFurigana"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     /// Show a translate button after every pre-translated sentence. Only has an effect on a book
     /// whose `sentence_translations.json` has been synced down.
     var readerShowSentenceTranslations: Bool {
-        didSet { UserDefaults.standard.set(readerShowSentenceTranslations, forKey: "readerShowSentenceTranslations") }
+        didSet { UserDefaults.standard.set(readerShowSentenceTranslations, forKey: "readerShowSentenceTranslations"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
 
     var continuousMode: Bool {
-        didSet { UserDefaults.standard.set(continuousMode, forKey: "continuousMode") }
+        didSet { UserDefaults.standard.set(continuousMode, forKey: "continuousMode"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var chapterSwipeDistance: Int {
-        didSet { UserDefaults.standard.set(chapterSwipeDistance, forKey: "chapterSwipeDistance") }
+        didSet { UserDefaults.standard.set(chapterSwipeDistance, forKey: "chapterSwipeDistance"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var horizontalPadding: Int {
-        didSet { UserDefaults.standard.set(horizontalPadding, forKey: "layoutHorizontalPadding") }
+        didSet { UserDefaults.standard.set(horizontalPadding, forKey: "layoutHorizontalPadding"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var verticalPadding: Int {
-        didSet { UserDefaults.standard.set(verticalPadding, forKey: "layoutVerticalPadding") }
+        didSet { UserDefaults.standard.set(verticalPadding, forKey: "layoutVerticalPadding"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var avoidPageBreak: Bool {
-        didSet { UserDefaults.standard.set(avoidPageBreak, forKey: "avoidPageBreak") }
+        didSet { UserDefaults.standard.set(avoidPageBreak, forKey: "avoidPageBreak"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var justifyText: Bool {
-        didSet { UserDefaults.standard.set(justifyText, forKey: "justifyText") }
+        didSet { UserDefaults.standard.set(justifyText, forKey: "justifyText"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var layoutAdvanced: Bool {
-        didSet { UserDefaults.standard.set(layoutAdvanced, forKey: "layoutAdvanced") }
+        didSet { UserDefaults.standard.set(layoutAdvanced, forKey: "layoutAdvanced"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var lineHeight: Double {
-        didSet { UserDefaults.standard.set(lineHeight, forKey: "lineHeight") }
+        didSet { UserDefaults.standard.set(lineHeight, forKey: "lineHeight"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var characterSpacing: Double {
-        didSet { UserDefaults.standard.set(characterSpacing, forKey: "characterSpacing") }
+        didSet { UserDefaults.standard.set(characterSpacing, forKey: "characterSpacing"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowTitle: Bool {
-        didSet { UserDefaults.standard.set(readerShowTitle, forKey: "readerShowTitle") }
+        didSet { UserDefaults.standard.set(readerShowTitle, forKey: "readerShowTitle"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowCharacters: Bool {
-        didSet { UserDefaults.standard.set(readerShowCharacters, forKey: "readerShowCharacters") }
+        didSet { UserDefaults.standard.set(readerShowCharacters, forKey: "readerShowCharacters"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowPercentage: Bool {
-        didSet { UserDefaults.standard.set(readerShowPercentage, forKey: "readerShowPercentage") }
+        didSet { UserDefaults.standard.set(readerShowPercentage, forKey: "readerShowPercentage"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowProgressTop: Bool {
-        didSet { UserDefaults.standard.set(readerShowProgressTop, forKey: "readerShowProgressTop") }
+        didSet { UserDefaults.standard.set(readerShowProgressTop, forKey: "readerShowProgressTop"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowStatisticsToggle: Bool {
-        didSet { UserDefaults.standard.set(readerShowStatisticsToggle, forKey: "readerShowStatisticsToggle") }
+        didSet { UserDefaults.standard.set(readerShowStatisticsToggle, forKey: "readerShowStatisticsToggle"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowReadingSpeed: Bool {
-        didSet { UserDefaults.standard.set(readerShowReadingSpeed, forKey: "readerShowReadingSpeed") }
+        didSet { UserDefaults.standard.set(readerShowReadingSpeed, forKey: "readerShowReadingSpeed"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowReadingTime: Bool {
-        didSet { UserDefaults.standard.set(readerShowReadingTime, forKey: "readerShowReadingTime") }
+        didSet { UserDefaults.standard.set(readerShowReadingTime, forKey: "readerShowReadingTime"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var readerShowSasayakiToggle: Bool {
-        didSet { UserDefaults.standard.set(readerShowSasayakiToggle, forKey: "readerShowSasayakiToggle") }
+        didSet { UserDefaults.standard.set(readerShowSasayakiToggle, forKey: "readerShowSasayakiToggle"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
+    var disablePageTurnAnimation: Bool {
+        didSet { UserDefaults.standard.set(disablePageTurnAnimation, forKey: "disablePageTurnAnimation"); ReaderPreferencesStore.shared.localDidChange(self) }
+    }
+
+    var mangaShowFurigana: Bool {
+        didSet { UserDefaults.standard.set(mangaShowFurigana, forKey: "mangaShowFurigana"); ReaderPreferencesStore.shared.localDidChange(self) }
+    }
+
     var mangaSingleTapLookup: Bool {
-        didSet { UserDefaults.standard.set(mangaSingleTapLookup, forKey: "mangaSingleTapLookup") }
+        didSet { UserDefaults.standard.set(mangaSingleTapLookup, forKey: "mangaSingleTapLookup"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
 
     var mangaUseNotoSansJpFont: Bool {
-        didSet { UserDefaults.standard.set(mangaUseNotoSansJpFont, forKey: "mangaUseNotoSansJpFont") }
+        didSet { UserDefaults.standard.set(mangaUseNotoSansJpFont, forKey: "mangaUseNotoSansJpFont"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
 
     var mangaScanNonJapaneseText: Bool {
@@ -226,40 +234,40 @@ class UserConfig {
     }
 
     var mangaEnlargeSmallText: Bool {
-        didSet { UserDefaults.standard.set(mangaEnlargeSmallText, forKey: "mangaEnlargeSmallText") }
+        didSet { UserDefaults.standard.set(mangaEnlargeSmallText, forKey: "mangaEnlargeSmallText"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     var mangaShowCopyButton: Bool {
-        didSet { UserDefaults.standard.set(mangaShowCopyButton, forKey: "mangaShowCopyButton") }
+        didSet { UserDefaults.standard.set(mangaShowCopyButton, forKey: "mangaShowCopyButton"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     var mangaShowActionButtons: Bool {
         didSet { UserDefaults.standard.set(mangaShowActionButtons, forKey: "mangaShowActionButtons") }
     }
 
     var dictionaryCard: PopupCardStyle {
-        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(dictionaryCard.normalized), forKey: "dictionaryCardStyle") }
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(dictionaryCard.normalized), forKey: "dictionaryCardStyle"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     var translationCard: PopupCardStyle {
-        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(translationCard.normalized), forKey: "translationCardStyle") }
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(translationCard.normalized), forKey: "translationCardStyle"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
 
     var popupWidth: Int {
-        didSet { UserDefaults.standard.set(popupWidth, forKey: "popupWidth") }
+        didSet { UserDefaults.standard.set(popupWidth, forKey: "popupWidth"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var popupHeight: Int {
-        didSet { UserDefaults.standard.set(popupHeight, forKey: "popupHeight") }
+        didSet { UserDefaults.standard.set(popupHeight, forKey: "popupHeight"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var popupFullWidth: Bool {
-        didSet { UserDefaults.standard.set(popupFullWidth, forKey: "popupFullWidth") }
+        didSet { UserDefaults.standard.set(popupFullWidth, forKey: "popupFullWidth"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var popupSwipeToDismiss: Bool {
-        didSet { UserDefaults.standard.set(popupSwipeToDismiss, forKey: "popupSwipeToDismiss") }
+        didSet { UserDefaults.standard.set(popupSwipeToDismiss, forKey: "popupSwipeToDismiss"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var popupSwipeThreshold: Int {
-        didSet { UserDefaults.standard.set(popupSwipeThreshold, forKey: "popupSwipeThreshold") }
+        didSet { UserDefaults.standard.set(popupSwipeThreshold, forKey: "popupSwipeThreshold"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var audioSources: [AudioSource] {
@@ -327,15 +335,15 @@ class UserConfig {
     }
     
     var enableSasayaki: Bool {
-        didSet { UserDefaults.standard.set(enableSasayaki, forKey: "enableSasayaki") }
+        didSet { UserDefaults.standard.set(enableSasayaki, forKey: "enableSasayaki"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sasayakiAutoScroll: Bool {
-        didSet { UserDefaults.standard.set(sasayakiAutoScroll, forKey: "sasayakiAutoScroll") }
+        didSet { UserDefaults.standard.set(sasayakiAutoScroll, forKey: "sasayakiAutoScroll"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sasayakiAutoPause: Bool {
-        didSet { UserDefaults.standard.set(sasayakiAutoPause, forKey: "sasayakiAutoPause") }
+        didSet { UserDefaults.standard.set(sasayakiAutoPause, forKey: "sasayakiAutoPause"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sasayakiEnableSync: Bool {
@@ -343,19 +351,19 @@ class UserConfig {
     }
     
     var sasayakiTextColor: Color {
-        didSet { Self.saveColor(sasayakiTextColor, key: "sasayakiTextColor") }
+        didSet { Self.saveColor(sasayakiTextColor, key: "sasayakiTextColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sasayakiBackgroundColor: Color {
-        didSet { Self.saveColor(sasayakiBackgroundColor, key: "sasayakiBackgroundColor") }
+        didSet { Self.saveColor(sasayakiBackgroundColor, key: "sasayakiBackgroundColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sasayakiDarkTextColor: Color {
-        didSet { Self.saveColor(sasayakiDarkTextColor, key: "sasayakiDarkTextColor") }
+        didSet { Self.saveColor(sasayakiDarkTextColor, key: "sasayakiDarkTextColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     var sasayakiDarkBackgroundColor: Color {
-        didSet { Self.saveColor(sasayakiDarkBackgroundColor, key: "sasayakiDarkBackgroundColor") }
+        didSet { Self.saveColor(sasayakiDarkBackgroundColor, key: "sasayakiDarkBackgroundColor"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
     
     init() {
@@ -415,6 +423,8 @@ class UserConfig {
         self.readerShowReadingTime = defaults.object(forKey: "readerShowReadingTime") as? Bool ?? false
         self.readerShowSasayakiToggle = defaults.object(forKey: "readerShowSasayakiToggle") as? Bool ?? false
         
+        self.disablePageTurnAnimation = defaults.object(forKey: "disablePageTurnAnimation") as? Bool ?? false
+        self.mangaShowFurigana = defaults.object(forKey: "mangaShowFurigana") as? Bool ?? true
         self.mangaSingleTapLookup = defaults.object(forKey: "mangaSingleTapLookup") as? Bool ?? false
         self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false
         self.mangaScanNonJapaneseText = defaults.object(forKey: "mangaScanNonJapaneseText") as? Bool ?? false
@@ -428,7 +438,7 @@ class UserConfig {
         self.popupHeight = defaults.object(forKey: "popupHeight") as? Int ?? 170
         self.popupFullWidth = defaults.object(forKey: "popupFullWidth") as? Bool ?? false
         self.popupSwipeToDismiss = defaults.object(forKey: "popupSwipeToDismiss") as? Bool ?? false
-        self.popupSwipeThreshold = defaults.object(forKey: "popupSwipeThreshold") as? Int ?? 40
+        self.popupSwipeThreshold = min(60, max(20, defaults.object(forKey: "popupSwipeThreshold") as? Int ?? 40))
         
         if let data = defaults.data(forKey: "audioSources"),
            let sources = try? JSONDecoder().decode([AudioSource].self, from: data) {
@@ -456,6 +466,7 @@ class UserConfig {
         self.sasayakiBackgroundColor = UserConfig.loadColor(key: "sasayakiBackgroundColor") ?? Color(.sRGB, red: 0.53, green: 0.81, blue: 0.98, opacity: 0.4)
         self.sasayakiDarkTextColor = UserConfig.loadColor(key: "sasayakiDarkTextColor") ?? Color(.sRGB, red: 1, green: 1, blue: 1)
         self.sasayakiDarkBackgroundColor = UserConfig.loadColor(key: "sasayakiDarkBackgroundColor") ?? Color(.sRGB, red: 0.53, green: 0.81, blue: 0.98, opacity: 0.4)
+        ReaderPreferencesStore.shared.attach(self)
     }
     
     private static func saveColor(_ color: Color, key: String) {

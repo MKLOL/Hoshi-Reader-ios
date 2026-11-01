@@ -279,6 +279,7 @@ struct ReaderView: View {
                             },
                             onTapOutside: viewModel.closePopups,
                             onScroll: {
+                                viewModel.beginPageTurn()
                                 viewModel.closePopups()
                                 if userConfig.statisticsAutostartMode == .pageturn && !viewModel.isTracking {
                                     viewModel.startTracking()
@@ -333,6 +334,7 @@ struct ReaderView: View {
                             },
                             onTapOutside: viewModel.closePopups,
                             onPageTurn: {
+                                viewModel.beginPageTurn()
                                 viewModel.clearForwardHistory()
                                 viewModel.closePopups()
                                 if userConfig.statisticsAutostartMode == .pageturn && !viewModel.isTracking {
@@ -434,11 +436,14 @@ struct ReaderView: View {
                 
                 Spacer()
                 
+                TranslationHistoryButton(book: viewModel.book) { aiController.browseHistory() }
+                    .foregroundStyle(.primary)
+                    .opacity(focusMode ? 0 : 1)
                 Menu {
                     Button {
                         viewModel.activeSheet = .appearance
                     } label: {
-                        Label("Appearance", systemImage: "paintpalette")
+                        Label("EPUB", systemImage: "paintpalette")
                     }
                     
                     Button {
@@ -454,6 +459,7 @@ struct ReaderView: View {
                     }
                     
                     Button {
+                        viewModel.beginSentenceMode()
                         showSentenceMode = true
                     } label: {
                         Label("Sentence mode", systemImage: "text.line.first.and.arrowtriangle.forward")
@@ -625,6 +631,10 @@ struct ReaderView: View {
             .monospacedDigit()
             .tracking(-0.4)
         }
+        .consumesOutsideLookupTouches(isActive: viewModel.isLookingUp || viewModel.popups.contains(where: \.showPopup)) {
+            viewModel.clearSelection()
+            viewModel.closePopups()
+        }
         .overlay {
             if viewModel.isSyncing {
                 ZStack {
@@ -649,7 +659,7 @@ struct ReaderView: View {
                 )
             }
         }
-        .fullScreenCover(isPresented: $showSentenceMode) {
+        .fullScreenCover(isPresented: $showSentenceMode, onDismiss: { viewModel.endSentenceMode() }) {
             SentenceReaderView(
                 book: viewModel.book,
                 document: viewModel.document,
@@ -660,7 +670,8 @@ struct ReaderView: View {
                 ),
                 backgroundColor: readerBackgroundColor,
                 foregroundColor: readerForegroundColor,
-                usage: viewModel.usage
+                usage: viewModel.usage,
+                readerModel: viewModel
             )
             .environment(userConfig)
             .preferredColorScheme(readerTheme)

@@ -89,8 +89,9 @@ struct HttpSyncError: LocalizedError {
     /// sync (e.g. the device can't fit this book). Prevents the "re-download the same GB payload
     /// forever" loop on a storage-starved device.
     let skip: Bool
+    let statusCode: Int?
     var errorDescription: String? { message }
-    init(_ message: String, skip: Bool = false) { self.message = message; self.skip = skip }
+    init(_ message: String, skip: Bool = false, statusCode: Int? = nil) { self.message = message; self.skip = skip; self.statusCode = statusCode }
 }
 
 // MARK: - Transport protocol
@@ -390,7 +391,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         if http.statusCode == 404 { return nil }
         guard (200...299).contains(http.statusCode) else {
             let raw = (try? Data(contentsOf: tempURL)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-            throw HttpSyncError(parseError(code: http.statusCode, rawBody: raw))
+            throw HttpSyncError(parseError(code: http.statusCode, rawBody: raw), statusCode: http.statusCode)
         }
         try? FileManager.default.removeItem(at: targetURL)
         try FileManager.default.createDirectory(
@@ -676,7 +677,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
             throw HttpSyncError("Sync server returned a non-HTTP response.")
         }
         guard (200...299).contains(http.statusCode) else {
-            throw HttpSyncError(parseError(code: http.statusCode, rawBody: String(decoding: data, as: UTF8.self)))
+            throw HttpSyncError(parseError(code: http.statusCode, rawBody: String(decoding: data, as: UTF8.self)), statusCode: http.statusCode)
         }
     }
 

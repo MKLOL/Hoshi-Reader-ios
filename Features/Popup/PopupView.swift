@@ -309,6 +309,7 @@ struct PopupView: View {
                         )
                     }
                     .frame(width: max(1, layout.width), height: max(1, layout.height))
+                    .reportsLookupPopupBounds()
                     .glassEffect(.regular, in: .rect(cornerRadius: 8))
                     .position(layout.position)
                 }
@@ -337,6 +338,7 @@ struct PopupView: View {
                         )
                     }
                     .frame(width: max(1, layout.width), height: max(1, layout.height))
+                    .reportsLookupPopupBounds()
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.2), lineWidth: 1))
                     .position(layout.position)

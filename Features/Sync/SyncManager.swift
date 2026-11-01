@@ -90,10 +90,10 @@ class SyncManager {
         let audioBookFileId = syncAudioBook ? syncFiles.audioBook?.id : nil
         
         let syncDirection = direction ?? determineSyncDirection(local: localBookmark, remoteProgressFile: syncFiles.progress)
-        if syncDirection == .synced {
+        if syncDirection == .synced && !syncStats && !syncAudioBook {
             return .synced(title: title)
         }
-        if importOnly && syncDirection != .importFromTtu {
+        if importOnly && syncDirection == .exportToTtu {
             return .skipped
         }
         
@@ -101,29 +101,34 @@ class SyncManager {
         async let fetchedStats: [Statistics]? = fetchStats(fileId: statsFileId)
         async let fetchedAudioBook: TtuAudioBook? = fetchAudioBook(fileId: audioBookFileId)
         
-        let localStats = syncStats ? ReadingStatisticsStore.collapsed(ReadingStatisticsStore.reading(root: url)) : nil
-        let playbackData = syncAudioBook ? BookStorage.loadSasayakiPlayback(root: url) : nil
         
         let ttuProgress = try await fetchedProgress
         let ttuStats = try await fetchedStats
         let ttuAudioBook = try await fetchedAudioBook
         
-        switch syncDirection {
+        let latestBookmark = BookStorage.loadBookmark(root: url)
+        let finalDirection = direction ?? determineSyncDirection(local: latestBookmark, remoteProgressFile: syncFiles.progress)
+        if importOnly && finalDirection == .exportToTtu { return .skipped }
+        switch finalDirection {
         case .importFromTtu:
             guard let ttuProgress else { return .skipped }
-            importProgress(ttuProgress: ttuProgress, to: url)
-            if syncStats {
-                let mergedStats = mergeStatistics(localStatistics: localStats ?? [], externalStatistics: ttuStats ?? [], syncMode: statsSyncMode)
-                if !mergedStats.isEmpty {
-                    try? ReadingStatisticsStore.applyDayTotals(mergedStats, root: url, replace: statsSyncMode == .replace)
+            try ReadingImportCoordinator.shared.apply(root: url) {
+                try importProgress(ttuProgress: ttuProgress, to: url, bookId: syncId(for: book), explicit: direction == .importFromTtu)
+                if syncStats {
+                    let current = ReadingStatisticsStore.collapsed(ReadingStatisticsStore.reading(root: url))
+                    let merged = mergeStatistics(localStatistics: current, externalStatistics: ttuStats ?? [], syncMode: statsSyncMode)
+                    try ReadingStatisticsStore.applyDayTotals(merged, root: url, replace: statsSyncMode == .replace)
                 }
+                if syncAudioBook, let ttuAudioBook { importAudioBook(ttuAudioBook: ttuAudioBook, to: url) }
             }
-            if syncAudioBook, let ttuAudioBook {
-                importAudioBook(ttuAudioBook: ttuAudioBook, to: url)
-            }
+            NotificationCenter.default.post(name: .httpSyncBookmarkApplied, object: nil,
+                userInfo: ["syncId": syncId(for: book) ?? ""])
+            HttpSyncManager.shared.onPageTurnPersisted(book: book)
             return .imported(title: title, characterCount: ttuProgress.exploredCharCount)
         case .exportToTtu:
-            guard let localBookmark else { return .skipped }
+            guard let localBookmark = BookStorage.loadBookmark(root: url) else { return .skipped }
+            let localStats = syncStats ? ReadingStatisticsStore.collapsed(ReadingStatisticsStore.reading(root: url)) : nil
+            let playbackData = syncAudioBook ? BookStorage.loadSasayakiPlayback(root: url) : nil
             let statsToExport: [Statistics]? = syncStats ? mergeStatistics(localStatistics: ttuStats ?? [], externalStatistics: localStats ?? [], syncMode: statsSyncMode) : nil
             
             async let exportedProgress: Void = exportProgress(
@@ -150,6 +155,16 @@ class SyncManager {
             try await exportedAudioBook
             return .exported(title: title, characterCount: localBookmark.characterCount)
         case .synced:
+            if syncStats {
+                let merged = try ReadingImportCoordinator.shared.apply(root: url) {
+                    let current = ReadingStatisticsStore.collapsed(ReadingStatisticsStore.reading(root: url))
+                    let merged = mergeStatistics(localStatistics: current, externalStatistics: ttuStats ?? [], syncMode: statsSyncMode)
+                    try ReadingStatisticsStore.applyDayTotals(merged, root: url, replace: statsSyncMode == .replace)
+                    return ReadingStatisticsStore.collapsed(ReadingStatisticsStore.reading(root: url))
+                }
+                if !importOnly { try await exportStats(stats: merged, folderId: driveFolderId, fileId: statsFileId) }
+            }
+            if syncAudioBook, let ttuAudioBook { importAudioBook(ttuAudioBook: ttuAudioBook, to: url) }
             return .synced(title: title)
         }
     }
@@ -179,10 +194,10 @@ class SyncManager {
         return Date(timeIntervalSince1970: TimeInterval(timestamp) / 1000.0)
     }
     
-    private func importProgress(ttuProgress: TtuProgress, to url: URL) {
-        guard let bookInfo = BookStorage.loadBookInfo(root: url) else { return }
+    private func importProgress(ttuProgress: TtuProgress, to url: URL, bookId: String?, explicit: Bool) throws {
+        guard let bookInfo = BookStorage.loadBookInfo(root: url) else { throw HttpSyncError("Book layout is unavailable for importing reading progress.") }
         
-        let resolved = bookInfo.resolveCharacterPosition(ttuProgress.exploredCharCount)
+        let resolved = Self.importedPosition(characterCount: ttuProgress.exploredCharCount, bookInfo: bookInfo)
         
         let bookmark = Bookmark(
             chapterIndex: resolved?.spineIndex ?? 0,
@@ -191,9 +206,22 @@ class SyncManager {
             lastModified: ttuProgress.lastBookmarkModified
         )
         
-        try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
+        if let bookId {
+            let repository = ReadingPositionRepository.shared
+            let saved = explicit ? repository.importExplicit(bookId: bookId, root: url, bookmark: bookmark)
+                : repository.saveLegacy(bookId: bookId, root: url, bookmark: bookmark)
+            guard saved != nil else { throw HttpSyncError("Could not save the imported reading position.") }
+        } else { try BookStorage.save(bookmark, inside: url, as: FileNames.bookmark) }
     }
     
+    static func importedPosition(characterCount: Int, bookInfo: BookInfo) -> (spineIndex: Int, progress: Double)? {
+        if bookInfo.characterCount > 0, characterCount >= bookInfo.characterCount,
+           let last = bookInfo.chapterInfo.values.filter({ $0.chapterCount > 0 && $0.spineIndex != nil }).max(by: { $0.spineIndex! < $1.spineIndex! }) {
+            return (last.spineIndex!, 1)
+        }
+        return bookInfo.resolveCharacterPosition(characterCount)
+    }
+
     private func fetchProgress(fileId: String?) async throws -> TtuProgress? {
         guard let fileId else { return nil }
         return try await GoogleDriveHandler.shared.getProgressFile(fileId: fileId)
@@ -219,7 +247,7 @@ class SyncManager {
         let progress = TtuProgress(
             dataId: ttuProgress?.dataId ?? 0,
             exploredCharCount: localBookmark.characterCount,
-            progress: Double(localBookmark.characterCount) / Double(bookInfo.characterCount),
+            progress: bookInfo.characterCount > 0 ? min(1, Double(localBookmark.characterCount) / Double(bookInfo.characterCount)) : 0,
             lastBookmarkModified: roundedDate
         )
         
@@ -235,11 +263,15 @@ class SyncManager {
             characterCount: localBookmark.characterCount,
             lastModified: roundedDate
         )
-        try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
+        if let current = BookStorage.loadBookmark(root: url), current.chapterIndex == localBookmark.chapterIndex,
+           current.progress == localBookmark.progress, current.characterCount == localBookmark.characterCount,
+           current.lastModified == localBookmark.lastModified {
+            try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
+        }
     }
-    
+
     private func exportStats(stats: [Statistics]?, folderId: String, fileId: String?) async throws {
-        guard let stats, !stats.isEmpty else { return }
+        guard let stats else { return }
         try await GoogleDriveHandler.shared.updateStatsFile(folderId: folderId, fileId: fileId, stats: stats)
     }
     

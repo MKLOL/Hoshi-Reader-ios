@@ -120,7 +120,7 @@ nonisolated enum SentenceNavigation {
             if book.chapters.indices.contains(bookmark.chapterIndex),
                !book.chapters[bookmark.chapterIndex].sentences.isEmpty {
                 let sentences = book.chapters[bookmark.chapterIndex].sentences
-                let progress = min(max(bookmark.progress, 0), 1)
+                let progress = bookmark.progress.isFinite ? min(max(bookmark.progress, 0), 1) : 0
                 let index = min(Int(progress * Double(sentences.count)), sentences.count - 1)
                 return SentencePosition(chapter: bookmark.chapterIndex, sentence: max(index, 0))
             }
@@ -129,5 +129,86 @@ nonisolated enum SentenceNavigation {
             }
         }
         return first(in: book)
+    }
+}
+
+
+/// Sentence boundaries projected into the ordinary reader's character and bookmark coordinates.
+/// Unequal sentence lengths must advance progress by their characters, rather than their ordinal.
+nonisolated struct SentenceProgressPoint: Equatable, Sendable {
+    let chapterIndex: Int
+    let progress: Double
+    let characterCount: Int
+}
+
+nonisolated struct SentenceChapterMetric: Sendable {
+    let start: Int
+    let count: Int
+}
+
+nonisolated struct SentenceReadingProgress: Sendable {
+    let book: SentenceBook
+    let metrics: [Int: SentenceChapterMetric]
+    let characterCount: Int
+    private let boundaries: [[Int]]
+
+    init(book: SentenceBook, metrics: [Int: SentenceChapterMetric], characterCount: Int) {
+        self.book = book
+        self.metrics = metrics
+        self.characterCount = characterCount
+        boundaries = book.chapters.map { chapter in
+            var offsets = [0]
+            for sentence in chapter.sentences {
+                // The displayed sentence is already plain text, so literal < and > remain text.
+                let count = sentence.text.unicodeScalars.count(where: EpubSentenceSegmenter.isMatchable)
+                offsets.append(offsets.last! + count)
+            }
+            return offsets
+        }
+    }
+
+    func at(_ position: SentencePosition) -> SentenceProgressPoint? { boundary(position, after: false) }
+    func endOf(_ position: SentencePosition) -> SentenceProgressPoint? { boundary(position, after: true) }
+    func isLast(_ position: SentencePosition) -> Bool {
+        book.sentence(at: position) != nil && SentenceNavigation.next(in: book, from: position) == nil
+    }
+
+    var completionPoint: SentenceProgressPoint? {
+        guard book.totalSentences > 0, !book.chapters.isEmpty else { return nil }
+        return SentenceProgressPoint(chapterIndex: book.chapters.last!.chapterIndex, progress: 1, characterCount: characterCount)
+    }
+
+    /// A synchronized ordinary bookmark takes precedence over a stale device-local cursor.
+    func initialPosition(saved: SentencePosition?, bookmark: SentenceBookmarkAnchor?) -> SentencePosition? {
+        let cursor = saved.flatMap { SentenceNavigation.clamp($0, in: book) }
+        guard let bookmark else { return cursor ?? SentenceNavigation.first(in: book) }
+        let progress = bookmark.progress.isFinite ? min(max(bookmark.progress, 0), 1) : 0
+        if let cursor, let point = at(cursor), point.chapterIndex == bookmark.chapterIndex,
+           abs(point.progress - progress) < 0.00000001 { return cursor }
+        if let chapter = book.chapters.firstIndex(where: { $0.chapterIndex == bookmark.chapterIndex }),
+           !book.chapters[chapter].sentences.isEmpty {
+            let sentence = book.chapters[chapter].sentences.indices.last { index in
+                (at(SentencePosition(chapter: chapter, sentence: index))?.progress ?? 0) <= progress + 0.00000001
+            } ?? 0
+            return SentencePosition(chapter: chapter, sentence: sentence)
+        }
+        return SentenceNavigation.clamp(SentencePosition(chapter: bookmark.chapterIndex, sentence: 0), in: book)
+    }
+
+    private func boundary(_ position: SentencePosition, after: Bool) -> SentenceProgressPoint? {
+        guard book.sentence(at: position) != nil else { return nil }
+        let chapter = book.chapters[position.chapter]
+        guard let metric = metrics[chapter.chapterIndex] else { return nil }
+        let offsets = boundaries[position.chapter]
+        let total = offsets.last ?? 0
+        let offset: Int
+        if total > 0 {
+            offset = Int(Double(offsets[position.sentence + (after ? 1 : 0)]) * Double(metric.count) / Double(total))
+        } else {
+            offset = metric.count * (position.sentence + (after ? 1 : 0)) / max(1, chapter.sentences.count)
+        }
+        return SentenceProgressPoint(chapterIndex: chapter.chapterIndex,
+            progress: metric.count > 0 ? Double(offset) / Double(metric.count) : 0,
+            characterCount: min(max(0, metric.start + offset), characterCount))
     }
 }

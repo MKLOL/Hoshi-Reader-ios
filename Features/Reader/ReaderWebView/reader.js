@@ -174,6 +174,26 @@ window.hoshiReader = {
         return { vertical, scrollEl, pageSize, maxScroll };
     },
     
+    getPagePosition(context) {
+        return context.vertical ? context.scrollEl.scrollTop : context.scrollEl.scrollLeft;
+    },
+
+    setPagePosition(context, scroll) {
+        window.lastPageScroll = scroll;
+        return this.setScrollOffset(context, scroll);
+    },
+
+    textOffsetForCharCount(node, count) {
+        const text = node.textContent;
+        let running = 0;
+        for (let offset = 0; offset < text.length;) {
+            const character = String.fromCodePoint(text.codePointAt(offset));
+            if (this.isMatchableChar(character) && running++ >= count) return offset;
+            offset += character.length;
+        }
+        return text.length;
+    },
+
     setScrollOffset(context, scroll) {
         var clampedScroll = Math.min(Math.max(0, scroll), context.maxScroll);
         if (context.vertical) {

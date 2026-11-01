@@ -1,0 +1,157 @@
+import XCTest
+import SwiftUI
+import WebKit
+import AVFoundation
+@testable import Hoshi_Reader
+
+nonisolated final class SentenceReadingParityTests: XCTestCase {
+    private func fixture() -> SentenceReadingProgress {
+        let texts = ["短い。", "とても長い文章を読みます。", "最後。"]
+        let sentences = texts.enumerated().map { index, text in
+            ReaderSentence(spine: 0, start: index, length: 1, text: text, paragraph: 0)
+        }
+        let book = SentenceBook(chapters: [
+            SentenceChapter(chapterIndex: 0, title: nil, sentences: sentences),
+            SentenceChapter(chapterIndex: 1, title: nil, sentences: [])
+        ])
+        return SentenceReadingProgress(book: book,
+            metrics: [0: SentenceChapterMetric(start: 0, count: 170), 1: SentenceChapterMetric(start: 170, count: 10)],
+            characterCount: 180)
+    }
+
+    func testSentenceTurnsUseCharacterWeightedOrdinaryBookmarks() throws {
+        let progress = fixture()
+        let second = try XCTUnwrap(progress.at(SentencePosition(chapter: 0, sentence: 1)))
+        let third = try XCTUnwrap(progress.at(SentencePosition(chapter: 0, sentence: 2)))
+        XCTAssertLessThan(second.progress, 0.2)
+        XCTAssertGreaterThan(third.progress, 0.7)
+        XCTAssertLessThanOrEqual(abs(second.characterCount - Int(second.progress * 170)), 1)
+        XCTAssertEqual(progress.completionPoint, SentenceProgressPoint(chapterIndex: 1, progress: 1, characterCount: 180))
+        XCTAssertFalse(progress.isLast(SentencePosition(chapter: 0, sentence: 1)))
+        XCTAssertTrue(progress.isLast(SentencePosition(chapter: 0, sentence: 2)))
+    }
+
+    func testSharedBookmarkOverridesStaleSentenceCursorAndHandlesCompletion() throws {
+        let progress = fixture()
+        let cursor = SentencePosition(chapter: 0, sentence: 2)
+        XCTAssertEqual(progress.initialPosition(saved: cursor,
+            bookmark: SentenceBookmarkAnchor(chapterIndex: 0, progress: 0)), SentencePosition(chapter: 0, sentence: 0))
+        let point = try XCTUnwrap(progress.at(cursor))
+        XCTAssertEqual(progress.initialPosition(saved: cursor,
+            bookmark: SentenceBookmarkAnchor(chapterIndex: 0, progress: point.progress)), cursor)
+        XCTAssertEqual(progress.initialPosition(saved: nil,
+            bookmark: SentenceBookmarkAnchor(chapterIndex: 1, progress: 1)), cursor)
+        XCTAssertEqual(progress.initialPosition(saved: nil,
+            bookmark: SentenceBookmarkAnchor(chapterIndex: 0, progress: .nan)), SentencePosition(chapter: 0, sentence: 0))
+    }
+
+    @MainActor func testRubyAndPartiallyAnnotatedCompoundsStayOnOneLine() {
+        let view = CenteringTextView(frame: CGRect(x: 0, y: 0, width: 100, height: 250), textContainer: nil)
+        view.textContainer.lineFragmentPadding = 0
+        view.textContainerInset = .zero
+        let text = "日本大丈夫です。"
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping
+        view.attributedText = NSAttributedString(string: text, attributes: [.font: UIFont.systemFont(ofSize: 26), .paragraphStyle: style])
+        view.configureRuby([RubyAnnotation(start: 2, length: 3, reading: "だいじょうぶ")],
+            font: .systemFont(ofSize: 13), color: .label)
+        view.layoutIfNeeded()
+        let manager = view.layoutManager
+        manager.ensureLayout(for: view.textContainer)
+        let first = manager.glyphIndexForCharacter(at: 2)
+        let last = manager.glyphIndexForCharacter(at: 4)
+        XCTAssertEqual(manager.lineFragmentRect(forGlyphAt: first, effectiveRange: nil).minY,
+            manager.lineFragmentRect(forGlyphAt: last, effectiveRange: nil).minY)
+        XCTAssertFalse(view.layoutManager(manager, shouldBreakLineByWordBeforeCharacterAt: 3))
+        XCTAssertEqual(view.attributedText.string, text)
+        XCTAssertTrue(CenteringTextView.wrappingRanges(text: "大丈夫。", ruby: [RubyAnnotation(start: 0, length: 1, reading: "だい")])
+            .contains(NSRange(location: 0, length: 3)))
+    }
+
+    @MainActor func testMalformedAudiobookCuesDoNotHideFollowingValidBlocks() {
+        let source = """
+        1
+        nan:00:00,000 --> 00:00:01,000
+        invalid
+
+        2
+        00:99:00,000 --> 01:00:00,000
+        invalid
+
+        3
+        00:00:02,000 --> 00:00:03,000
+        日本語
+        """
+        let cues = SasayakiParser.parseCues(from: Data(source.utf8))
+        XCTAssertEqual(cues.count, 1)
+        XCTAssertEqual(cues.first?.text, "日本語")
+    }
+
+    @MainActor func testAudiobookChapterRestoreKeepsPlaybackRunning() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("sasayaki-state-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let player = SasayakiPlayer(rootURL: root, bridge: WebViewBridge(), loadChapter: { _, _ in }, getCurrentIndex: { 0 }, onPlayback: {})
+        player.player = AVPlayer()
+        player.isPlaying = true
+        player.currentTime = 42
+        player.prepareTransition()
+        XCTAssertTrue(player.isPlaying)
+        XCTAssertFalse(player.shouldResume)
+        XCTAssertTrue(player.chapterTransition)
+        player.reloadPlayback()
+        XCTAssertEqual(player.currentTime, 42)
+        player.teardown()
+    }
+
+    @MainActor func testWebKitSentencePaginationPreservesTextAndRuby() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240))
+        controller.view.addSubview(webView)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previous?.makeKeyAndVisible() }
+        let readerURL = try XCTUnwrap(Bundle.main.url(forResource: "reader", withExtension: "js"))
+        let reader = try String(contentsOf: readerURL, encoding: .utf8)
+        let paragraphs = (0..<30).map { _ in "<p>私は<ruby>日本語<rt>にほんご</rt></ruby>の本を読みます。次の文章も楽しく読みましょう。</p>" }.joined()
+        for vertical in [false, true] {
+            let html = """
+            <html lang="ja"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+            html,body { margin:0; padding:0; width:320px; height:240px; overflow:hidden; writing-mode:\(vertical ? "vertical-rl" : "horizontal-tb"); }
+            body { box-sizing:border-box; font:22px serif; line-height:1.5; column-width:\(vertical ? 240 : 320)px; column-gap:0; }
+            p { margin:0; } \(ReaderTextStyle.wordLayoutCSS)
+            </style></head><body>\(paragraphs)<script>\(reader)\n\(ReaderTextStyle.textLayoutScript)
+            window.hoshiReader.pageWidth=320;window.hoshiReader.pageHeight=240;</script></body></html>
+            """
+            webView.loadHTMLString(html, baseURL: nil)
+            for _ in 0..<300 {
+                if !webView.isLoading, (try? await webView.evaluateJavaScript("!!window.hoshiTextLayout")) as? Bool == true { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let result = try await webView.callAsyncJavaScript("""
+                await document.fonts.ready;
+                window.hoshiTextLayout.prepare(window.hoshiReader,true);
+                const vertical = window.hoshiReader.isVertical();
+                const size = vertical ? 240 : 320;
+                const divided = window.hoshiTextLayout.sentences.filter(sentence => {
+                  const range = document.createRange();
+                  range.setStartAfter(sentence.start); range.setEndBefore(sentence.end);
+                  const pages = new Set(Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
+                    .map(r => Math.floor(((vertical ? r.top : r.left) + 0.1) / size)));
+                  return pages.size > 1;
+                }).length;
+                return {preserved:window.hoshiTextLayout.textPreserved,divided,
+                  breaks:document.querySelectorAll('.hoshi-sentence-page-break,.hoshi-sentence-block-break').length,
+                  ruby:document.querySelectorAll('ruby').length};
+                """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+            let values = try XCTUnwrap(result)
+            XCTAssertEqual(values["preserved"] as? Bool, true)
+            XCTAssertEqual(values["divided"] as? Int, 0, "\(vertical ? "Vertical" : "Horizontal") sentences should fit on one page")
+            XCTAssertGreaterThan(values["breaks"] as? Int ?? 0, 0)
+            XCTAssertEqual(values["ruby"] as? Int, 30)
+        }
+    }
+}

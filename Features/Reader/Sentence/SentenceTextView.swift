@@ -172,7 +172,9 @@ struct SentenceTextView: UIViewRepresentable {
             // word the user never touched. Require the point to be inside the line it landed on.
             guard glyphIndex < layoutManager.numberOfGlyphs else { return nil }
             let lineRect = layoutManager.lineFragmentUsedRect(forGlyphAt: glyphIndex, effectiveRange: nil)
-            guard lineRect.contains(point) else { return nil }
+            guard lineRect.contains(point) else {
+                return (view as? CenteringTextView)?.rubyBaseTap(at: location)
+            }
 
             let characterIndex = layoutManager.characterIndexForGlyph(at: glyphIndex)
             let length = (view.text as NSString).length
@@ -191,7 +193,11 @@ struct SentenceTextView: UIViewRepresentable {
 }
 
 /// Centers the native sentence screen. EPUB chapters and podcast transcripts use WebKit ruby.
-final class CenteringTextView: UITextView {
+final class CenteringTextView: UITextView, NSLayoutManagerDelegate {
+    private var sourceText: NSAttributedString?
+    private var wrappingGroups: [NSRange] = []
+    private var measuredWidth: CGFloat = -1
+    private var applyingLayout = false
     private var ruby: [RubyAnnotation] = []
     private var rubyFont: UIFont = .systemFont(ofSize: 8)
     private var rubyColor: UIColor = .label
@@ -227,6 +233,10 @@ final class CenteringTextView: UITextView {
 
     func configureRuby(_ ruby: [RubyAnnotation], font: UIFont, color: UIColor) {
         self.ruby = ruby
+        sourceText = attributedText
+        wrappingGroups = Self.wrappingRanges(text: text, ruby: ruby)
+        measuredWidth = -1
+        layoutManager.delegate = self
         rubyFont = font
         rubyColor = color
         updateTextInsets()
@@ -236,8 +246,65 @@ final class CenteringTextView: UITextView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        fitWrappingGroups()
         updateTextInsets()
         setNeedsDisplay()
+    }
+
+    /// A publisher ruby base is atomic. Short, partially annotated kanji compounds also wrap
+    /// together, while a long unannotated run can still fill ordinary lines.
+    static func wrappingRanges(text: String, ruby: [RubyAnnotation]) -> [NSRange] {
+        let source = text as NSString
+        var groups = ruby.map { NSRange(location: $0.start, length: $0.length) }
+        let expression = try! NSRegularExpression(pattern: "[\\p{Han}々〻]+")
+        for match in expression.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            if source.substring(with: match.range).unicodeScalars.count <= 4 { groups.append(match.range) }
+        }
+        var merged: [NSRange] = []
+        for group in groups.sorted(by: { $0.location < $1.location }) {
+            if let previous = merged.last, NSIntersectionRange(previous, group).length > 0 {
+                merged[merged.count - 1] = NSUnionRange(previous, group)
+            } else { merged.append(group) }
+        }
+        return merged
+    }
+
+    func layoutManager(_ layoutManager: NSLayoutManager, shouldBreakLineByWordBeforeCharacterAt charIndex: Int) -> Bool {
+        !wrappingGroups.contains { $0.location < charIndex && charIndex < NSMaxRange($0) }
+    }
+
+    private func fitWrappingGroups() {
+        let width = bounds.width - textContainerInset.left - textContainerInset.right - textContainer.lineFragmentPadding * 2
+        guard width > 0, abs(width - measuredWidth) > 0.5, !applyingLayout, let sourceText else { return }
+        applyingLayout = true
+        defer { applyingLayout = false }
+        measuredWidth = width
+        let fitted = NSMutableAttributedString(attributedString: sourceText)
+        for group in wrappingGroups {
+            guard NSMaxRange(group) <= fitted.length,
+                  let font = sourceText.attribute(.font, at: group.location, effectiveRange: nil) as? UIFont else { continue }
+            let baseWidth = sourceText.attributedSubstring(from: group).size().width
+            let annotations = ruby.filter { NSIntersectionRange(group, NSRange(location: $0.start, length: $0.length)).length > 0 }
+            var required = baseWidth
+            for annotation in annotations {
+                let span = NSRange(location: annotation.start, length: annotation.length)
+                let base = sourceText.attributedSubstring(from: span).size().width
+                let reading = (annotation.reading as NSString).size(withAttributes: [.font: rubyFont]).width
+                required += max(0, reading - base)
+            }
+            let scale = min(1, width / max(1, required))
+            fitted.addAttribute(.font, value: font.withSize(font.pointSize * scale), range: group)
+            for annotation in annotations {
+                let span = NSRange(location: annotation.start, length: annotation.length)
+                let base = sourceText.attributedSubstring(from: span).size().width
+                let reading = (annotation.reading as NSString).size(withAttributes: [.font: rubyFont]).width
+                if reading > base {
+                    fitted.addAttribute(.kern, value: (reading - base) * scale / CGFloat(max(1, span.length)), range: span)
+                }
+            }
+        }
+        attributedText = fitted
+        layoutManager.ensureLayout(for: textContainer)
     }
 
     private func updateTextInsets() {
@@ -255,14 +322,33 @@ final class CenteringTextView: UITextView {
         for drawing in rubyDrawings() { drawing.text.draw(at: drawing.frame.origin) }
     }
 
-    private func rubyDrawings() -> [(text: NSAttributedString, frame: CGRect)] {
+    /// Furigana are part of the same tappable word; a hit above the base resolves to the
+    /// underlying base glyph rather than the nearest caret in the next line.
+    func rubyBaseTap(at point: CGPoint) -> SentenceTap? {
+        for drawing in rubyDrawings() where drawing.frame.contains(point) {
+            let glyphs = layoutManager.glyphRange(forCharacterRange: drawing.range, actualCharacterRange: nil)
+            let base = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+            let location = CGPoint(x: min(max(point.x - textContainerInset.left, base.minX + 0.1), base.maxX - 0.1), y: base.midY)
+            let glyph = layoutManager.glyphIndex(for: location, in: textContainer)
+            let character = layoutManager.characterIndexForGlyph(at: glyph)
+            guard NSLocationInRange(character, drawing.range) else { continue }
+            let range = (text as NSString).rangeOfComposedCharacterSequence(at: character)
+            let target = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: target, in: textContainer)
+                .offsetBy(dx: textContainerInset.left, dy: textContainerInset.top - contentOffset.y)
+            return SentenceTap(characterOffset: range.location, rect: rect)
+        }
+        return nil
+    }
+
+    private func rubyDrawings() -> [(text: NSAttributedString, frame: CGRect, range: NSRange)] {
         guard !ruby.isEmpty else { return [] }
         layoutManager.ensureLayout(for: textContainer)
         let container = textContainer
         let inset = textContainerInset
         let readingAttributes: [NSAttributedString.Key: Any] = [.font: rubyFont, .foregroundColor: rubyColor]
         let length = (text as NSString).length
-        var drawings: [(text: NSAttributedString, frame: CGRect)] = []
+        var drawings: [(text: NSAttributedString, frame: CGRect, range: NSRange)] = []
 
         for annotation in ruby {
             let range = NSRange(location: annotation.start, length: annotation.length)
@@ -279,14 +365,17 @@ final class CenteringTextView: UITextView {
             let baseRect = layoutManager.boundingRect(forGlyphRange: firstBaseGlyphs, in: container)
             guard !baseRect.isNull, baseRect.width > 0 else { continue }
 
-            let reading = NSAttributedString(string: annotation.reading, attributes: readingAttributes)
+            let baseFont = attributedText.attribute(.font, at: range.location, effectiveRange: nil) as? UIFont
+            var scaledAttributes = readingAttributes
+            if let baseFont { scaledAttributes[.font] = baseFont.withSize(baseFont.pointSize * 0.5) }
+            let reading = NSAttributedString(string: annotation.reading, attributes: scaledAttributes)
             let size = reading.size()
             let centerX = baseRect.midX + inset.left
             // Sit the reading in the gap just above the base line's glyphs.
             let baseTop = firstLine.minY + inset.top
             let left = min(max(inset.left, centerX - size.width / 2), max(inset.left, bounds.width - inset.right - size.width))
             let origin = CGPoint(x: left, y: baseTop - size.height + 1)
-            drawings.append((reading, CGRect(origin: origin, size: size)))
+            drawings.append((reading, CGRect(origin: origin, size: size), range))
         }
         return drawings
     }

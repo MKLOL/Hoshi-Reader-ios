@@ -315,7 +315,12 @@ nonisolated struct HttpSyncPayloadCodec {
                     at: bookRoot.appendingPathComponent(".payload.content.local_dirty")
                 )
             }
-            if !forceReplacement { return false }
+            if !forceReplacement {
+                if format == .mokuro, remoteManifest.contentSha256 == contentSha || cachedZipSha(bookRoot: bookRoot) == remoteManifest.sha256 {
+                    await publishCloudCover(transport: transport, syncId: syncId, bookRoot: bookRoot, archiveSHA: remoteManifest.sha256)
+                }
+                return false
+            }
         }
 
         let fileManager = FileManager.default
@@ -349,9 +354,37 @@ nonisolated struct HttpSyncPayloadCodec {
             contentType: "application/json; charset=utf-8",
             body: body
         )
+        if format == .mokuro {
+            await publishCloudCover(transport: transport, syncId: syncId, bookRoot: bookRoot, archiveSHA: sha)
+        }
         Self.writeZipSha(bookRoot: bookRoot, sha: sha)
         try? fileManager.removeItem(at: bookRoot.appendingPathComponent(".payload.content.local_dirty"))
         return true
+    }
+
+    /// Same immutable archive-keyed thumbnail used by Android. Optional cover failures never
+    /// fail a book upload, and local bytes are published only after content identity was proved.
+    private func publishCloudCover(transport: HttpSyncKvTransport, syncId: String, bookRoot: URL, archiveSHA: String) async {
+        let hash = String(archiveSHA.dropFirst("sha256:".count))
+        guard archiveSHA.hasPrefix("sha256:"), hash.count == 64, hash.allSatisfy({ $0.isHexDigit }) else { return }
+        let key = "books/\(syncId)/cover/\(hash)"
+        do {
+            if try await transport.getBounded(key: key, maxBytes: 8 * 1024 * 1024) != nil { return }
+            let data = await Task.detached(priority: .utility) { () -> Data? in
+                let candidates = [bookRoot.appendingPathComponent(FileNames.generatedCover), bookRoot.appendingPathComponent("cover.jpg")]
+                for url in candidates {
+                    if let data = try? Data(contentsOf: url), let thumbnail = HttpSyncCloudBooks.thumbnail(data) { return thumbnail }
+                }
+                let images = bookRoot.appendingPathComponent(FileNames.mokuroImages)
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: images.path)) ?? []
+                for name in names.sorted() where !name.hasPrefix(".") {
+                    if let data = try? Data(contentsOf: images.appendingPathComponent(name)), let thumbnail = HttpSyncCloudBooks.thumbnail(data) { return thumbnail }
+                }
+                return nil as Data?
+            }.value
+            guard let data, !Task.isCancelled else { return }
+            _ = try await transport.put(key: key, contentType: "image/jpeg", body: data)
+        } catch { /* Covers are optional catalogue decoration. */ }
     }
 
     /// Inbound. Downloads + validates + unpacks the payload zip into `targetDir`. Returns the
@@ -362,7 +395,8 @@ nonisolated struct HttpSyncPayloadCodec {
         syncId: String,
         keys: HttpSyncPayloadKeys,
         expectedFormat: ContentType,
-        targetDir: URL
+        targetDir: URL,
+        downloadCacheBooks: URL? = nil
     ) async throws -> HttpSyncPayloadManifest {
         guard let fetchedManifest = try await transport.get(key: keys.manifest) else {
             throw HttpSyncError("No payload manifest for \(syncId).")
@@ -376,7 +410,7 @@ nonisolated struct HttpSyncPayloadCodec {
         }
         let fileManager = FileManager.default
         let cache = HttpSyncDownloadCache.shared
-        let directory = cache.directory(books: targetDir.deletingLastPathComponent(), key: keys.zip, archiveSHA: manifest.sha256)
+        let directory = cache.directory(books: downloadCacheBooks ?? targetDir.deletingLastPathComponent(), key: keys.zip, archiveSHA: manifest.sha256)
         try cache.acquire(directory)
         defer { cache.release(directory) }
         let zipURL = directory.appendingPathComponent("payload.zip")

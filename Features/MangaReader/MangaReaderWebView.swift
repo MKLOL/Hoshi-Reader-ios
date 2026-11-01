@@ -36,6 +36,9 @@ final class MangaWebViewController {
 
     /// Book root used by the scheme handler to resolve `hoshi-img://` requests off disk.
     var bookRootForScheme: URL?
+    var imageLoader: MangaImageLoader?
+    private var readyLoadToken: Int?
+    private var pendingPredecode: (token: Int, script: String)?
 
     /// True while the page is zoomed or panned, so the host should gate swipe-to-turn.
     private(set) var isZoomedOrScrollable = false
@@ -47,10 +50,31 @@ final class MangaWebViewController {
     /// image paths the scheme handler may serve for this page (normally just the page's image).
     @discardableResult
     func load(html: String, allowedImagePaths: Set<String>) -> Int {
+        webView?.evaluateJavaScript("window.hoshiMangaImageCache && window.hoshiMangaImageCache.cancel()") { _, _ in }
+        readyLoadToken = nil
+        pendingPredecode = nil
         self.pendingHtml = html
         self.allowedImagePaths = allowedImagePaths
         loadToken += 1
         return loadToken
+    }
+
+    func setPredecodeScript(_ script: String, for token: Int) {
+        guard token == loadToken else { return }
+        pendingPredecode = (token, script)
+        startPredecodeIfReady()
+    }
+
+    fileprivate func pageReady(_ token: Int) {
+        guard token == loadToken else { return }
+        readyLoadToken = token
+        startPredecodeIfReady()
+    }
+
+    private func startPredecodeIfReady() {
+        guard let pendingPredecode, pendingPredecode.token == readyLoadToken else { return }
+        self.pendingPredecode = nil
+        webView?.evaluateJavaScript(pendingPredecode.script) { _, _ in }
     }
 
     /// Hides any revealed OCR plates/buttons before a raw page crop.
@@ -285,6 +309,7 @@ struct MangaReaderWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         coordinator.selectionTask?.cancel()
+        coordinator.cancelImageReads()
         let controllerJS = webView.configuration.userContentController
         controllerJS.removeScriptMessageHandler(forName: "textSelected")
         controllerJS.removeScriptMessageHandler(forName: "hoshiManga")
@@ -316,6 +341,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         var parent: MangaReaderWebView
         var lastLoadToken = 0
         var allowedImagePaths: Set<String> = []
+        private var scrollableBubbleRegions: [CGRect] = []
         /// Native trackpad debounce — held here so it survives the per-page HTML reload a turn
         /// triggers (a JS-side debounce gets wiped by the reload → multi-page jumps).
         var wheelDebouncer = MangaWheelDebouncer()
@@ -325,6 +351,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         /// In-flight scheme tasks by identity; a task that WebKit has `stop`ped is removed, so we
         /// never call back into a cancelled task (which throws).
         private var activeSchemeTasks = Set<ObjectIdentifier>()
+        private var schemeReads: [ObjectIdentifier: Task<Void, Never>] = [:]
         /// WKNavigation -> controller load token. `didFinish` can arrive out of order during fast
         /// page turns, so the host only trusts completions for the navigation it asked to load.
         private var navigationLoadTokens: [ObjectIdentifier: Int] = [:]
@@ -354,6 +381,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         // MARK: Navigation
 
         func trackNavigation(_ navigation: WKNavigation, loadToken: Int) {
+            scrollableBubbleRegions = []
             navigationLoadTokens[ObjectIdentifier(navigation)] = loadToken
         }
 
@@ -373,6 +401,7 @@ struct MangaReaderWebView: UIViewRepresentable {
             trackpadPanSession = nil
             parent.controller.syncHostViewport()
             parent.onPageReady(finishedLoadToken)
+            parent.controller.pageReady(finishedLoadToken)
             // Re-assert first responder so hardware-keyboard arrows keep turning pages after a
             // load (loadHTMLString can drop it). No-op cost when already first responder; safe here
             // because a page turn has already cleared any text selection / popups.
@@ -418,6 +447,15 @@ struct MangaReaderWebView: UIViewRepresentable {
             case "hoshiManga":
                 guard let body = message.body as? [String: Any] else { return }
                 switch body["event"] as? String {
+                case "scrollableBubbleRegions":
+                    let values = body["regions"] as? [[String: Any]] ?? []
+                    scrollableBubbleRegions = values.prefix(256).compactMap { value in
+                        guard let x = numeric(value["x"]), let y = numeric(value["y"]),
+                              let width = numeric(value["width"]), let height = numeric(value["height"]),
+                              [x, y, width, height].allSatisfy({ $0.isFinite && abs($0) <= 1_000_000 }),
+                              width > 0, height > 0 else { return nil }
+                        return CGRect(x: x, y: y, width: width, height: height)
+                    }
                 case "bubbleRevealed":
                     parent.onBubbleRevealed(body["text"] as? String ?? "", body["blockId"] as? String)
                 case "selectedNothing":
@@ -446,40 +484,58 @@ struct MangaReaderWebView: UIViewRepresentable {
             webView?.evaluateJavaScript("window.hoshiSelection.highlightSelection(\(count))") { _, _ in }
         }
 
+        func cancelImageReads() {
+            for read in schemeReads.values { read.cancel() }
+            schemeReads.removeAll()
+            activeSchemeTasks.removeAll()
+        }
+
         // MARK: URL scheme handler (serves page images off disk)
 
         func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
             let taskId = ObjectIdentifier(urlSchemeTask)
             activeSchemeTasks.insert(taskId)
 
-            guard let url = urlSchemeTask.request.url,
-                  let fileURL = MangaImageScheme.resolveFile(
-                      url: url,
-                      bookRoot: bookRoot,
-                      allowedImagePaths: allowedImagePaths
-                  ),
-                  let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-                guard activeSchemeTasks.contains(taskId) else { return }
+            guard let url = urlSchemeTask.request.url else {
                 activeSchemeTasks.remove(taskId)
-                urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+                urlSchemeTask.didFailWithError(URLError(.badURL))
                 return
             }
-
-            let response = URLResponse(
-                url: url,
-                mimeType: MangaImageScheme.mimeType(for: fileURL),
-                expectedContentLength: data.count,
-                textEncodingName: nil
-            )
-            guard activeSchemeTasks.contains(taskId) else { return }
-            urlSchemeTask.didReceive(response)
-            urlSchemeTask.didReceive(data)
-            urlSchemeTask.didFinish()
-            activeSchemeTasks.remove(taskId)
+            let loader = parent.controller.imageLoader
+            let root = bookRoot, allowed = allowedImagePaths
+            schemeReads[taskId] = Task { [weak self] in
+                do {
+                    let data: Data
+                    if let loader { data = try await loader.image(for: url, allowedPaths: allowed) }
+                    else {
+                        data = try await Task.detached(priority: .userInitiated) {
+                            guard let file = MangaImageScheme.resolveFile(url: url, bookRoot: root, allowedImagePaths: allowed) else {
+                                throw URLError(.fileDoesNotExist)
+                            }
+                            return try Data(contentsOf: file, options: .mappedIfSafe)
+                        }.value
+                    }
+                    guard let self, !Task.isCancelled, self.activeSchemeTasks.contains(taskId) else { return }
+                    let response = URLResponse(url: url, mimeType: MangaImageScheme.mimeType(for: url),
+                                               expectedContentLength: data.count, textEncodingName: nil)
+                    urlSchemeTask.didReceive(response)
+                    urlSchemeTask.didReceive(data)
+                    urlSchemeTask.didFinish()
+                    self.activeSchemeTasks.remove(taskId)
+                    self.schemeReads.removeValue(forKey: taskId)
+                } catch {
+                    guard let self, !Task.isCancelled, self.activeSchemeTasks.contains(taskId) else { return }
+                    self.activeSchemeTasks.remove(taskId)
+                    self.schemeReads.removeValue(forKey: taskId)
+                    urlSchemeTask.didFailWithError(error)
+                }
+            }
         }
 
         func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-            activeSchemeTasks.remove(ObjectIdentifier(urlSchemeTask))
+            let taskId = ObjectIdentifier(urlSchemeTask)
+            activeSchemeTasks.remove(taskId)
+            schemeReads.removeValue(forKey: taskId)?.cancel()
         }
 
         // MARK: Zoom / pan
@@ -834,11 +890,19 @@ struct MangaReaderWebView: UIViewRepresentable {
         /// of a diagonal pan, which made zoomed panning snap to one axis. With them disabled while
         /// zoomed, the scroll view's pan is unobstructed and follows the finger in any direction. At
         /// fit scale (not zoomed) they begin normally so left/right swipes still turn the page.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard gestureRecognizer is UISwipeGestureRecognizer,
+                  let webView = parent.controller.webView else { return true }
+            return !scrollableBubbleRegions.contains { $0.contains(touch.location(in: webView)) }
+        }
+
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             if gestureRecognizer is UISwipeGestureRecognizer {
                 return !parent.controller.isZoomedOrScrollable
             }
             if gestureRecognizer === trackpadPageTurnRecognizer {
+                if let webView = parent.controller.webView,
+                   scrollableBubbleRegions.contains(where: { $0.contains(gestureRecognizer.location(in: webView)) }) { return false }
                 guard let scrollView = gestureRecognizer.view as? UIScrollView else { return false }
                 let pinchState = nativePinchRecognizer?.state
                 let pinchIsActive = pinchState == .began || pinchState == .changed
@@ -958,56 +1022,5 @@ enum MangaPageNavigation {
         if pageCount <= 0 { return nil }
         let next = direction == .forward ? currentIndex + 1 : currentIndex - 1
         return (0..<pageCount).contains(next) ? next : nil
-    }
-}
-
-/// Resolves `hoshi-img://manga/<percent-encoded relative path>` URLs to on-disk image files
-/// under the book's directory, with path-traversal containment + an allow-list. The Swift
-/// counterpart of Android's `MangaWebResourceBridge`.
-enum MangaImageScheme {
-    static let scheme = "hoshi-img"
-    static let host = "manga"
-
-    /// Resolves a request URL to the on-disk image file, or `nil` if it is not a manga-image
-    /// request, names an image the page does not declare, or escapes the book root.
-    static func resolveFile(url: URL, bookRoot: URL?, allowedImagePaths: Set<String>) -> URL? {
-        guard let bookRoot,
-              url.scheme == scheme,
-              url.host == host else {
-            return nil
-        }
-        // URLComponents percent-decodes `path`, round-tripping the encoded segments back to the
-        // original on-disk relative path.
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-        var relative = components.path
-        while relative.hasPrefix("/") { relative.removeFirst() }
-        guard !relative.isEmpty, allowedImagePaths.contains(relative) else { return nil }
-
-        let canonicalRoot = bookRoot.standardizedFileURL.resolvingSymlinksInPath()
-        let candidate = canonicalRoot.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath()
-        // Containment: candidate must live strictly inside the book root.
-        let rootPath = canonicalRoot.path
-        let candidatePath = candidate.path
-        guard candidatePath != rootPath,
-              candidatePath.hasPrefix(rootPath + "/") else {
-            return nil
-        }
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: candidatePath, isDirectory: &isDir), !isDir.boolValue else {
-            return nil
-        }
-        return candidate
-    }
-
-    static func mimeType(for fileURL: URL) -> String {
-        switch fileURL.pathExtension.lowercased() {
-        case "jpg", "jpeg": return "image/jpeg"
-        case "png": return "image/png"
-        case "webp": return "image/webp"
-        case "gif": return "image/gif"
-        case "avif": return "image/avif"
-        case "bmp": return "image/bmp"
-        default: return "application/octet-stream"
-        }
     }
 }

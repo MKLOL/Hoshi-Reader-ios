@@ -46,33 +46,6 @@ struct AppearanceView: View {
         )
         NavigationStack {
             List {
-                if !textOnly {
-                Section("Theme") {
-                    Picker("Appearance", selection: $userConfig.theme) {
-                        ForEach(Themes.allCases, id: \.self) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    if userConfig.theme == .system {
-                        Toggle("Use Sepia as Light Theme", isOn: $userConfig.systemLightSepia)
-                    }
-                    if userConfig.theme == .sepia {
-                        Toggle("Invert in System Dark Theme", isOn: $userConfig.sepiaInvertInDark)
-                    }
-                    if userConfig.theme == .custom {
-                        Picker("Interface", selection: $userConfig.uiTheme) {
-                            Text("System").tag(Themes.system)
-                            Text("Light").tag(Themes.light)
-                            Text("Dark").tag(Themes.dark)
-                        }
-                        ColorPicker("Background Color", selection: $userConfig.customBackgroundColor)
-                        ColorPicker("Text Color", selection: $userConfig.customTextColor)
-                        ColorPicker("Info Color", selection: $userConfig.customInfoColor)
-                    }
-                }
-                }
-                
                 Section("Text") {
                     if !textOnly {
                     HStack {
@@ -266,29 +239,18 @@ struct AppearanceView: View {
                     }
                 }
                 
-                Section("Popup") {
-                    NavigationLink("Popup Cards") { PopupCardsView(userConfig: userConfig) }
-                    Toggle("Full-width dictionary", isOn: Bindable(userConfig).popupFullWidth)
+                Section("Page turning") {
+                    Toggle("Disable page-turn animation", isOn: $userConfig.disablePageTurnAnimation)
+                }
 
-                    Toggle("Swipe to Dismiss", isOn: Bindable(userConfig).popupSwipeToDismiss)
-                    if userConfig.popupSwipeToDismiss {
-                        VStack {
-                            HStack {
-                                Text("Swipe Threshold")
-                                Spacer()
-                                Text("\(userConfig.popupSwipeThreshold)")
-                                    .fontWeight(.semibold)
-                            }
-                            Slider(value: .init(
-                                get: { Double(userConfig.popupSwipeThreshold) },
-                                set: { userConfig.popupSwipeThreshold = Int($0) }
-                            ), in: 20...80, step: 5)
-                        }
-                    }
+                Section("Related settings") {
+                    NavigationLink("App & reading") { AppReadingSettingsView(userConfig: userConfig) }
+                    NavigationLink("Popup Cards") { PopupCardsView(userConfig: userConfig) }
+                    NavigationLink("Sasayaki") { SasayakiSettingsView() }
                 }
                 }
             }
-            .navigationTitle("Appearance")
+            .navigationTitle(textOnly ? "Transcript text" : "EPUB")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if showDismiss {
@@ -298,7 +260,8 @@ struct AppearanceView: View {
                         } label: {
                             Image(systemName: "xmark")
                         }
-                        .accessibilityLabel("Close appearance")
+                        .accessibilityLabel(textOnly ? "Close transcript text settings" : "Close EPUB settings")
+                        .accessibilityIdentifier("close-reader-settings")
                     }
                 }
             }

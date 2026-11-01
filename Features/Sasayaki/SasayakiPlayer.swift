@@ -101,6 +101,7 @@ class SasayakiPlayer {
     var currentCue: SasayakiMatch?
     var pendingCue: SasayakiMatch?
     var chapterTransition = false
+    var visualUpdatesSuspended = false
     var shouldResume = false
     var resumeAfterInterruption = false
     var hasPlayedOnce = false
@@ -139,7 +140,9 @@ class SasayakiPlayer {
     }
     
     func reloadPlayback() {
-        guard hasMatch else { return }
+        // A remote bookmark or foreground import must not rewind an audiobook in progress.
+        // Its live player remains the authority until playback is paused.
+        guard hasMatch, !isPlaying else { return }
         isRestoring = true
         playback = BookStorage.loadSasayakiPlayback(root: rootURL) ?? SasayakiPlaybackData(lastPosition: 0)
         currentTime = playback.lastPosition
@@ -192,13 +195,13 @@ class SasayakiPlayer {
     }
     
     func handleRestoreCompleted(currentIndex: Int) {
-        guard hasMatch, chapterTransition else { return }
+        guard hasMatch, chapterTransition, !visualUpdatesSuspended else { return }
         
         let cue: SasayakiMatch?
-        if let pendingCue, pendingCue.chapterIndex == currentIndex {
-            cue = pendingCue
-        } else if let active = timeline.cue(at: currentTime - delay), active.chapterIndex == currentIndex {
+        if let active = timeline.cue(at: currentTime - delay), active.chapterIndex == currentIndex {
             cue = active
+        } else if let pendingCue, pendingCue.chapterIndex == currentIndex {
+            cue = pendingCue
         } else {
             cue = nil
         }
@@ -220,13 +223,11 @@ class SasayakiPlayer {
     }
     
     func prepareTransition() {
-        shouldResume = isPlaying
+        // WebKit can defer its restore callback while the app is backgrounded. The audio
+        // timeline must keep advancing independently of that visual chapter transition.
+        shouldResume = false
         chapterTransition = true
-        stopPlaybackTime = nil
         clearDisplayedCue()
-        if isPlaying {
-            pausePlayback()
-        }
     }
     
     func findCue(chapterIndex: Int, offset: Int) -> SasayakiMatch? {
@@ -307,23 +308,32 @@ class SasayakiPlayer {
         }
         
         let range = expandCue(cue, sentence: sentence)
-        let asset = AVURLAsset(url: url)
-        let output = FileManager.default.temporaryDirectory.appendingPathComponent("sasayaki_audio.m4a")
-        try? FileManager.default.removeItem(at: output)
-        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
-            return nil
-        }
-        
         let start = max(0, range.start + delay)
         let end = max(start, range.end + delay)
+        // Export owns its URL lease and temporary file. Closing/reloading the reader cannot
+        // cancel mining, and simultaneous cards cannot remove each other's audio.
+        return await Task.detached(priority: .userInitiated) {
+            await Self.exportCueAudio(url: url, start: start, end: end)
+        }.value
+    }
+
+    nonisolated private static func exportCueAudio(url: URL, start: Double, end: Double) async -> Data? {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let asset = AVURLAsset(url: url)
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("sasayaki-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: output) }
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else { return nil }
         session.timeRange = CMTimeRange(
             start: CMTime(seconds: start, preferredTimescale: 600),
             end: CMTime(seconds: end, preferredTimescale: 600)
         )
-        try? await session.export(to: output, as: .m4a)
-        return try? Data(contentsOf: output)
+        do {
+            try await session.export(to: output, as: .m4a)
+            return try Data(contentsOf: output)
+        } catch { return nil }
     }
-    
+
     private func expandCue(_ cue: SasayakiMatch, sentence: String) -> (start: Double, end: Double) {
         guard let cues = matchData?.matches.filter({ $0.chapterIndex == cue.chapterIndex }),
               let index = cues.firstIndex(where: { $0.id == cue.id }) else {
@@ -478,7 +488,7 @@ class SasayakiPlayer {
     }
     
     private func updateCue(for time: Double) {
-        guard hasAudio, hasMatch, !chapterTransition else { return }
+        guard hasAudio, hasMatch, !chapterTransition, !visualUpdatesSuspended else { return }
         
         let lookupTime = time - delay
         guard let cue = timeline.cue(at: lookupTime) else {

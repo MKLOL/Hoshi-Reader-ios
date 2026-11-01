@@ -47,6 +47,12 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         let androidManga = try fixtureManifest(SyncKeys.payloadManifest(Self.mangaSyncId))
         let androidNovel = try fixtureManifest(SyncKeys.epubManifest(Self.novelSyncId))
         try await clearServerRequests()
+        await syncNow(downloadManga: false)
+        XCTAssertEqual(Set(try BookStorage.loadAllBooks().compactMap(\.syncId)), [Self.novelSyncId])
+        XCTAssertNotNil(HttpSyncCloudBooks.shared.record(syncId: Self.mangaSyncId), "remote manga is listed before downloading")
+        let initialRequests = try await serverRequests()
+        XCTAssertFalse(initialRequests.contains { $0.method == "GET" && $0.path.hasSuffix("/payload.zip") }, "listing never fetches the manga archive")
+        XCTAssertTrue(HttpSyncCloudBooks.shared.requestDownload(syncId: Self.mangaSyncId))
         await syncNow()
 
         let manifestWrites = try await serverRequests().filter { $0.method == "PUT" && $0.path.hasSuffix(".manifest") }
@@ -307,13 +313,19 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         settings.baseURL = baseURL
         settings.token = token
         settings.lastSyncedAt = nil
+        HttpSyncCloudBooks.shared.activateScope(config: settings.currentConfig())
+        HttpSyncCloudBooks.shared.retain(syncIds: [])
         XCTAssertTrue(settings.isConfigured, "settings must accept the loopback test server")
     }
 
     @MainActor
-    private func syncNow(file: StaticString = #filePath, line: UInt = #line) async {
+    private func syncNow(downloadManga: Bool = true, file: StaticString = #filePath, line: UInt = #line) async {
         let manager = HttpSyncManager.shared
         await manager.syncNow()
+        if downloadManga, HttpSyncCloudBooks.shared.record(syncId: Self.mangaSyncId) != nil {
+            _ = HttpSyncCloudBooks.shared.requestDownload(syncId: Self.mangaSyncId)
+            await manager.syncNow()
+        }
         XCTAssertEqual(manager.lastErrors, [], "sync errors", file: file, line: line)
     }
 
