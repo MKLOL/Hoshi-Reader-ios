@@ -198,6 +198,7 @@ private struct StreakSections: View {
 
 private struct BookReadingRow: View {
     let item: BookReadingSummary
+    @Environment(\.dynamicTypeSize) private var typeSize
     var body: some View {
         let last = item.days.last { $0.seconds > 0 }?.date
         let details = [item.pages > 0 ? StatisticsFormat.count(item.pages, "page read", "pages read") : nil,
@@ -205,7 +206,8 @@ private struct BookReadingRow: View {
                        last.map { "Last read \(StatisticsFormat.date($0))" },
                        item.book.folder == nil ? "Not on this device" : nil].compactMap { $0 }
         HStack(spacing: 12) {
-            StatisticsBookCover(book: item.book, width: 40)
+            // At accessibility sizes the title and figures need the cover's width more than it does.
+            if !typeSize.isAccessibilitySize { StatisticsBookCover(book: item.book, width: 40) }
             StatisticsSummaryRow(title: item.book.title ?? "Untitled", subtitle: details.joined(separator: " · "), value: StatisticsMath.readingTime(item.seconds))
         }
     }
@@ -234,6 +236,7 @@ struct BookStatisticsDetailView: View {
     let bookId: UUID
     @State private var model = StatisticsOverview()
     @State private var showAllHistory = false
+    @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     private var item: BookReadingSummary? { model.books.first { $0.id == bookId } }
@@ -244,7 +247,7 @@ struct BookStatisticsDetailView: View {
                 let read = days.filter { $0.seconds > 0 }
                 Section {
                     HStack(spacing: 14) {
-                        StatisticsBookCover(book: item.book, width: 56)
+                        if !typeSize.isAccessibilitySize { StatisticsBookCover(book: item.book, width: 56) }
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Reading time").font(.subheadline).foregroundStyle(.secondary)
                             Text(StatisticsMath.readingTime(item.seconds)).font(.largeTitle.weight(.semibold)).monospacedDigit()
