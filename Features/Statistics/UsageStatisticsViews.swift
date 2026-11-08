@@ -7,7 +7,6 @@ struct UsageTodaySection: View {
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    private func time(_ date: Date) -> String { StatisticsZone.display(date, dateStyle: .none, timeStyle: .short) }
     private var isEmpty: Bool {
         reading.seconds == 0 && usage.spans.isEmpty && usage.lookups == 0 && usage.pages == 0
             && usage.revealed == 0 && usage.translated == 0 && usage.screenshots == 0
@@ -23,122 +22,198 @@ struct UsageTodaySection: View {
 
     var body: some View {
         Section {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(StatisticsZone.display(usage.date, dateStyle: .full)
-                     + (usage.firstActivity.flatMap { first in usage.lastActivity.map { " · Active \(time(first))–\(time($0))" } } ?? ""))
-                    .font(.subheadline).foregroundStyle(.secondary)
-                Text("Reading time").font(.subheadline).foregroundStyle(.secondary).padding(.top, 6)
-                Text(StatisticsMath.duration(reading.seconds)).font(.largeTitle.weight(.semibold)).monospacedDigit()
-                if reading.characters > 0 {
-                    Text("\(reading.characters.formatted()) characters read").font(.subheadline).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(StatisticsFormat.longDay(usage.date)).font(.subheadline.weight(.semibold))
+                if let first = usage.firstActivity, let last = usage.lastActivity {
+                    Text("Active \(StatisticsFormat.timeRange(first, last))").font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                }
+                if reading.seconds > 0 || reading.characters > 0 {
+                    Text("Reading time").font(.subheadline).foregroundStyle(.secondary).padding(.top, 10)
+                    Text(StatisticsMath.readingTime(reading.seconds)).font(.largeTitle.weight(.semibold)).monospacedDigit()
+                    if reading.characters > 0 {
+                        Text("\(reading.characters.formatted()) characters read").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                } else if isEmpty {
+                    Text("Nothing read yet today. Open a book and today's reading shows up here.")
+                        .foregroundStyle(.secondary).padding(.top, 8)
                 }
             }
+            .padding(.vertical, 4)
             .accessibilityElement(children: .combine)
-            if isEmpty {
-                Text("Nothing read yet today. Open a book and today's reading shows up here.").foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: typeSize.isAccessibilitySize ? 2 : 3),
+            if !isEmpty {
+                // One count per line at accessibility sizes, so labels are never cut mid-word.
+                let tile = typeSize.isAccessibilitySize ? AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: typeSize.isAccessibilitySize ? 1 : 3),
                           alignment: .leading, spacing: 14) {
                     ForEach(tiles, id: \.0) { label, value in
-                        VStack(alignment: .leading, spacing: 2) {
+                        tile {
                             Text(value.formatted()).font(.title3.weight(.semibold)).monospacedDigit()
-                            Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(typeSize.isAccessibilitySize ? nil : 2)
                         }
                         .accessibilityElement(children: .combine)
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 6)
             }
             if !usage.spans.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
+                let colors = StatisticsBookColors(spans: usage.spans)
+                VStack(alignment: .leading, spacing: 10) {
                     Text("Timeline").font(.subheadline.weight(.semibold))
-                    ReadingTimeline(spans: usage.spans, day: usage.date, resetHour: resetHour)
+                    ReadingTimeline(spans: usage.spans, day: usage.date, resetHour: resetHour, colors: colors)
                 }
-                .padding(.vertical, 4)
-                ForEach(usage.spans.suffix(5).reversed()) { span in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("\(time(span.start))–\(time(span.end)) · \(StatisticsMath.duration(span.seconds))").monospacedDigit()
-                        Text(span.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    .accessibilityElement(children: .combine)
+                .padding(.vertical, 6)
+                DisclosureGroup(StatisticsFormat.count(usage.spans.count, "session", "sessions")) {
+                    ForEach(usage.spans.reversed()) { span in ReadingSessionRow(span: span, color: colors.color(span.title)) }
                 }
             }
             if !usage.repeated.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     Text("Looked up more than once").font(.subheadline.weight(.semibold))
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(usage.repeated, id: \.word) { word in
-                                HStack(spacing: 4) {
-                                    Text(word.word)
-                                    Text("×\(word.count)").foregroundStyle(.secondary).monospacedDigit()
-                                }
-                                .padding(.horizontal, 12).padding(.vertical, 5)
-                                .background(Color(.tertiarySystemFill), in: Capsule())
+                    StatisticsFlowLayout {
+                        ForEach(usage.repeated, id: \.word) { word in
+                            HStack(spacing: 4) {
+                                Text(word.word)
+                                Text("×\(word.count)").foregroundStyle(.secondary).monospacedDigit()
                             }
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                            .background(Color(.tertiarySystemFill), in: Capsule())
+                            // One element per chip whose label is the word itself.
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(word.word)
+                            .accessibilityValue("looked up \(word.count) times")
+                            .accessibilityAddTraits(.isStaticText)
                         }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 6)
             }
         } header: {
             Text("Today")
         } footer: {
-            Text("Lookups, bubbles and the timeline include your other devices once they sync over HTTP. Reading activity and looked-up text sync only to your chosen server, and logs stay out of system backups.")
+            if !isEmpty { Text("Lookups, bubbles and the timeline include your other devices once they sync over HTTP.") }
         }
     }
 }
 
-/// When the day's reading happened: sessions on a track spanning at least four hours around them,
-/// clamped to the reading day, with its start, middle and end times below.
+private struct ReadingSessionRow: View {
+    let span: UsageSpan
+    let color: Color
+    @Environment(\.dynamicTypeSize) private var typeSize
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Circle().fill(color).frame(width: 9, height: 9).accessibilityHidden(true)
+            let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 2)) : AnyLayout(HStackLayout(alignment: .firstTextBaseline))
+            layout {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(span.title).lineLimit(1)
+                    Text(StatisticsFormat.timeRange(span.start, span.end))
+                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                        .lineLimit(1).minimumScaleFactor(0.75)
+                }
+                if !typeSize.isAccessibilitySize { Spacer(minLength: 8) }
+                Text(StatisticsMath.readingTime(span.seconds)).font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Minutes read in each hour of the reading day, stacked by book, like Screen Time's day view.
 private struct ReadingTimeline: View {
     let spans: [UsageSpan]
     let day: Date
     let resetHour: Int
+    let colors: StatisticsBookColors
+    @ScaledMetric(relativeTo: .body) private var height = 120
 
-    private var window: ClosedRange<Date> {
-        let calendar = StatisticsZone.calendar
-        let dayStart = ReadingDay.boundary(on: day, resetHour: resetHour, calendar: calendar)
-        let dayEnd = ReadingDay.boundary(on: ReadingDay.shift(day, by: 1, calendar: calendar), resetHour: resetHour, calendar: calendar)
-        let first = spans.map(\.start).min() ?? dayStart, last = spans.map(\.end).max() ?? dayStart
-        var low = max(dayStart, (calendar.dateInterval(of: .hour, for: first)?.start ?? first).addingTimeInterval(-3600))
-        var high = min(dayEnd, (calendar.dateInterval(of: .hour, for: last)?.end ?? last).addingTimeInterval(3600))
-        if high.timeIntervalSince(low) < 4 * 3600 {
-            high = min(dayEnd, low.addingTimeInterval(4 * 3600))
-            low = max(dayStart, high.addingTimeInterval(-4 * 3600))
-        }
-        return low...max(high, low.addingTimeInterval(3600))
+    private struct Slice: Identifiable {
+        let start: Date, end: Date, book: String, low: Double, high: Double, top: Bool
+        var id: String { "\(start.timeIntervalSince1970)|\(book)" }
     }
 
     var body: some View {
-        let window = self.window
-        let length = window.upperBound.timeIntervalSince(window.lowerBound)
-        let middle = window.lowerBound.addingTimeInterval(length / 2)
-        VStack(spacing: 4) {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color(.tertiarySystemFill))
-                    ForEach(spans) { span in
-                        let start = max(0, span.start.timeIntervalSince(window.lowerBound)) / length
-                        let end = min(length, span.end.timeIntervalSince(window.lowerBound)) / length
-                        RoundedRectangle(cornerRadius: 4).fill(Color.accentColor)
-                            .frame(width: max(4, (end - start) * geometry.size.width))
-                            .offset(x: start * geometry.size.width)
+        let calendar = StatisticsZone.calendar
+        let dayStart = ReadingDay.boundary(on: day, resetHour: resetHour, calendar: calendar)
+        let dayEnd = ReadingDay.boundary(on: ReadingDay.shift(day, by: 1, calendar: calendar), resetHour: resetHour, calendar: calendar)
+        let hours = Array(sequence(first: dayStart) { calendar.date(byAdding: .hour, value: 1, to: $0).flatMap { $0 < dayEnd ? $0 : nil } })
+        let slices = hours.flatMap { start -> [Slice] in
+            let end = min(dayEnd, calendar.date(byAdding: .hour, value: 1, to: start)!)
+            var minutes: [String: Double] = [:]
+            for span in spans {
+                let overlap = min(end, span.end).timeIntervalSince(max(start, span.start))
+                if overlap > 0 { minutes[colors.name(span.title), default: 0] += overlap / 60 }
+            }
+            let books = colors.names.filter { (minutes[$0] ?? 0) > 0 }
+            // A gap between neighbouring hours, as Screen Time draws them.
+            let inset = end.timeIntervalSince(start) * 0.12
+            var result: [Slice] = [], low = 0.0
+            for (index, book) in books.enumerated() {
+                let high = min(60, low + minutes[book]!)
+                result.append(Slice(start: start.addingTimeInterval(inset), end: end.addingTimeInterval(-inset), book: book, low: low, high: high, top: index == books.count - 1))
+                low = high
+            }
+            return result
+        }
+        let totals = colors.names.compactMap { name -> String? in
+            let seconds = spans.filter { colors.name($0.title) == name }.reduce(0.0) { $0 + $1.seconds }
+            return seconds > 0 ? "\(name), \(StatisticsMath.readingTime(seconds))" : nil
+        }
+        let total = StatisticsMath.readingTime(spans.reduce(0.0) { $0 + $1.seconds })
+        let range = StatisticsFormat.timeRange(spans.map(\.start).min() ?? dayStart, spans.map(\.end).max() ?? dayStart)
+        VStack(alignment: .leading, spacing: 10) {
+            chart(slices, from: dayStart, to: dayEnd)
+            StatisticsFlowLayout(spacing: 12) {
+                ForEach(colors.names, id: \.self) { name in
+                    Label {
+                        Text(name)
+                    } icon: {
+                        Circle().fill(colors.color(name)).frame(width: 8, height: 8)
                     }
+                    .labelStyle(StatisticsLegendLabelStyle())
                 }
             }
-            .frame(height: 20)
-            HStack {
-                Text(StatisticsZone.display(window.lowerBound, dateStyle: .none, timeStyle: .short))
-                Spacer()
-                Text(StatisticsZone.display(middle, dateStyle: .none, timeStyle: .short))
-                Spacer()
-                Text(StatisticsZone.display(window.upperBound, dateStyle: .none, timeStyle: .short))
-            }
-            .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+            .font(.caption).foregroundStyle(.secondary)
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Reading timeline from \(StatisticsZone.display(window.lowerBound, dateStyle: .none, timeStyle: .short)) to \(StatisticsZone.display(window.upperBound, dateStyle: .none, timeStyle: .short)), \(spans.count) sessions")
+        .accessibilityLabel("Reading timeline")
+        .accessibilityValue((["\(total) between \(range)"] + totals).joined(separator: "; "))
+    }
+
+    private func chart(_ slices: [Slice], from dayStart: Date, to dayEnd: Date) -> some View {
+        let marks = [0, 6, 12, 18, 24].compactMap { StatisticsZone.calendar.date(byAdding: .hour, value: $0, to: dayStart) }.filter { $0 <= dayEnd }
+        return Chart(slices) { slice in
+            let radius: CGFloat = slice.top ? 3 : 0
+            RectangleMark(xStart: .value("Hour", slice.start), xEnd: .value("Hour end", slice.end),
+                          yStart: .value("Minutes", slice.low), yEnd: .value("Minutes", slice.high))
+                .foregroundStyle(colors.color(slice.book))
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: radius, topTrailingRadius: radius))
+        }
+        .chartXScale(domain: dayStart...dayEnd)
+        .chartYScale(domain: 0...60)
+        .chartXAxis {
+            AxisMarks(values: marks) { value in
+                let date = value.as(Date.self) ?? dayEnd
+                AxisGridLine()
+                // The day's last gridline closes the chart; its hour is already the first label.
+                AxisValueLabel(anchor: .topLeading) { Text(date < dayEnd ? StatisticsFormat.hour(date) : "") }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .trailing, values: [0, 30, 60]) { value in
+                AxisGridLine()
+                AxisValueLabel { Text(Self.minuteTick(value.as(Int.self) ?? 0)) }
+            }
+        }
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .frame(height: min(height, 180))
+    }
+    private static func minuteTick(_ minutes: Int) -> String { minutes == 0 ? "0" : "\(minutes)m" }
+}
+
+struct StatisticsLegendLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 5) { configuration.icon; configuration.title }
     }
 }
 
@@ -151,85 +226,172 @@ struct StatisticsTrendsSections: View {
         if local && usage.firstDay == nil { return [] }
         return ReadingTrends.series(values: values, denominators: denominator, days: days, since: local ? usage.firstDay : nil, resetHour: resetHour, calendar: StatisticsZone.calendar)
     }
+    /// Days whose three-day window revealed a bubble: only they have a rate to draw.
+    private func rated(_ points: [ReadingTrendPoint], by denominator: [Date: Double]) -> Set<Date> {
+        let calendar = StatisticsZone.calendar
+        return Set(points.map(\.date).filter { date in
+            (0..<3).map { ReadingDay.shift(date, by: -$0, calendar: calendar) }
+                .filter { usage.firstDay == nil || $0 >= usage.firstDay! }
+                .contains { (denominator[$0] ?? 0) > 0 }
+        })
+    }
     var body: some View {
-        Section {
-            Picker("Period", selection: $days) {
-                ForEach([14, 30, 90], id: \.self) { Text("\($0) days").tag($0) }
-            }.pickerStyle(.segmented)
+        Picker("Period", selection: $days) {
+            ForEach([14, 30, 90], id: \.self) { Text("\($0) days").tag($0) }
         }
-        ReadingTrendChart(title: "Reading time (minutes)", points: series(Dictionary(uniqueKeysWithValues: reading.map { ($0.date, $0.seconds / 60) })),
-                          format: { StatisticsMath.duration($0 * 60) }, tick: { "\(Int($0))m" })
-        ReadingTrendChart(title: "Characters read", points: series(Dictionary(uniqueKeysWithValues: reading.map { ($0.date, Double($0.characters)) })))
-        ReadingTrendChart(title: "Words looked up", points: series(usage.values(\.lookups), local: true), since: usage.firstDay)
+        .pickerStyle(.segmented)
+        .listRowBackground(Color.clear).listRowInsets(EdgeInsets()).listRowSeparator(.hidden)
+        let since = usage.firstDay.map { "Recorded since \(StatisticsFormat.date($0))" }
+        let perBubble = usage.firstDay.map { "Per revealed manga bubble, since \(StatisticsFormat.date($0))" }
+        let rate: (Double) -> String = { $0.formatted(.number.precision(.fractionLength(0...2))) }
+        ReadingTrendChart(title: "Daily reading time", points: series(Dictionary(uniqueKeysWithValues: reading.map { ($0.date, $0.seconds / 60) })),
+                          empty: "No reading in the last \(days) days.",
+                          format: { StatisticsMath.readingTime($0 * 60) }, tick: { $0 == 0 ? "0" : StatisticsMath.readingTime($0 * 60) })
+        ReadingTrendChart(title: "Characters read", points: series(Dictionary(uniqueKeysWithValues: reading.map { ($0.date, Double($0.characters)) })),
+                          empty: "No characters read in the last \(days) days.")
+        ReadingTrendChart(title: "Words looked up", subtitle: since, points: series(usage.values(\.lookups), local: true),
+                          empty: usage.firstDay == nil ? "No reading log yet." : "No words looked up in the last \(days) days.")
         // Manga charts only once manga bubbles were revealed or translated.
-        if usage.values(\.revealed).values.contains(where: { $0 > 0 }) || usage.values(\.translated).values.contains(where: { $0 > 0 }) {
-            ReadingTrendChart(title: "Lookups per manga bubble", points: series(usage.values(\.mangaLookups), denominator: usage.values(\.revealed), local: true),
-                              since: usage.firstDay, format: { $0.formatted(.number.precision(.fractionLength(2))) })
-            ReadingTrendChart(title: "Translations pressed", points: series(usage.values(\.translated).merging(usage.values(\.screenshots), uniquingKeysWith: +), local: true),
-                              since: usage.firstDay)
-            ReadingTrendChart(title: "Translations per manga bubble", points: series(usage.values(\.translated), denominator: usage.values(\.revealed), local: true),
-                              since: usage.firstDay, format: { $0.formatted(.number.precision(.fractionLength(2))) })
+        let revealed = usage.values(\.revealed)
+        if revealed.values.contains(where: { $0 > 0 }) || usage.values(\.translated).values.contains(where: { $0 > 0 }) {
+            let lookups = series(usage.values(\.mangaLookups), denominator: revealed, local: true)
+            ReadingTrendChart(title: "Words looked up per bubble", subtitle: perBubble, points: lookups, rated: rated(lookups, by: revealed),
+                              empty: "No bubbles revealed in the last \(days) days.", format: rate, tick: rate)
+            ReadingTrendChart(title: "Translations pressed", subtitle: since,
+                              points: series(usage.values(\.translated).merging(usage.values(\.screenshots), uniquingKeysWith: +), local: true),
+                              empty: "No translations in the last \(days) days.")
+            let translations = series(usage.values(\.translated), denominator: revealed, local: true)
+            ReadingTrendChart(title: "Translations pressed per bubble", subtitle: perBubble, points: translations, rated: rated(translations, by: revealed),
+                              empty: "No bubbles revealed in the last \(days) days.", format: rate, tick: rate)
         }
     }
 }
 
 private struct ReadingTrendChart: View {
     let title: String
+    var subtitle: String? = nil
     let points: [ReadingTrendPoint]
-    var since: Date? = nil
+    /// For rates: the days that have one. A day without bubbles is a gap, not a zero.
+    var rated: Set<Date>? = nil
+    var empty = "Nothing recorded yet."
     var format: (Double) -> String = { $0.formatted(.number.precision(.fractionLength(0...1))) }
     var tick: (Double) -> String = { $0.formatted(.number.notation(.compactName)) }
     @State private var selected: Date?
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @ScaledMetric(relativeTo: .body) private var height = 170
+
+    private func hasRate(_ point: ReadingTrendPoint) -> Bool { rated?.contains(point.date) ?? true }
+    private func middle(_ date: Date) -> Date { date.addingTimeInterval(12 * 3600) }
     /// The selected day, else the latest one: the readout is always there, as on Android.
     private var point: ReadingTrendPoint? {
-        selected.flatMap { date in points.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) } } ?? points.last
+        selected.flatMap { date in points.min { abs(middle($0.date).timeIntervalSince(date)) < abs(middle($1.date).timeIntervalSince(date)) } } ?? points.last
     }
-    /// A round axis top with gridlines at its half.
-    private var top: Double {
-        let largest = points.map { max($0.value, $0.average) }.max() ?? 0
-        guard largest > 0 else { return 2 }
-        let raw = largest / 2, magnitude = pow(10, floor(log10(raw)))
-        let step = [1, 2, 2.5, 5, 10].map { $0 * magnitude }.first { $0 >= raw } ?? raw
-        return ceil(largest / step) * step
+    /// Consecutive days with a value, each drawn as its own line.
+    private var runs: [(run: Int, point: ReadingTrendPoint)] {
+        var run = 0, previous = true
+        return points.compactMap { point in
+            let has = hasRate(point)
+            if has && !previous { run += 1 }
+            previous = has
+            return has ? (run, point) : nil
+        }
     }
     var body: some View {
         Section {
-            if points.isEmpty { Text("No reading log yet.").foregroundStyle(.secondary) }
-            else {
-                if let point {
-                    Text("\(point.date.formatted(.dateTime.month(.abbreviated).day())) · \(format(point.value)) · 3-day average \(format(point.average))")
-                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
-                }
-                let top = self.top
-                Chart(points) { day in
-                    BarMark(x: .value("Day", day.date, unit: .day), y: .value("Daily", day.value))
-                        .cornerRadius(3)
-                        .foregroundStyle(Color.accentColor.opacity(day.date == point?.date ? 0.65 : 0.3))
-                    LineMark(x: .value("Day", day.date, unit: .day), y: .value("3-day average", day.average))
-                        .foregroundStyle(Color.accentColor)
-                        .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                        .interpolationMethod(.monotone)
-                }
-                .chartYScale(domain: 0...top)
-                .chartYAxis {
-                    AxisMarks(position: .leading, values: [0, top / 2, top]) { value in
-                        AxisGridLine()
-                        AxisValueLabel { Text(tick(value.as(Double.self) ?? 0)) }
+            if points.allSatisfy({ $0.value == 0 && (!hasRate($0) || $0.average == 0) }) {
+                Text(empty).foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let point { readout(point) }
+                    chart
+                    StatisticsFlowLayout(spacing: 16) {
+                        Label { Text("Daily") } icon: { RoundedRectangle(cornerRadius: 2).fill(barColor).frame(width: 10, height: 10) }
+                        Label { Text("3-day average") } icon: { Capsule().fill(Color.accentColor).frame(width: 14, height: 3) }
                     }
+                    .labelStyle(StatisticsLegendLabelStyle())
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 }
-                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisValueLabel(format: .dateTime.month(.abbreviated).day()) } }
-                .chartXSelection(value: $selected)
-                .frame(height: 170)
-                HStack(spacing: 14) {
-                    Label { Text("Daily") } icon: { RoundedRectangle(cornerRadius: 2).fill(Color.accentColor.opacity(0.3)).frame(width: 12, height: 12) }
-                    Label { Text("3-day average") } icon: { Capsule().fill(Color.accentColor).frame(width: 14, height: 3) }
-                }
-                .font(.caption).foregroundStyle(.secondary)
+                .padding(.vertical, 6)
             }
         } header: {
             Text(title)
         } footer: {
-            if let since { Text("Recorded since \(StatisticsZone.display(since))") }
+            if let subtitle { Text(subtitle) }
         }
+    }
+
+    private var barColor: Color { Color.accentColor.opacity(colorScheme == .dark ? 0.5 : 0.35) }
+
+    private func readout(_ point: ReadingTrendPoint) -> some View {
+        let has = hasRate(point)
+        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout(alignment: .bottom))
+        return layout {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(StatisticsFormat.weekdayDay(point.date)).font(.subheadline).foregroundStyle(.secondary)
+                Text(has || point.value > 0 ? format(point.value) : "–").font(.title2.weight(.semibold)).monospacedDigit()
+            }
+            if !typeSize.isAccessibilitySize { Spacer(minLength: 12) }
+            VStack(alignment: typeSize.isAccessibilitySize ? .leading : .trailing, spacing: 2) {
+                Text("3-day average").font(.subheadline).foregroundStyle(.secondary)
+                Text(has ? format(point.average) : "–").font(.title3.weight(.semibold)).monospacedDigit().foregroundStyle(Color.accentColor)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var chart: some View {
+        let calendar = StatisticsZone.calendar
+        let top = StatisticsMath.axisTop(points.map { max($0.value, hasRate($0) ? $0.average : 0) }.max() ?? 0)
+        // Ticks at chosen days' middles, labelled in the statistics zone, not the device's.
+        let stride = max(1, Int((Double(points.count) / (typeSize.isAccessibilitySize ? 2 : 4)).rounded(.up)))
+        let ticks = points.isEmpty ? [] : Swift.stride(from: max(0, points.count - 1 - stride / 2), through: 0, by: -stride).map { middle(points[$0].date) }
+        let selectedDate = point?.date
+        return Chart {
+            ForEach(points) { day in
+                let next = ReadingDay.shift(day.date, by: 1, calendar: calendar)
+                let inset = next.timeIntervalSince(day.date) * 0.12
+                RectangleMark(xStart: .value("Day", day.date.addingTimeInterval(inset)), xEnd: .value("Day end", next.addingTimeInterval(-inset)),
+                              yStart: .value("Daily", 0.0), yEnd: .value("Daily", day.value))
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: 2, topTrailingRadius: 2))
+                    .foregroundStyle(day.date == selectedDate ? Color.accentColor.opacity(0.8) : barColor)
+                    .accessibilityLabel(StatisticsFormat.weekdayDay(day.date))
+                    .accessibilityValue(hasRate(day) || day.value > 0 ? format(day.value) : "no bubbles")
+            }
+            ForEach(runs, id: \.point.id) { run, day in
+                LineMark(x: .value("Day", middle(day.date)), y: .value("3-day average", day.average), series: .value("Run", run))
+                    .foregroundStyle(Color.accentColor)
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .accessibilityHidden(true)
+            }
+            if let point, hasRate(point) {
+                PointMark(x: .value("Day", middle(point.date)), y: .value("3-day average", point.average))
+                    .symbolSize(40)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
+            }
+        }
+        .chartXScale(domain: (points.first?.date ?? .now)...(points.last.map { ReadingDay.shift($0.date, by: 1, calendar: calendar) } ?? .now))
+        .chartYScale(domain: 0...top)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0, top / 2, top]) { value in
+                AxisGridLine()
+                AxisValueLabel { Text(tick(value.as(Double.self) ?? 0)) }
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: ticks) { value in
+                AxisTick()
+                AxisValueLabel(anchor: .top, collisionResolution: .greedy) { Text(value.as(Date.self).map(StatisticsFormat.day) ?? "") }
+            }
+        }
+        .chartXSelection(value: $selected)
+        // A tap selects a day; a drag stays free to scroll the list.
+        .chartGesture { proxy in SpatialTapGesture().onEnded { proxy.selectXValue(at: $0.location.x) } }
+        .sensoryFeedback(.selection, trigger: selectedDate)
+        // Axis labels stop growing before they crowd out the plot; the readout above carries large text.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .frame(height: min(height, 260))
     }
 }

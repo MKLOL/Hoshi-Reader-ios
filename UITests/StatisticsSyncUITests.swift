@@ -17,7 +17,7 @@ final class StatisticsSyncUITests: XCTestCase {
         XCTAssertTrue(hour.waitForExistence(timeout: 5), app.debugDescription)
         hour.tap()
         XCTAssertTrue(reset.label.contains("4:00") || (reset.value as? String)?.contains("4:00") == true, reset.debugDescription)
-        XCTAssertTrue(app.buttons["statistics-time-zone"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["statistics-time-zone"].exists)
         capture(app, "statistics-streak-settings")
         let history = app.staticTexts["Retained reading history"].firstMatch
         for _ in 0..<12 { if history.isHittable { break }; app.swipeUp() }
@@ -38,7 +38,7 @@ final class StatisticsSyncUITests: XCTestCase {
         for _ in 0..<12 { if trends.isHittable { break }; app.swipeDown() }
         XCTAssertTrue(trends.isHittable, app.debugDescription)
         trends.tap()
-        XCTAssertTrue(app.staticTexts["Reading time (minutes)"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Daily reading time"].waitForExistence(timeout: 5))
         capture(app, "statistics-trends")
     }
     @MainActor private func capture(_ app: XCUIApplication, _ name: String) {

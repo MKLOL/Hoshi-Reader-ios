@@ -106,7 +106,7 @@ final class ZoomPopupUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Statistics"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Today"].firstMatch.waitForExistence(timeout: 5))
         app.buttons["Trends"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Reading time (minutes)"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Daily reading time"].firstMatch.waitForExistence(timeout: 5))
         saveScreenshot(app, name: "statistics-trends")
     }
 
