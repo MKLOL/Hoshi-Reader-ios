@@ -43,11 +43,11 @@ nonisolated enum FileNames: Sendable {
 }
 
 struct BookStorage {
+    /// Looked up once: sync asks for it dozens of times on every five-second poll.
+    private static let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+
     static func getAppDirectory() throws -> URL {
-        guard let url = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
+        guard let url = applicationSupport else {
             throw BookStorageError.appDirectoryNotFound
         }
         if !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) {

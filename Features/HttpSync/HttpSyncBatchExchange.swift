@@ -20,6 +20,7 @@ nonisolated struct HttpSyncLocalLibrary: Sendable {
         let metadata: BookMetadata
         let root: URL?
         let bookmark: Bookmark?
+        let bookmarkModified: Date?
         let payloadSha: String?
         let payloadDirty: Bool
     }
@@ -35,9 +36,12 @@ nonisolated struct HttpSyncLocalLibrary: Sendable {
             guard let data = try? Data(contentsOf: folder.appendingPathComponent(FileNames.metadata)),
                   let metadata = try? decoder.decode(BookMetadata.self, from: data) else { continue }
             let root = metadata.folder.map { booksDirectory.appendingPathComponent($0) }
-            let bookmark = root.flatMap { try? Data(contentsOf: $0.appendingPathComponent(FileNames.bookmark)) }
-                .flatMap { try? decoder.decode(Bookmark.self, from: $0) }
-            books.append(Book(metadata: metadata, root: root, bookmark: bookmark,
+            let bookmarkFile = root?.appendingPathComponent(FileNames.bookmark)
+            let bookmark = bookmarkFile.flatMap { try? Data(contentsOf: $0) }.flatMap { try? decoder.decode(Bookmark.self, from: $0) }
+            let bookmarkModified = bookmarkFile.flatMap {
+                (try? FileManager.default.attributesOfItem(atPath: $0.path(percentEncoded: false)))?[.modificationDate] as? Date
+            }
+            books.append(Book(metadata: metadata, root: root, bookmark: bookmark, bookmarkModified: bookmarkModified,
                               payloadSha: root.flatMap { codec.cachedPayloadSha(bookRoot: $0) },
                               payloadDirty: root.map { codec.hasPayloadContentDirty(bookRoot: $0) } ?? false))
         }
@@ -55,7 +59,7 @@ extension Notification.Name {
     static let httpSyncBookmarkApplied = Notification.Name("HttpSyncBookmarkApplied")
 }
 
-nonisolated private struct HttpSyncCachedMapState: Codable, Sendable {
+nonisolated private struct HttpSyncCachedMapState: Codable, Equatable, Sendable {
     var booksEtag: String?
     var books: [String: String]
     var bookmarkEtags: [String: String]
@@ -83,10 +87,60 @@ nonisolated private struct HttpSyncCachedMapState: Codable, Sendable {
     }
 }
 
-nonisolated private struct HttpSyncPendingBookmark: Codable, Sendable {
+nonisolated private struct HttpSyncPendingBookmark: Codable, Equatable, Sendable {
     let key: String
     let mutationId: String
     let bodyBase64: String
+}
+
+/// A JSON file only `HttpSyncBatchState` writes, kept decoded in memory. A read checks only the
+/// file's modification time and size, and saving an unchanged value leaves the file alone, so a
+/// five-second poll that finds nothing new decodes, encodes and writes nothing.
+nonisolated private struct HttpSyncRememberedFile<Value: Codable & Equatable> {
+    private var remembered: (stamp: Date, size: Int, value: Value)?
+
+    private static func stamp(_ url: URL) -> (Date, Int)? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false)),
+              let modified = attributes[.modificationDate] as? Date,
+              let size = (attributes[.size] as? NSNumber)?.intValue else { return nil }
+        return (modified, size)
+    }
+
+    mutating func load(_ url: URL, decoder: JSONDecoder) -> Value? {
+        guard let (modified, size) = Self.stamp(url) else { remembered = nil; return nil }
+        if let remembered, remembered.stamp == modified, remembered.size == size { return remembered.value }
+        let value = (try? Data(contentsOf: url)).flatMap { try? decoder.decode(Value.self, from: $0) }
+        remembered = value.map { (modified, size, $0) }
+        return value
+    }
+
+    mutating func save(_ value: Value, to url: URL, encoder: JSONEncoder) {
+        if let remembered, remembered.value == value, let current = Self.stamp(url),
+           current.0 == remembered.stamp, current.1 == remembered.size { return }
+        guard let data = try? encoder.encode(value) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard (try? data.write(to: url, options: .atomic)) != nil, let (modified, size) = Self.stamp(url) else {
+            remembered = nil; return
+        }
+        remembered = (modified, size, value)
+    }
+}
+
+/// The listing indexed off the main thread: a large library lists hundreds of keys every poll.
+nonisolated struct HttpSyncListedKeys: Sendable {
+    var all: [String: HttpSyncKvKeyMeta] = [:]
+    var legacyEtags: [String: String] = [:]
+    var bookmarkMaps: [HttpSyncKvKeyMeta] = []
+
+    @concurrent static func index(_ listing: HttpSyncKvList) async -> HttpSyncListedKeys {
+        var keys = HttpSyncListedKeys()
+        for meta in listing.keys {
+            keys.all[meta.key] = meta
+            if httpNeedsFullReconcile(meta.key), let etag = meta.etag { keys.legacyEtags[meta.key] = etag }
+            if meta.key == httpSyncBookmarksMapKey || meta.key.hasPrefix(httpSyncBookmarksMapPrefix) { keys.bookmarkMaps.append(meta) }
+        }
+        return keys
+    }
 }
 
 nonisolated struct HttpSyncMapChanges: Sendable {
@@ -115,6 +169,11 @@ final class HttpSyncBatchState {
         return value
     }()
     private let decoder = JSONDecoder()
+    private var stateFile = HttpSyncRememberedFile<HttpSyncCachedMapState>()
+    private var pendingFile = HttpSyncRememberedFile<[HttpSyncPendingBookmark]>()
+    /// Each book's map entry with the bookmark and revision it was computed from. Encoding and
+    /// hashing every book's bookmark on every poll was a visible part of its main-thread time.
+    private var bookmarkEntries: [String: (bookmark: Bookmark, rev: Int, entry: HttpSyncBookmarkMapEntry)] = [:]
     private var operationBusy = false
     private var operationWaiters: [CheckedContinuation<Void, Never>] = []
     private lazy var installationId: String =
@@ -231,23 +290,16 @@ final class HttpSyncBatchState {
 
     private func syncMapsLocked(transport: HttpSyncKvTransport) async throws -> HttpSyncMapChanges {
         let before = loadState()
-        let listing = try await listAllMetadata(transport: transport)
-        let legacyPairs: [(String, String)] = listing.keys.compactMap { meta -> (String, String)? in
-            guard httpNeedsFullReconcile(meta.key), let etag = meta.etag else { return nil }
-            return (meta.key, etag)
-        }
-        let legacyKeyEtags = Dictionary(uniqueKeysWithValues: legacyPairs)
-        let statisticsMetadata = Dictionary(uniqueKeysWithValues: listing.keys.map { ($0.key, $0) })
-        guard let booksMeta = listing.keys.first(where: { $0.key == httpSyncBooksMapKey }) else {
+        let listing = await HttpSyncListedKeys.index(try await listAllMetadata(transport: transport))
+        let legacyKeyEtags = listing.legacyEtags, statisticsMetadata = listing.all
+        guard let booksMeta = listing.all[httpSyncBooksMapKey] else {
             return HttpSyncMapChanges(
                 needsBootstrap: true,
                 observedLegacyEtags: legacyKeyEtags,
                 statisticsMetadata: statisticsMetadata
             )
         }
-        let bookmarkMetas = listing.keys.filter {
-            $0.key == httpSyncBookmarksMapKey || $0.key.hasPrefix(httpSyncBookmarksMapPrefix)
-        }
+        let bookmarkMetas = listing.bookmarkMaps
         guard !bookmarkMetas.isEmpty else {
             return HttpSyncMapChanges(
                 needsBootstrap: true,
@@ -466,14 +518,19 @@ final class HttpSyncBatchState {
         var result: [String: HttpSyncBookmarkMapEntry] = [:]
         for (book, bookmark) in books {
             guard let id = syncId(for: book), book.folder != nil, let bookmark else { continue }
-            var blob = bookmark.toBlob()
-            blob.rev = revisions[SyncKeys.bookmark(id)]?.localRev ?? 0
-            guard let body = try? encoder.encode(blob) else { continue }
-            result[id] = HttpSyncBookmarkMapEntry(
-                etag: sha256Etag(body), lastModified: blob.lastModified, value: blob
-            )
+            result[id] = bookmarkEntry(id: id, bookmark: bookmark, rev: revisions[SyncKeys.bookmark(id)]?.localRev ?? 0)
         }
         return result
+    }
+
+    private func bookmarkEntry(id: String, bookmark: Bookmark, rev: Int) -> HttpSyncBookmarkMapEntry? {
+        if let known = bookmarkEntries[id], known.bookmark == bookmark, known.rev == rev { return known.entry }
+        var blob = bookmark.toBlob()
+        blob.rev = rev
+        guard let body = try? encoder.encode(blob) else { return nil }
+        let entry = HttpSyncBookmarkMapEntry(etag: sha256Etag(body), lastModified: blob.lastModified, value: blob)
+        bookmarkEntries[id] = (bookmark, rev, entry)
+        return entry
     }
 
     private func applyRemoteWinners(
@@ -482,24 +539,26 @@ final class HttpSyncBatchState {
         books localBooks: [BookMetadata]
     ) throws -> Int {
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return 0 }
-        let roots: [String: URL] = Dictionary(uniqueKeysWithValues: localBooks.compactMap { book -> (String, URL)? in
+        // A root is built only for the rare position that may win; every poll checks them all.
+        let folders: [String: String] = Dictionary(localBooks.compactMap { book -> (String, String)? in
             guard let id = syncId(for: book), let folder = book.folder else { return nil }
-            return (id, booksDir.appendingPathComponent(folder))
-        })
+            return (id, folder)
+        }, uniquingKeysWith: { first, _ in first })
         var applied = 0
         for (id, entry) in remote {
             if let localEntry = local[id], compareEntries(entry, localEntry) <= 0 { continue }
-            guard let blob = entry.value, blob.isValid, let root = roots[id], let date = parseRfc3339(blob.lastModified) else { continue }
-            if let current = BookStorage.loadBookmark(root: root) {
-                var currentBlob = current.toBlob()
-                currentBlob.rev = HttpSyncRevisionStore.current(SyncKeys.bookmark(id)).localRev
-                if let body = try? encoder.encode(currentBlob) {
-                    let currentEntry = HttpSyncBookmarkMapEntry(
-                        etag: sha256Etag(body),
-                        lastModified: currentBlob.lastModified,
-                        value: currentBlob
-                    )
-                    guard compareEntries(entry, currentEntry) > 0 else { continue }
+            guard let blob = entry.value, blob.isValid, let folder = folders[id], let date = parseRfc3339(blob.lastModified) else { continue }
+            let root = booksDir.appendingPathComponent(folder)
+            if let current = BookStorage.loadBookmark(root: root),
+               let currentEntry = bookmarkEntry(id: id, bookmark: current, rev: HttpSyncRevisionStore.current(SyncKeys.bookmark(id)).localRev) {
+                guard compareEntries(entry, currentEntry) > 0 else { continue }
+                // Another client's encoder gives the same position a different ETag, which can win
+                // the tie-break. Rewriting the bookmark then repeated on every poll, rewriting files
+                // and announcing a move that never happened; only its revision is new.
+                if let local = currentEntry.value, local.chapterIndex == blob.chapterIndex, local.progress == blob.progress,
+                   local.characterCount == blob.characterCount, compareRfc3339(local.lastModified, blob.lastModified) == 0 {
+                    HttpSyncRevisionStore.noteRemote(SyncKeys.bookmark(id), rev: blob.rev, appliedLocally: true)
+                    continue
                 }
             }
             let previous = BookStorage.loadBookmark(root: root)
@@ -559,25 +618,21 @@ final class HttpSyncBatchState {
     }
 
     private func loadState() -> HttpSyncCachedMapState {
-        guard let url = fileURL(cacheFilename), let data = try? Data(contentsOf: url) else {
-            return HttpSyncCachedMapState()
-        }
-        return (try? decoder.decode(HttpSyncCachedMapState.self, from: data)) ?? HttpSyncCachedMapState()
+        fileURL(cacheFilename).flatMap { stateFile.load($0, decoder: decoder) } ?? HttpSyncCachedMapState()
     }
 
     private func saveState(_ state: HttpSyncCachedMapState) {
-        guard let url = fileURL(cacheFilename), let data = try? encoder.encode(state) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let url = fileURL(cacheFilename) else { return }
+        stateFile.save(state, to: url, encoder: encoder)
     }
 
     private func loadPending() -> [HttpSyncPendingBookmark] {
-        guard let url = fileURL(pendingFilename), let data = try? Data(contentsOf: url) else { return [] }
-        return (try? decoder.decode([HttpSyncPendingBookmark].self, from: data)) ?? []
+        fileURL(pendingFilename).flatMap { pendingFile.load($0, decoder: decoder) } ?? []
     }
 
     private func savePending(_ pending: [HttpSyncPendingBookmark]) {
-        guard let url = fileURL(pendingFilename), let data = try? encoder.encode(pending) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let url = fileURL(pendingFilename) else { return }
+        pendingFile.save(pending, to: url, encoder: encoder)
     }
 
     private func deviceId() -> String {
@@ -602,13 +657,11 @@ final class HttpSyncBatchState {
     }
 
     private func fileURL(_ name: String) -> URL? {
-        guard let directory = try? BookStorage.getBooksDirectory() else { return nil }
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(name)
+        (try? BookStorage.getBooksDirectory())?.appendingPathComponent(name)
     }
 
     private func sha256Etag(_ data: Data) -> String {
-        "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        "sha256:" + SHA256.hash(data: data).lowercaseHex
     }
 
     private func bookmarkMapKey(_ deviceId: String) -> String {

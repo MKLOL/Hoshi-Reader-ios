@@ -7,20 +7,26 @@ import Foundation
 final class HttpReadingPositionLane {
     static let shared = HttpReadingPositionLane(store: .shared)
     struct Outcome { var moved: Set<String> = []; var published: Set<String> = []; var errors: [String] = [] }
-    private struct Index: Codable {
+    private struct Index: Codable, Equatable {
         var applied: [String: String] = [:]
         var published: [String: String] = [:]
         var unusable: [String: String] = [:]
+        /// Each book's bookmark file modification time when its position was last observed. Only
+        /// a bookmark changed since then can hold a local move to record, so the five-second poll
+        /// does not read every book's files, including on its first pass after launch.
+        var observed: [String: Date]?
     }
+    /// A different account/server cannot reuse another server's ETag acknowledgements.
+    private struct Scoped: Codable { var scope: String; var index: Index }
     private struct Failure { var etag: String; var retryAt: Date; var pause: Double }
     private let store: ReadingPositionRepository
     private var failures: [String: Failure] = [:]
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var currentScope: String?
-    /// Each book's bookmark file as last observed. Only a bookmark changed since then can hold a
-    /// local move to record, so the five-second poll does not read every book's files.
-    private var observedBookmarks: [String: Date] = [:]
+    /// The sync index file as last read or written, so an unchanged index is neither decoded nor
+    /// rewritten on every poll.
+    private var indexFile: (data: Data, scoped: Scoped)?
     init(store: ReadingPositionRepository) { self.store = store }
 
     func run(transport: HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String,
@@ -28,28 +34,32 @@ final class HttpReadingPositionLane {
         if busy { await withCheckedContinuation { waiters.append($0) } } else { busy = true }
         defer { if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() } }
         guard stillCurrent(), !Task.isCancelled else { return Outcome() }
-        var roots: [String: URL] = [:]
+        var roots: [String: URL] = [:], stamps: [String: Date] = [:]
         if let directory = try? BookStorage.getBooksDirectory() {
             // Read off the main thread: this runs on every five-second foreground poll.
             for book in await HttpSyncLocalLibrary.scan(booksDirectory: directory).books {
                 guard let id = syncId(for: book.metadata), let root = book.root else { continue }
                 roots[id] = root
+                stamps[id] = book.bookmarkModified
             }
             guard stillCurrent(), !Task.isCancelled else { return Outcome() }
         }
-        return await exchange(transport: transport, listing: listing, roots: roots, scope: scope, stillCurrent: stillCurrent)
+        return await exchange(transport: transport, listing: listing, roots: roots, bookmarkStamps: stamps, scope: scope, stillCurrent: stillCurrent)
     }
 
     /// Explicit roots and a separate repository make the actual transport behavior testable.
-    func exchange(transport: HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], roots: [String: URL], scope: String,
+    /// `bookmarkStamps` are the bookmark modification times read with the roots; without them
+    /// each root's bookmark file is checked here.
+    func exchange(transport: HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], roots: [String: URL],
+                  bookmarkStamps: [String: Date]? = nil, scope: String,
                   stillCurrent: @escaping @MainActor () -> Bool = { true }) async -> Outcome {
         let (stored, generation) = store.loadSyncIndex()
-        // A different account/server cannot reuse another server's ETag acknowledgements.
-        struct Scoped: Codable { var scope: String; var index: Index }
-        var index: Index
-        if let stored, let decoded = try? JSONDecoder().decode(Scoped.self, from: stored), decoded.scope == scope { index = decoded.index }
-        else { index = Index() }
-        if currentScope != scope { failures = [:]; observedBookmarks = [:]; currentScope = scope }
+        if let stored, indexFile?.data != stored {
+            indexFile = (try? JSONDecoder().decode(Scoped.self, from: stored)).map { (stored, $0) }
+        }
+        var index = stored != nil && indexFile?.scoped.scope == scope ? indexFile!.scoped.index : Index()
+        var saved = index
+        if currentScope != scope { failures = [:]; currentScope = scope }
         var outcome = Outcome(), reads = 0
         defer {
             // A later cancellation still notifies for durable commits already applied. One
@@ -61,19 +71,25 @@ final class HttpReadingPositionLane {
         func modified(_ root: URL) -> Date? {
             (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent(FileNames.bookmark).path(percentEncoded: false)))?[.modificationDate] as? Date
         }
+        var observed: [String: Date] = [:]
         for (bookId, root) in roots {
-            if let stamp = modified(root), observedBookmarks[bookId] == stamp { continue }
+            // A book without a bookmark yet is remembered as such, so it is not read every poll either.
+            let stamp = (bookmarkStamps.map { $0[bookId] } ?? modified(root)) ?? .distantPast
+            if index.observed?[bookId] == stamp { observed[bookId] = stamp; continue }
             let before = BookStorage.loadBookmark(root: root).map(ReadingPosition.init)
             store.observe(bookId: bookId, root: root)
             let after = BookStorage.loadBookmark(root: root).map(ReadingPosition.init)
             if let after, before == nil || !after.samePlace(as: before!) { outcome.moved.insert(bookId) }
-            observedBookmarks[bookId] = modified(root)
+            observed[bookId] = modified(root) ?? .distantPast
         }
+        index.observed = observed.isEmpty ? nil : observed
         let device = store.device.id
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         func checkpoint() {
-            guard stillCurrent(), let data = try? encoder.encode(Scoped(scope: scope, index: index)) else { return }
+            guard stillCurrent(), index != saved, let data = try? encoder.encode(Scoped(scope: scope, index: index)) else { return }
             store.saveSyncIndex(data, generation: generation)
+            saved = index
+            indexFile = (data, Scoped(scope: scope, index: index))
         }
         func stamp(_ meta: HttpSyncKvKeyMeta) -> String {
             meta.etag ?? "stamp:\(meta.lastModified):\(meta.size ?? -1)"

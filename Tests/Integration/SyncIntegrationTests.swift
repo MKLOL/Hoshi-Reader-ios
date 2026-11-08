@@ -106,6 +106,35 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         }
     }
 
+    /// Android encodes a bookmark differently, so the same position has another ETag on the
+    /// server, and that ETag can win the tie-break against this device's copy. The position must
+    /// still count as applied: re-applying it rewrote the bookmark and announced a move on every
+    /// five-second poll.
+    @MainActor
+    func testAndroidEncodedBookmarkIsAppliedOnceNotOnEveryPoll() async throws {
+        try await prepare()
+        await syncNow()
+        let transport = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        _ = try await HttpSyncBatchState.shared.syncMaps(transport: transport)
+        let roots = try [Self.mangaSyncId, Self.novelSyncId].map { try book($0).root.appendingPathComponent(FileNames.bookmark) }
+        func written() throws -> [Date?] { try roots.map { try $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate } }
+        let before = try written()
+        var announced: [String] = []
+        let observer = NotificationCenter.default.addObserver(forName: .httpSyncBookmarkApplied, object: nil, queue: nil) { note in
+            let id = note.userInfo?["syncId"] as? String ?? "?"
+            MainActor.assumeIsolated { announced.append(id) }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        try await clearServerRequests()
+        for _ in 0..<3 { _ = try await HttpSyncBatchState.shared.syncMaps(transport: transport) }
+
+        XCTAssertEqual(announced, [], "an unchanged position was announced as moved")
+        XCTAssertEqual(try written(), before, "an unchanged position was rewritten")
+        let requests = try await serverRequests()
+        XCTAssertEqual(requests.filter { $0.method != "GET" }.map(\.path), [], "an unchanged position was uploaded")
+        XCTAssertEqual(BookStorage.loadBookmark(root: try book(Self.mangaSyncId).root)?.chapterIndex, 2, "still at Android's page")
+    }
+
     @MainActor
     func testBookmarkTurnedOnThisDeviceSurvivesAFreshInstall() async throws {
         try await prepare()
@@ -398,50 +427,99 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
     }
 
     /// The five-second foreground poll runs while someone scrolls the shelf. With a large, already
-    /// synchronized library it must never hold the main thread long enough to drop frames; a
-    /// main-actor heartbeat measures the longest stall across several real polls.
+    /// synchronized library it must never hold the main thread long enough to drop a frame; a
+    /// main-actor heartbeat measures the longest uninterrupted main-thread work across several
+    /// real polls, including the first. A poll that finds nothing new must not rewrite any file.
     @MainActor func testForegroundPollNeverStallsTheMainThreadWithALargeLibrary() async throws {
         try await prepare()
         await syncNow()
         let manga = try book(Self.mangaSyncId)
         let books = try BookStorage.getBooksDirectory()
+        // Weeks of reading on this device and another per book, as a real library has.
+        let device = ReadingDevice.current, days = DateFormatter()
+        days.locale = Locale(identifier: "en_US_POSIX"); days.dateFormat = "yyyy-MM-dd"
         for index in 0..<80 {
-            let id = "large_library_\(index)"
+            let id = "large_library_\(index)", title = "Large Library \(index)"
             let folder = books.appendingPathComponent(id, isDirectory: true)
             try FileManager.default.copyItem(at: manga.root, to: folder)
-            let metadata = BookMetadata(id: UUID(), title: "Large Library \(index)", cover: nil, folder: id, lastAccess: Date(),
+            let metadata = BookMetadata(id: UUID(), title: title, cover: nil, folder: id, lastAccess: Date(),
                                         contentType: .mokuro, importedAt: manga.metadata.importedAt, syncId: id)
             try BookStorage.save(metadata, inside: folder, as: FileNames.metadata)
+            let history = (0..<30).map { day in
+                Statistics(title: title, dateKey: days.string(from: Date().addingTimeInterval(Double(-day - index % 7) * 86_400)),
+                           charactersRead: 900 + day, readingTime: 600, minReadingSpeed: 0, altMinReadingSpeed: 0, lastReadingSpeed: 0,
+                           maxReadingSpeed: 0, lastStatisticModified: 1_700_000_000_000 + day,
+                           deviceId: day % 3 == 0 ? "other-device" : device.id, deviceName: day % 3 == 0 ? "Other" : device.name,
+                           mangaPageSeconds: [12: 3, 20: 2])
+            }
+            try BookStorage.save(history, inside: folder, as: FileNames.statistics)
         }
         // Publish the library, then confirm a pass finds nothing left to do: the steady state.
         await syncNow(downloadManga: false)
         await syncNow(downloadManga: false)
+        // The shelf draws and makes covers for the 80 books the first pass imported; that one-time
+        // work after an import is not what this test measures.
+        let settling = await mainThreadStalls { try? await Task.sleep(for: .seconds(3)) }
 
-        var longest: TimeInterval = 0, beats = 0
-        var last = ProcessInfo.processInfo.systemUptime
+        let support = try BookStorage.getAppDirectory()
+        func modificationTimes() -> [String: Date] {
+            var times: [String: Date] = [:]
+            let files = FileManager.default.enumerator(at: support, includingPropertiesForKeys: [.contentModificationDateKey])
+            while let file = files?.nextObject() as? URL {
+                times[file.path] = try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            }
+            return times
+        }
+        func ms(_ nanoseconds: UInt64) -> String { String(format: "%.2f ms", Double(nanoseconds) / 1e6) }
+
+        try await clearServerRequests()
+        let first = await mainThreadStalls { HttpSyncManager.shared.resumePolling(); try? await Task.sleep(for: .seconds(3)) }
+        try await clearServerRequests()
+        let filesBefore = modificationTimes()
+        let steady = await mainThreadStalls { try? await Task.sleep(for: .seconds(11)) }
+        HttpSyncManager.shared.suspendPolling()
+        let filesAfter = modificationTimes()
+        let requests = try await serverRequests()
+        // The statistics pass runs every 30 s while reading and once a minute from the poll.
+        let statistics = await mainThreadStalls { await HttpStatisticsLane.shared.refresh(flush: false) }
+        // While reading, the reader's saves change one book's history; only that book is read again.
+        let reading = books.appendingPathComponent("large_library_7").appendingPathComponent(FileNames.statistics)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: reading.path)
+        let readingPass = await mainThreadStalls { await HttpStatisticsLane.shared.refresh(flush: false) }
+
+        let listings = requests.filter { $0.method == "GET" && $0.path.hasPrefix("/v1/kv?") }.count
+        print("after importing 80 books: longest main-thread work \(ms(settling.cpu))")
+        print("foreground poll: longest main-thread work \(ms(first.cpu)) on the first poll, \(ms(steady.cpu)) over \(listings) more polls, \(ms(statistics.cpu)) in a statistics pass, \(ms(readingPass.cpu)) in one after a book's reading was saved; longest heartbeat gaps \(Int(first.wall * 1000)), \(Int(steady.wall * 1000)), \(Int(statistics.wall * 1000)), \(Int(readingPass.wall * 1000)) ms")
+        XCTAssertGreaterThanOrEqual(listings, 2, "the poll ran repeatedly")
+        XCTAssertEqual(requests.filter { $0.method != "GET" }.map { "\($0.method) \($0.path)" }, [], "a poll that found nothing new uploaded")
+        let rewritten = filesAfter.filter { path, date in filesBefore[path] != date }.keys.map { $0.replacingOccurrences(of: support.path, with: "") }.sorted()
+        XCTAssertEqual(rewritten, [], "a poll that found nothing new rewrote files")
+        // A frame is 8.3 ms at 120 Hz; a poll must leave nearly all of it to scrolling.
+        for (name, stall) in [("the first poll", first), ("a later poll", steady), ("a statistics pass", statistics), ("a statistics pass while reading", readingPass)] {
+            XCTAssertLessThan(stall.cpu, 4_000_000, "\(name) ran \(ms(stall.cpu)) on the main thread without a break")
+            // Blocking waits (synchronous IPC or IO) use no CPU but still hold the main thread.
+            XCTAssertLessThan(stall.wall, 0.1, "\(name) held the main thread for \(Int(stall.wall * 1000)) ms")
+        }
+    }
+
+    /// The longest main-thread CPU time between two heartbeats while `work` runs: work that ran
+    /// without giving the main thread a chance to draw a frame. Unlike the wall-clock gap, which
+    /// is also returned, it does not grow when the host is busy.
+    @MainActor private func mainThreadStalls(during work: () async -> Void) async -> (cpu: UInt64, wall: TimeInterval) {
+        var cpu: UInt64 = 0, wall: TimeInterval = 0
+        var lastCPU = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), lastWall = ProcessInfo.processInfo.systemUptime
         let heartbeat = Task { @MainActor in
             while !Task.isCancelled {
-                let now = ProcessInfo.processInfo.systemUptime
-                longest = max(longest, now - last); last = now; beats += 1
-                try? await Task.sleep(for: .milliseconds(4))
+                let nowCPU = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID), nowWall = ProcessInfo.processInfo.systemUptime
+                cpu = max(cpu, nowCPU - lastCPU); wall = max(wall, nowWall - lastWall)
+                lastCPU = nowCPU; lastWall = nowWall
+                try? await Task.sleep(for: .milliseconds(1))
             }
         }
-        try await clearServerRequests()
-        HttpSyncManager.shared.resumePolling()
-        // The first poll after launch observes every bookmark once; later ones skip unchanged books.
-        try await Task.sleep(for: .seconds(3))
-        let first = longest
-        longest = 0
-        try await Task.sleep(for: .seconds(11))
-        HttpSyncManager.shared.suspendPolling()
+        await work()
         heartbeat.cancel()
-
-        let listings = try await serverRequests().filter { $0.method == "GET" && $0.path.hasPrefix("/v1/kv?") }.count
-        XCTAssertGreaterThanOrEqual(listings, 3, "the poll ran repeatedly")
-        XCTAssertGreaterThan(beats, 500)
-        print("foreground poll: first \(Int(first * 1000)) ms, then longest main-thread stall \(Int(longest * 1000)) ms over \(listings) polls, \(beats) beats")
-        XCTAssertLessThan(first, 0.1, "the first poll stalled the main thread for \(Int(first * 1000)) ms")
-        XCTAssertLessThan(longest, 0.03, "a poll stalled the main thread for \(Int(longest * 1000)) ms")
+        _ = await heartbeat.value
+        return (cpu, wall)
     }
 
     /// Publishes the fixture's manga again under another sync ID, as a second device would.

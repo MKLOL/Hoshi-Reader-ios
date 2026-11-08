@@ -53,7 +53,7 @@ nonisolated struct BookMetadata: Codable, Identifiable, Hashable, Sendable {
     var resolvedContentType: ContentType { contentType ?? .epub }
 }
 
-nonisolated struct Bookmark: Codable, Sendable {
+nonisolated struct Bookmark: Codable, Equatable, Sendable {
     let chapterIndex: Int
     let progress: Double
     let characterCount: Int

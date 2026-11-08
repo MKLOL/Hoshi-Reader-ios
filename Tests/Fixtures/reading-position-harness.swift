@@ -24,10 +24,11 @@ protocol HttpSyncKvTransport: Sendable {
 }
 enum HttpSyncActiveBooks { static func contains(_ id: String) -> Bool { false } }
 struct HttpSyncLocalLibrary {
- struct Book { let metadata: BookMetadata; let root: URL? }
+ struct Book { let metadata: BookMetadata; let root: URL?; let bookmarkModified: Date? }
  let books: [Book]
  static func scan(booksDirectory: URL) async -> HttpSyncLocalLibrary { .init(books: []) }
 }
+extension Sequence where Element == UInt8 { var lowercaseHex: String { map { String(format: "%02x", $0) }.joined() } }
 extension Notification.Name { static let httpSyncBookmarkApplied = Notification.Name("bookmark-applied") }
 
 import Foundation
@@ -130,6 +131,13 @@ actor MemoryTransport: HttpSyncKvTransport {
   _ = laneStore.record(root:laneRoot,event:afterSamePlace)
   let imported = laneStore.importExplicit(bookId:"test-book",root:laneRoot,bookmark:Bookmark(chapterIndex:0,progress:0.1,characterCount:10,lastModified:Date(timeIntervalSinceReferenceDate:1)))
   precondition(imported?.progress == 0.1 && laneStore.snapshot(bookId:"test-book").winner?.action == "ttuImport")
+  // The lane remembers each bookmark's modification time across launches, yet a bookmark
+  // written while no lane was running is still observed by a new lane on its first exchange.
+  try BookStorage.save(Bookmark(chapterIndex:0,progress:0.75,characterCount:75,lastModified:Date.now.addingTimeInterval(60)),inside:laneRoot,as:FileNames.bookmark)
+  let restarted=HttpReadingPositionLane(store:laneStore)
+  let restartListing=await transport.listing()
+  _ = await restarted.exchange(transport:transport,listing:restartListing,roots:["test-book":laneRoot],scope:"test")
+  precondition(laneStore.snapshot(bookId:"test-book").winner?.position.progress == 0.75)
   let budgetRoot=root.appendingPathComponent("budget-book")
   try FileManager.default.createDirectory(at:budgetRoot,withIntermediateDirectories:true)
   let budgetStore=ReadingPositionRepository(directory:root.appendingPathComponent("budget-positions"),device:ReadingDevice(id:"receiver",name:"iPad"))

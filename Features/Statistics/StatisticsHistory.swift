@@ -1,13 +1,13 @@
 import Foundation
 import CryptoKit
 
-struct StatisticsHistoryInfo: Codable {
+nonisolated struct StatisticsHistoryInfo: Codable, Sendable {
     var syncId: String
     var title: String?
     var contentType: ContentType?
     var progress: Double?
 }
-struct StatisticsRoot {
+nonisolated struct StatisticsRoot: Sendable {
     var syncId: String
     var root: URL
     var title: String?
@@ -17,8 +17,8 @@ struct StatisticsRoot {
 
 /// History belongs to the reader. Hidden folders travel with Books backups but stay off the shelf.
 @MainActor enum StatisticsHistory {
-    static let directoryName = ".reading_history"
-    static func validID(_ id: String) -> Bool {
+    nonisolated static let directoryName = ".reading_history"
+    nonisolated static func validID(_ id: String) -> Bool {
         !id.isEmpty && id.utf8.count <= 64 && id.contains { $0 != "." } && id.utf8.allSatisfy {
             (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || [45, 46, 95].contains($0)
         }

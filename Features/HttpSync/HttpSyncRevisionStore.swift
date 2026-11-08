@@ -88,6 +88,7 @@ enum HttpSyncRevisionStore {
         if appliedLocally {
             record.localRev = max(record.localRev, rr)
         }
+        guard state[key] != record else { return }
         state[key] = record
         save(state)
     }

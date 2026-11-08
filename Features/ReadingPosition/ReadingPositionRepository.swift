@@ -249,7 +249,7 @@ final class ReadingPositionRepository {
         return lhs.chapterIndex == rhs.chapterIndex && lhs.progress == rhs.progress && lhs.characterCount == rhs.characterCount && lhs.lastModified == rhs.lastModified
     }
     private func fileURL(_ bookId: String) -> URL { directory.appendingPathComponent("book-" + Self.digest(Data(bookId.utf8)) + ".json") }
-    nonisolated static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+    nonisolated static func digest(_ data: Data) -> String { SHA256.hash(data: data).lowercaseHex }
 }
 
 @MainActor

@@ -50,7 +50,7 @@ extension Notification.Name {
 }
 
 @MainActor enum ReadingStatisticsStore {
-    private static let migration = ".statistics_devices_v2"
+    nonisolated static let migration = ".statistics_devices_v2"
 
     /// Old iOS manga_statistics.json held page/time rows. Preserve those in statistics.json
     /// before reusing the Android-compatible manga sidecar for OCR character counts.

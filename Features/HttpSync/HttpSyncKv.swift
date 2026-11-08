@@ -286,7 +286,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     // MARK: PUT
 
-    func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
+    @concurrent func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
         var request = makeRequest("PUT", path: "/v1/kv/\(encodeKey(key))", contentType: contentType)
         request.httpBody = body
         let (data, response) = try await perform(request, uploadBody: body)
@@ -311,7 +311,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     // MARK: GET
 
-    func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
+    @concurrent func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
         guard maxBytes >= 0 else { throw HttpSyncError("Invalid response size limit.") }
         let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
         for attempt in 0...Self.maxRateLimitRetries {
@@ -343,7 +343,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         throw HttpSyncError("Sync server kept rate-limiting requests (HTTP 429). Try again in a moment.")
     }
 
-    func get(key: String) async throws -> HttpSyncKvFetched? {
+    @concurrent func get(key: String) async throws -> HttpSyncKvFetched? {
         let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
         let (data, response) = try await perform(request)
         guard let http = response as? HTTPURLResponse else {
@@ -408,7 +408,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     // MARK: LIST
 
-    func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList {
+    @concurrent func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList {
         // Encode query values the same way Android does (Java URLEncoder): `/`, `:` etc. are
         // percent-encoded. URLComponents.percentEncodedQuery leaves `/` and `:` literal, which
         // would diverge from the Android client and from servers that match query strings exactly.

@@ -161,6 +161,8 @@ final class HttpSyncManager {
         }
         var cursor = settings.lastSyncedAt
         let queuedBefore = HttpSyncCloudBooks.shared.requestedSyncIds
+        // A pass that changed nothing on this device must not reload the whole shelf.
+        var libraryChanged = true
 
         log.info("syncNow starting (cursor=\(cursor ?? "nil", privacy: .public))")
         isSyncing = true
@@ -186,7 +188,7 @@ final class HttpSyncManager {
                 lastStatus = "Sync cancelled. Interrupted downloads can resume next time."
             }
             // The shelf shortcut stays on Books while sync imports/removes titles and positions.
-            NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil)
+            if libraryChanged { NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil) }
             // A tap after this pass's queue phase (or on a manga it did not list) gets its own pass.
             let queue = HttpSyncCloudBooks.shared.requestedSyncIds
             if !Task.isCancelled, !queue.isEmpty, queue != queuedBefore, settings.currentConfig() == config { runCloudDownloads() }
@@ -272,6 +274,8 @@ final class HttpSyncManager {
             notePushOutcome(success: true)
             noteFullReconcileOutcome(errors: [])
             await cleanExpiredDownloads()
+            // Revealed downloads announce themselves; only moved positions change the shelf here.
+            libraryChanged = result.downloadedBookmarks > 0
             log.info("syncNow done from maps: \(result.summary(), privacy: .public)")
             return
         }
@@ -616,7 +620,7 @@ final class HttpSyncManager {
     }
 
     private func statisticsScope(_ config: HttpSyncConfig) -> String {
-        config.baseURL + ":" + SHA256.hash(data: Data(config.token.utf8)).map { String(format: "%02x", $0) }.joined()
+        config.baseURL + ":" + SHA256.hash(data: Data(config.token.utf8)).lowercaseHex
     }
 
     /// Call after the user moves `book` onto `shelfName` (nil = unshelved). Records the placement

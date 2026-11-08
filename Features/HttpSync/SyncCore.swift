@@ -100,6 +100,24 @@ nonisolated func shortTitleHash(_ title: String) -> String {
     return digest.prefix(syncIdHashHexLength / 2).map { String(format: "%02x", $0) }.joined()
 }
 
+// MARK: - Hex
+
+nonisolated private let lowercaseHexDigits = Array("0123456789abcdef".utf8)
+
+nonisolated extension Sequence where Element == UInt8 {
+    /// Lowercase hex of these bytes. The foreground poll hashes every bookmark; one
+    /// `String(format:)` per byte made that a measurable part of each main-thread pass.
+    var lowercaseHex: String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(underestimatedCount * 2)
+        for byte in self {
+            bytes.append(lowercaseHexDigits[Int(byte >> 4)])
+            bytes.append(lowercaseHexDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
 // MARK: - Chat key
 
 /// Suffix of a chat entry's KV key: `{rfc3339_utc}-{8-hex-content-hash}`, where the timestamp's
