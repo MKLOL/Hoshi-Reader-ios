@@ -1,0 +1,217 @@
+# What was done: branch `codex/ios-android-parity`
+
+None of this is pushed. This file is not committed.
+
+## Commits
+
+| Commit | Summary |
+|---|---|
+| 58ddd70 | Port the current Android reader and sync features |
+| d0bc226 | Port manga reading pace; fix the parity review findings |
+| 135212b | Download tapped manga one by one; show each when it finishes |
+| 1f6260c | Stop the 5 s sync poll stalling scrolling; first Statistics redesign |
+| a0e1dd7 | Make idle sync polls and statistics passes nearly free on the main thread |
+| 195ef50, c1e38d5, 10c0bd8, 3e99e11, 4a29907, f576220, 4a781d2 | Statistics redesign to match Android: overview, hourly chart, history charts, book page, fixture, accessibility sizes |
+| 7b3df47 | Docs for the shipped Statistics redesign |
+| 5f5baaf | Fix four reviewer-found cases where the idle-sync skips could miss a change |
+
+## Scrolling lag (P0): "a stall every 5 seconds"
+
+The 5 s foreground poll (map exchange, position lane, statistics poll, preferences poll) did 50–220 ms of work on the main thread. Every poll now costs at most about 3 ms there.
+
+**Moved off main:**
+- `HttpSyncKvClient` `put`, `get`, `getBounded` and `list` are `@concurrent`, so bodies are read and decoded off main.
+- The listing index is built off main by `HttpSyncListedKeys.index`.
+- Statistics disk reads use `HttpStatisticsDisk.read`, and statistics shards are built by `HttpStatisticsDisk.shards`.
+- Journal stamps are read by `HttpReadingPositionLane.journalStamps`.
+
+**Nothing is rewritten when nothing changed:**
+- `HttpSyncRememberedFile` caches the state and pending files by mtime and size, and skips writes of an unchanged value.
+- `HttpSyncRevisionStore.noteRemote` skips identical records.
+- The position lane writes its index only on change.
+- `fileURL` no longer creates directories.
+
+**Skip signatures:**
+- The position lane skips a book whose bookmark and journal file stamps are unchanged.
+- The statistics lane skips a whole pass when its settled signature (disk digest, listing and preferences) is unchanged.
+- The statistics lane skips a book's legacy key by per-book signature. Books touched by a shard apply are never skipped.
+
+**Android bookmark loop:** Android encodes map entries differently, so the same position has a different ETag. Such books were re-applied and announced as moved on every poll. Identical positions are now only noted, not applied.
+
+**No-change sync:** a sync that changes nothing no longer posts `.hoshiLibraryChanged`, so the shelf does not reload. `activateScope` does not post from `init`.
+
+**Smaller fixes:**
+- Table-based `lowercaseHex` replaces per-byte `String(format:)`.
+- The Application Support URL is cached.
+
+**Measured in the gate's hosted test:** 80 books with 30 days of statistics each; main-thread CPU per heartbeat window, `CLOCK_THREAD_CPUTIME_ID`. The test enforces a 4 ms budget, and fails if any file is rewritten or any non-GET request is sent.
+
+| Window | Main-thread maximum |
+|---|---|
+| After import | 0.13 ms |
+| First poll | 2.59 ms |
+| Steady polls | 2.89 ms |
+| Statistics pass | 1.39 ms |
+| Pass after a reading save | 2.62 ms |
+| Wall-clock gaps | 4 ms or less |
+
+Before: 48–61 ms per poll, and about 220 ms originally.
+
+## Reviewer fixes (5f5baaf)
+
+Reviewers found four cases where the idle-sync skips could miss a change:
+- a reading saved during a pass;
+- rows received from a shard that also need relaying to the legacy key;
+- this device's month missing from the server;
+- a position projected after a relaunch.
+
+Each has a test that fails without its fix (mutation-checked): `StatisticsPassSkipTests`, plus the harness checks in `Tests/Fixtures/reading-position-harness.swift`.
+
+The sync test server now exits right after saving its state on SIGTERM. This removed a 3-in-30 shutdown-timeout flake.
+
+## Statistics redesign (matches Android)
+
+- **Today:** reading time first, activity tiles, an hourly chart coloured by book, sessions, and chips of repeated lookups.
+- **Streak:** a flame, goal progress, what is left to keep the streak, and a new-record note.
+- **Heatmap:** month labels and a Less/More legend.
+- **Charts:** labelled weekday and device rows; trend charts with units, a legend and a selected-day readout, in the statistics time zone throughout.
+- **Text:** reading time reads like "2h 14m". Empty states have a message, and large text sizes stack instead of truncating.
+- **New files:** `StatisticsViewSupport.swift` and `StatisticsHistoryCharts.swift`.
+- **Fixture:** four months of reading on three devices.
+
+All 18 UI-review findings are addressed. Screenshots were checked on iPhone and iPad, in light and dark.
+
+## Earlier in the session
+
+- Android feature port and parity fixes.
+- The streak and the reading-day boundary.
+- Manga download UX: one by one, a per-item ring, cancel and retry.
+- Cover aspect ratio: spreads fill their place instead of stretching.
+
+See `docs/CHANGELOG.md` and `docs/ANDROID_PARITY.md`.
+
+## Tests: last full gate (`tools/test_ios_parity.py`) at 5f5baaf
+
+| Suite | Result |
+|---|---|
+| Server tests | 20 OK |
+| Regressions | 104 OK |
+| Hosted XCTest | 246 tests, 0 failures |
+| UI tests | 4 passed: CloudMangaDownload, Podcast ×2, StatisticsSync |
+
+`ZoomPopupUITests` `testUltraThinActionButtonsStayVisibleAndTappable` and `testSelectionRectStaysNearZoomedMangaTap` already fail at 1f6260c. They are not in the gate.
+
+## NOT done: app-wide main-thread audit findings (measured at 1f6260c, not yet fixed)
+
+1. **EPUB reader rebuilds `ReaderViewModel` every second** (3–9 ms per tick). This is also a correctness bug.
+   - **Cause:** the 1 s stats tick writes `readingTracker` (`ReaderViewModel.swift:586`, `:614`). That re-runs `ReaderLoader.body`, which calls `ReaderView.init`, which creates a new `ReaderViewModel` (`ReaderView.swift:192`).
+   - **Side effects:** each throwaway model writes the position journal (`ReaderViewModel.swift:215`) and logs `.opened` and `.started` usage events that never close (`UsageLog.swift:214`). A 60 s session leaves 130 phantom sessions, which corrupts usage statistics.
+   - **Fix:** build the model once (for example in `ReaderLoaderViewModel.loadBook()`), pass it via `ReaderView(viewModel:)` (`:207`), and move the side effects into a one-time `start()`.
+2. **Every reading save triggers an all-books statistics pass.** The save goes `HttpReadingStatisticsSync.schedule` → `HttpStatisticsLane.refresh`, which does a full `listAll` and pass (40–50 ms at 1f6260c).
+   - a0e1dd7 moved the disk work off main: the hosted test now shows 2.62 ms. That is unverified for the reader path on a device.
+   - **Still open:** the next poll re-runs the pass after this device's own shard upload. Record the uploaded ETags (`HttpStatisticsLane.swift`, `polledStatistics`).
+3. **Manga page turn spends 10–14 ms synchronously.**
+   - `queueBookmark` decodes, re-encodes and rewrites the 102 KB map cache, the pending file and the revision store with fsync (`HttpSyncBatchExchange.swift:130`, ~4.4 ms).
+   - `ReadingPositionRepository.record` takes ~1.6 ms.
+   - The reader's own `.readingStatisticsChanged` posts make it re-read the files it just wrote (`MangaReaderView.swift:248`, `ReaderView.swift:771`).
+4. **A full reconcile still posts `.hoshiLibraryChanged` unconditionally** (`HttpSyncManager.swift` defer), giving ~150 ms of shelf reload, render and focus inference.
+   - Only the done-from-maps path is guarded now.
+   - **Check on device:** a `booksChanged` mismatch that never clears (`HttpSyncBatchExchange.swift:345`) would make this happen every 5 s.
+5. **UIKit focus inference costs 41–56 ms per shelf hierarchy change.** This was seen only on the simulator, where the Mac keyboard counts as hardware. Unverified on device.
+6. **Date formatters are built per call:**
+   - `MangaStatisticsTracker.dateKey` (`:121`), ~2 ms per tick;
+   - `ReaderViewModel.formattedDate` (`:983`);
+   - `ReaderUsageSession.record` (`UsageLog.swift:236`).
+7. **`PodcastStore.monitorAccess` rewrites `validatedAccount` and runs `prune` every 60 s** even when nothing changed (`PodcastStore.swift:67-68`).
+
+**Code-read only, not measured:**
+- Download progress is unthrottled on the main delegate queue (`HttpSyncBackgroundDownloads.swift:17`, `HttpSyncManager.swift:207`).
+- `CloudBookshelfView.items` is computed four times per body.
+- `BookshelfView` depends on `records.isEmpty`.
+- `fetchMissingCovers` decodes JPEGs on main and refetches 404s.
+- A new `URLSession` is created per KV client (`HttpSyncKv.swift:281`).
+
+The audit's scripts and traces are in `/private/tmp/claude-501/-Users-dragos-projects-hoshi/e7c29471-2606-4a15-a402-ecc27892f566/scratchpad/perfrev-mainthread/`.
+
+## Other open items
+
+- The iPad mini install has not been run. `install.sh` launches the stale bundle ID `com.dragosristache.hoshi`.
+- Quirks-mode chapter height.
+- Sentence-mode autostart.
+- TTU Drive precision.
+- Staged-manga refresh is invisible and cannot be cancelled.
+- A shelf-placement race.
+
+---
+
+## Codex follow-up — completed November 8, 2026
+
+This follow-up began after Claude's completed handoff at `5f5baaf`. Four fresh,
+independent reviewers inspected that completed state before implementation. The
+confirmed open findings above are superseded by the fixes and verification below.
+
+Implementation: `4a472e4`. Disposable-Simulator readiness fix: `b525a4f`.
+
+### Confirmed findings fixed
+
+- Retain one EPUB reader model in the loader. Start and finish its usage session
+  once; redraws and statistics ticks cannot create phantom sessions or timers.
+- Stop readers rereading their own statistics writes. Skip identical statistics
+  saves, reuse thread-safe date formatting, and use the reader's autostart setting.
+- Compare TTU progress at millisecond precision without rewriting the authoritative
+  bookmark or journal merely to acknowledge an export.
+- Capture bookmark mutations before the asynchronous library scan, include those
+  exact entries in uploads, and acknowledge only the captured mutation IDs. Page
+  turns no longer rewrite the entire owned bookmark-map cache. Unconfigured HTTP
+  sync does not maintain an HTTP outbox.
+- Scope map acknowledgements to the account. Reject invalidated responses and
+  commits throughout maps, reconciliation, statistics, usage and settings, including
+  an account switch away and back. Bind scheduled preflights to their originating
+  configuration and treat intentional cancellation quietly.
+- Revalidate queued manga tombstones before transfer and installation. Preserve
+  newer local shelf moves across GET/PUT waits. Give staged replacements the same
+  visible transfer and cancellation lifecycle as fresh downloads.
+- Notify the bookshelf only after an actual local library change.
+- Record successful own-statistics upload metadata in the poll observation, retain
+  newer observations, and recover missing or older local history even when remote
+  shard ETags have not changed.
+- Compute weighted medians without overflowing the total sample count. Bound
+  imported reading durations and finish estimates before constructing Duration.
+- Decode cloud covers off the main actor, back off absent covers while permitting
+  archive/account changes and later backfills, reuse foreground HTTP sessions,
+  coalesce transfer presentation updates, and avoid repeated shelf sorting and
+  unchanged podcast-validation maintenance.
+- Reserve the manga toolbar's measured height for page actions. Add self-contained
+  fixtures for the two previously excluded zoom/action UI cases and require both
+  in the full gate. Resolve the install script's launch identifier from the built
+  app's Info.plist.
+- Wait for a newly created Simulator's boot services before launching test hosts;
+  cleanup remains restricted to the gate's own disposable device.
+
+### Final verification
+
+`build/parity-python/bin/python tools/test_ios_parity.py` exited **0** on the
+committed source. Results:
+
+- **20** real-server tests passed.
+- **107** Python regressions passed, including the hosted simulator wrapper.
+- **278** hosted XCTest cases passed with zero failures.
+- **6** UI cases passed: cloud manga download, both podcast scenarios, Statistics,
+  zoomed manga selection, and thin manga action buttons including AI and copy.
+- The 80-book fixture measured **2.69 ms** main-thread CPU on the first poll,
+  **3.05 ms** over later polls, **1.00 ms** in a statistics pass, and **2.26 ms**
+  after a reading save. Maximum measured heartbeat gap: **4 ms**. Unchanged polls
+  made no writes or non-GET requests.
+- An actual manga page turn in that library took **3.78 ms CPU / 4.17 ms wall**;
+  its final page survived close, sync and reopening an uncached position journal.
+- The actual EPUB-loader lifetime test verified one open/start/stop/close session
+  through redraws and ticks, with no continued logging after dismissal.
+
+Logs: `build/codex-final-gate.log`, `build/ios-sync-integration.log`, and
+`build/ios-parity-ui.log`. These generated artifacts remain ignored.
+
+The four reviews found no demonstrated quirks-height defect in the current page
+geometry. Device-specific UIKit focus-inference costs remain unmeasured; physical
+hardware profiling and device installation were outside this simulator run.
+The durable per-turn journal remains synchronous, with its reduced complete
+navigation path measured above. No confirmed review findings remain open.
