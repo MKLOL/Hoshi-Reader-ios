@@ -1,5 +1,4 @@
 import SwiftUI
-import Charts
 import Combine
 
 struct StatisticsOverviewView: View {
