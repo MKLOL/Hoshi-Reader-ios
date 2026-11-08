@@ -246,6 +246,16 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     private static let jsonEncoder = JSONEncoder()
     private static let requestGate = HttpSyncRequestGate(minimumInterval: 0.150)
     private static let maxRateLimitRetries = 5
+    /// Requests carry their own credentials. Reuse connections across the foreground lanes.
+    private static let foregroundSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 600
+        config.waitsForConnectivity = false
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
 
     /// Android sends parts up to 64 MiB so each request stays under Cloudflare's ~100 MB cap, and
     /// uses the same value as the single-PUT-vs-multipart threshold.
@@ -267,18 +277,12 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         if let session {
             self.session = session
         } else {
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 30
-            config.timeoutIntervalForResource = 600
-            config.waitsForConnectivity = false
             // Never persist sync responses to the on-disk URL cache. Caching KV GETs is pointless
             // (the reconciler does its own LWW comparison and re-lists every pass), and when the
             // device's Caches volume is full or its cache DB is wedged, every response write fails
             // with SQLITE_IOERR. That flood previously trapped the app (signal 5) mid-sync. Opting
             // out of the URL cache removes both the noise and the crash trigger.
-            config.urlCache = nil
-            config.requestCachePolicy = .reloadIgnoringLocalCacheData
-            self.session = URLSession(configuration: config)
+            self.session = Self.foregroundSession
         }
         self.multipartPartSizeBytes = multipartPartSizeBytes
         self.multipartThresholdBytes = multipartThresholdBytes

@@ -116,23 +116,30 @@ extension Notification.Name {
         try? migrate(root: root)
         return MangaTextStatistic.merged(BookStorage.load([MangaTextStatistic].self, from: root.appendingPathComponent(FileNames.mangaStatistics)) ?? [])
     }
-    static func save(_ rows: [Statistics], root: URL, scheduleSync: Bool = true) throws {
+    static func save(_ rows: [Statistics], root: URL, scheduleSync: Bool = true, origin: UUID? = nil) throws {
         try migrate(root: root)
         try StatisticsHistory.absorbIfPresent(root: root)
-        let merged = Statistics.merged(try preserveUnreadable(root: root, filename: FileNames.statistics, load: { try strictReading(root: root) }) + rows)
+        var recovered = false
+        let existing = try preserveUnreadable(root: root, filename: FileNames.statistics, recovered: &recovered, load: { try strictReading(root: root) })
+        let merged = Statistics.merged(existing + rows)
+        guard recovered || merged != existing else { return }
         try BookStorage.save(merged, inside: root, as: FileNames.statistics)
-        changed(root: root, scheduleSync: scheduleSync)
+        changed(root: root, scheduleSync: scheduleSync, origin: origin)
     }
-    static func saveText(_ rows: [MangaTextStatistic], root: URL, scheduleSync: Bool = true) throws {
+    static func saveText(_ rows: [MangaTextStatistic], root: URL, scheduleSync: Bool = true, origin: UUID? = nil) throws {
         try migrate(root: root)
         try StatisticsHistory.absorbIfPresent(root: root)
-        let existing = try preserveUnreadable(root: root, filename: FileNames.mangaStatistics, load: { try strictText(root: root) })
-        try BookStorage.save(MangaTextStatistic.merged(existing + rows), inside: root, as: FileNames.mangaStatistics)
-        changed(root: root, scheduleSync: scheduleSync)
+        var recovered = false
+        let existing = try preserveUnreadable(root: root, filename: FileNames.mangaStatistics, recovered: &recovered, load: { try strictText(root: root) })
+        let merged = MangaTextStatistic.merged(existing + rows)
+        guard recovered || merged != existing else { return }
+        try BookStorage.save(merged, inside: root, as: FileNames.mangaStatistics)
+        changed(root: root, scheduleSync: scheduleSync, origin: origin)
     }
-    private static func preserveUnreadable<T>(root: URL, filename: String, load: () throws -> [T]) throws -> [T] {
+    private static func preserveUnreadable<T>(root: URL, filename: String, recovered: inout Bool, load: () throws -> [T]) throws -> [T] {
         do { return try load() }
         catch is DecodingError {
+            recovered = true
             let recovery = try BookStorage.getBooksDirectory().appendingPathComponent(".unreadable")
             try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: root.appendingPathComponent(filename), to: recovery.appendingPathComponent(filename + "." + UUID().uuidString))
@@ -148,15 +155,17 @@ extension Notification.Name {
     static func applyDayTotals(_ totals: [Statistics], root: URL, replace: Bool) throws {
         try migrate(root: root)
         try StatisticsHistory.absorbIfPresent(root: root)
-        let original = try preserveUnreadable(root: root, filename: FileNames.statistics, load: { try strictReading(root: root) })
+        var recovered = false
+        let original = try preserveUnreadable(root: root, filename: FileNames.statistics, recovered: &recovered, load: { try strictReading(root: root) })
         let next = ImportedReadingTotals.applying(totals, to: original, replace: replace)
-        guard next != original else { return }
+        guard recovered || next != original else { return }
         try BookStorage.save(next, inside: root, as: FileNames.statistics)
         changed(root: root, scheduleSync: true)
     }
 
-    private static func changed(root: URL, scheduleSync: Bool) {
-        NotificationCenter.default.post(name: .readingStatisticsChanged, object: root)
+    private static func changed(root: URL, scheduleSync: Bool, origin: UUID? = nil) {
+        NotificationCenter.default.post(name: .readingStatisticsChanged, object: root,
+            userInfo: origin.map { ["origin": $0] })
         if scheduleSync { HttpReadingStatisticsSync.shared.schedule(root: root) }
     }
 }

@@ -70,8 +70,10 @@ class ReleaseGateTests(unittest.TestCase):
         playback_only = "Test Case '-[HoshiReaderUITests.PodcastTranscriptUITests testTimestampPlaybackWordLookupEnglishAndFollowing]' passed\n** TEST SUCCEEDED **"
         podcasts_only = playback_only + "\nTest Case '-[HoshiReaderUITests.PodcastTranscriptUITests testReaderAppearanceIsAvailableInsideTranscript]' passed"
         statistics = podcasts_only + "\nTest Case '-[HoshiReaderUITests.StatisticsSyncUITests testSyncedActivityStreakControlsRetainedHistoryAndTrends]' passed"
-        success = statistics + "\nTest Case '-[HoshiReaderUITests.CloudMangaDownloadUITests testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage]' passed"
-        for log, status, expected in [(success, 0, 0), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
+        cloud = statistics + "\nTest Case '-[HoshiReaderUITests.CloudMangaDownloadUITests testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage]' passed"
+        thin = cloud + "\nTest Case '-[HoshiReaderUITests.ZoomPopupUITests testUltraThinActionButtonsStayVisibleAndTappable]' passed"
+        success = thin + "\nTest Case '-[HoshiReaderUITests.ZoomPopupUITests testSelectionRectStaysNearZoomedMangaTap]' passed"
+        for log, status, expected in [(success, 0, 0), (thin, 0, 1), (cloud, 0, 1), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
             with self.subTest(status=status, log=log), tempfile.TemporaryDirectory() as directory:
                 calls = []
                 def run(command, **kwargs):
@@ -101,4 +103,6 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertIn("-only-testing:HoshiReaderUITests/PodcastTranscriptUITests", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/StatisticsSyncUITests", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/CloudMangaDownloadUITests", calls[4])
+                self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testUltraThinActionButtonsStayVisibleAndTappable", calls[4])
+                self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testSelectionRectStaysNearZoomedMangaTap", calls[4])
                 self.assertEqual(calls[-1], ["xcrun", "simctl", "delete", "owned-device"])

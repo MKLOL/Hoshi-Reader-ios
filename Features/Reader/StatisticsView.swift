@@ -32,17 +32,17 @@ struct StatisticsView: View {
                     HStack {
                         Text("Reading Time:")
                         Spacer()
-                        Text("**\(Duration.seconds(viewModel.sessionStatistics.readingTime).formatted())**")
+                        Text("**\(StatisticsNumbers.formattedDuration(viewModel.sessionStatistics.readingTime))**")
                     }
                     HStack {
                         Text("Time to finish Book:")
                         Spacer()
-                        Text("**\(Duration.seconds(viewModel.sessionStatistics.lastReadingSpeed > 0 ? Double(viewModel.bookInfo.characterCount - viewModel.currentCharacter) / (Double(viewModel.sessionStatistics.lastReadingSpeed) / 3600.0) : 0).formatted())**")
+                        Text("**\(StatisticsNumbers.formattedDuration(viewModel.sessionStatistics.lastReadingSpeed > 0 ? Double(viewModel.bookInfo.characterCount - viewModel.currentCharacter) / (Double(viewModel.sessionStatistics.lastReadingSpeed) / 3600.0) : 0))**")
                     }
                     HStack {
                         Text("Time to finish Chapter:")
                         Spacer()
-                        Text("**\(Duration.seconds(viewModel.sessionStatistics.lastReadingSpeed > 0 ? Double(viewModel.currentChapterCount - viewModel.currentCharacter) / (Double(viewModel.sessionStatistics.lastReadingSpeed) / 3600.0) : 0).formatted())**")
+                        Text("**\(StatisticsNumbers.formattedDuration(viewModel.sessionStatistics.lastReadingSpeed > 0 ? Double(viewModel.currentChapterCount - viewModel.currentCharacter) / (Double(viewModel.sessionStatistics.lastReadingSpeed) / 3600.0) : 0))**")
                     }
                 } header: {
                     HStack {
@@ -79,7 +79,7 @@ struct StatisticsView: View {
                     HStack {
                         Text("Reading Time:")
                         Spacer()
-                        Text("**\(Duration.seconds(viewModel.todaysStatistics.readingTime).formatted())**")
+                        Text("**\(StatisticsNumbers.formattedDuration(viewModel.todaysStatistics.readingTime))**")
                     }
                 } header: {
                     Text("Today")
@@ -99,7 +99,7 @@ struct StatisticsView: View {
                     HStack {
                         Text("Reading Time:")
                         Spacer()
-                        Text("**\(Duration.seconds(viewModel.allTimeStatistics.readingTime).formatted())**")
+                        Text("**\(StatisticsNumbers.formattedDuration(viewModel.allTimeStatistics.readingTime))**")
                     }
                 } header: {
                     Text("All Time")

@@ -17,6 +17,7 @@ struct CloudBookshelfView: View {
     }
 
     var body: some View {
+        let items = self.items
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Button {

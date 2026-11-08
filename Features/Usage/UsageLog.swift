@@ -233,8 +233,7 @@ extension Notification.Name {
                 found: Bool? = nil, page: Int? = nil, from: Int? = nil, to: Int? = nil,
                 chapter: Int? = nil, character: Int? = nil, startedAt: Date? = nil, now: Date = .now) {
         guard !closed else { return }
-        let offset = DateFormatter(); offset.dateFormat = "xxx"; offset.locale = Locale(identifier: "en_US_POSIX")
-        log.append(UsageEvent(at: Int64(now.timeIntervalSince1970 * 1000), utcOffset: offset.string(from: now), type: type,
+        log.append(UsageEvent(at: Int64(now.timeIntervalSince1970 * 1000), utcOffset: ReaderDateFormatting.utcOffset(for: now), type: type,
             session: id, bookId: book.id.uuidString, bookTitle: book.title,
             contentType: book.resolvedContentType == .mokuro ? "manga" : "epub", page: page, fromPage: from, toPage: to,
             chapter: chapter, character: character, startedAt: startedAt.map { Int64($0.timeIntervalSince1970 * 1000) },

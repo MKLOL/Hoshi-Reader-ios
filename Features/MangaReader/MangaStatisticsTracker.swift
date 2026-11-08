@@ -119,9 +119,33 @@ nonisolated struct MangaStatisticsTracker {
     }
     static func deduplicate(_ statistics: [Statistics]) -> [Statistics] { Statistics.merged(statistics) }
     static func dateKey(for date: Date) -> String {
+        ReaderDateFormatting.shared.dayKey(for: date)
+    }
+}
+
+/// Shared by the main-actor tracker and the background usage writer. A timezone is resolved
+/// for every call so changing the system zone does not leave the cache on yesterday's zone.
+nonisolated final class ReaderDateFormatting: @unchecked Sendable {
+    static let shared = ReaderDateFormatting()
+    private let lock = NSLock()
+    private let dayFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
-        formatter.timeZone = .current
         formatter.formatOptions = [.withFullDate]
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    func dayKey(for date: Date, timeZone: TimeZone = .current) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        if dayFormatter.timeZone != timeZone { dayFormatter.timeZone = timeZone }
+        return dayFormatter.string(from: date)
+    }
+
+    static func utcOffset(for date: Date, timeZone: TimeZone = .current) -> String {
+        let seconds = timeZone.secondsFromGMT(for: date)
+        if seconds == 0 { return "+00:00" }
+        let minutes = abs(seconds / 60)
+        func pair(_ value: Int) -> String { value < 10 ? "0" + String(value) : String(value) }
+        return (seconds < 0 ? "-" : "+") + pair(minutes / 60) + ":" + pair(minutes % 60)
     }
 }

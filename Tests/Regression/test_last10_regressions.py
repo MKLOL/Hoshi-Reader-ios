@@ -283,7 +283,7 @@ class LastTenRegressionTests(unittest.TestCase):
         manager = read("Features/HttpSync/HttpSyncManager.swift")
         reconcile = method_body(
             manager,
-            "private func runReconcile(preflight: HttpSyncMapChanges?) async",
+            "private func runReconcile(preflight: HttpSyncMapChanges?, expectedConfig: HttpSyncConfig?) async",
         )
         settings_push = method_body(manager, "func onAiSettingsChanged()")
 
@@ -329,7 +329,7 @@ class LastTenRegressionTests(unittest.TestCase):
 
     def test_manga_menu_actions_clear_existing_popups(self):
         view = read("Features/MangaReader/MangaReaderView.swift")
-        menu_body = method_body(view, "private var topBar")
+        menu_body = method_body(view, "private var topBar: some View")
         self.assertRegex(
             menu_body,
             r"Button\s*\{\s*model\.closePopups\(\)\s*goToPageText =",
@@ -1019,7 +1019,8 @@ assertEqual(
         self.assertNotIn("setHostViewport(\\(Double(scale)), \\(Double(offsetX)), \\(Double(offsetY))))", webview)
         self.assertIn("tappableTopInset: mangaActionTopInset(for: geometry)", view)
         self.assertIn("private func mangaActionTopInset(for geometry: GeometryProxy)", view)
-        self.assertIn("AiChatSettingsStore.shared.isConfigured ? 140 : 72", view)
+        # Actual toolbar geometry is covered by the thin-action UI scenario. A fixed height
+        # became stale when history added another native control above the options menu.
         self.assertIn("private static func configureZoom(for scrollView: UIScrollView)", webview)
         self.assertIn("scrollView.pinchGestureRecognizer?.isEnabled = true", webview)
         self.assertIn("scrollView.panGestureRecognizer.allowedScrollTypesMask = .all", webview)
@@ -1256,7 +1257,7 @@ assertEqual(
 
     def test_manga_reader_menu_button_hugs_top_right(self):
         view = read("Features/MangaReader/MangaReaderView.swift")
-        top_bar = method_body(view, "private var topBar")
+        top_bar = method_body(view, "private var topBar: some View")
         self.assertIn(".padding(.horizontal, 6)", top_bar)
         self.assertNotIn("Text(title)", top_bar)
 

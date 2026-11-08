@@ -29,7 +29,7 @@ struct ReaderLoader: View {
     @State private var viewModel: ReaderLoaderViewModel
     private let isMokuro: Bool
 
-    init(book: BookMetadata) {
+    init(book: BookMetadata, usageLog: UsageLog = .shared) {
         // Detect the on-disk content type (mokuro.json sidecar) as the source of truth, falling
         // back to the stored metadata hint for books whose directory can't be resolved yet.
         let detectedIsMokuro: Bool
@@ -41,32 +41,21 @@ struct ReaderLoader: View {
             detectedIsMokuro = book.resolvedContentType == .mokuro
         }
         self.isMokuro = detectedIsMokuro
-        _viewModel = State(initialValue: ReaderLoaderViewModel(book: book))
+        _viewModel = State(initialValue: ReaderLoaderViewModel(book: book, usageLog: usageLog))
     }
 
     var body: some View {
         Group {
             if isMokuro {
                 MangaReaderView(metadata: viewModel.book)
-            } else if let doc = viewModel.document, let root = viewModel.rootURL {
-                ReaderView(
-                    book: viewModel.book,
-                    document: doc,
-                    rootURL: root,
-                    enableStatistics: userConfig.enableStatistics,
-                    autostartStatistics: userConfig.statisticsAutostartMode == .on,
-                    autoSyncEnabled: userConfig.enableSync && userConfig.enableAutoSync,
-                    syncStats: userConfig.enableSync && userConfig.statisticsEnableSync,
-                    statsSyncMode: userConfig.statisticsSyncMode,
-                    syncAudioBook: userConfig.enableSasayaki && userConfig.sasayakiEnableSync,
-                    showSentenceTranslations: userConfig.readerShowSentenceTranslations
-                )
+            } else if let readerModel = viewModel.readerModel {
+                ReaderView(viewModel: readerModel)
             } else {
                 ProgressView()
             }
         }
         .task {
-            if !isMokuro { await viewModel.loadBook() }
+            if !isMokuro { await viewModel.loadBook(userConfig: userConfig) }
         }
         .onDisappear {
             // A parse failure never creates ReaderView, so release its reservation here. A
@@ -177,43 +166,13 @@ struct ReaderView: View {
         }
     }
     
-    init(
-        book: BookMetadata,
-        document: EPUBDocument,
-        rootURL: URL,
-        enableStatistics: Bool,
-        autostartStatistics: Bool,
-        autoSyncEnabled: Bool,
-        syncStats: Bool,
-        statsSyncMode: StatisticsSyncMode,
-        syncAudioBook: Bool,
-        showSentenceTranslations: Bool
-    ) {
-        _viewModel = State(initialValue: ReaderViewModel(
-            book: book,
-            document: document,
-            rootURL: rootURL,
-            enableStatistics: enableStatistics,
-            autostartStatistics: autostartStatistics,
-            autoSyncEnabled: autoSyncEnabled,
-            syncStats: syncStats,
-            statsSyncMode: statsSyncMode,
-            syncAudioBook: syncAudioBook,
-            showSentenceTranslations: showSentenceTranslations
-        ))
-    }
-
     init(viewModel: ReaderViewModel) {
         _viewModel = State(initialValue: viewModel)
     }
 
     private func finishReading() {
-        viewModel.closePopups()
-        viewModel.persistReadingTime()
-        viewModel.stopTracking()
-        viewModel.usage?.close()
+        guard viewModel.finish() else { return }
         aiController.dismiss()
-        viewModel.sasayakiPlayer.teardown()
         Task {
             await viewModel.flushAutoSync()
             HttpSyncActiveBooks.close(syncId(for: viewModel.book))
@@ -239,7 +198,7 @@ struct ReaderView: View {
             result.append("\(viewModel.sessionStatistics.lastReadingSpeed.formatted(.number.grouping(.never))) / h")
         }
         if userConfig.readerShowReadingTime {
-            result.append("\(Duration.seconds(viewModel.sessionStatistics.readingTime).formatted(.time(pattern: .hourMinute)))")
+            result.append("\(StatisticsNumbers.safeDuration(viewModel.sessionStatistics.readingTime).formatted(.time(pattern: .hourMinute)))")
         }
         return result.joined(separator: " ")
     }
@@ -736,6 +695,7 @@ struct ReaderView: View {
             if let lifetime = readerWindowLifetime, !lifetime.isClosed { lifetime.onDismiss = finishReading }
         }
         .task {
+            viewModel.start()
             await viewModel.syncOnOpen()
         }
         .onChange(of: readerTextColor) { _, hex in viewModel.bridge.send(.updateTextColor(hex)) }
@@ -769,7 +729,8 @@ struct ReaderView: View {
             viewModel.isPaused = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { note in
-            guard let changed = note.object as? URL, changed.standardizedFileURL == viewModel.rootURL.standardizedFileURL else { return }
+            guard let changed = note.object as? URL, changed.standardizedFileURL == viewModel.rootURL.standardizedFileURL,
+                  note.userInfo?["origin"] as? UUID != viewModel.statisticsOrigin else { return }
             viewModel.reloadStatistics()
         }
         .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in

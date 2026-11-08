@@ -101,7 +101,7 @@ class HttpSyncMapRegressionTests(unittest.TestCase):
         start = manager.index("private func performMapExchange() async")
         end = manager.index("func onShelfPlacementChanged", start)
         exchange = manager[start:end]
-        self.assertIn("beginReconcile(preflight: changes)", exchange)
+        self.assertIn("beginReconcile(preflight: changes, expectedConfig: config)", exchange)
         self.assertNotIn("await reconcileTask.value", exchange)
 
     def test_publish_acknowledges_only_the_preflight_etags(self):

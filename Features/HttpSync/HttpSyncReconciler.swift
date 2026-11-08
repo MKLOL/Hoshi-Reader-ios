@@ -79,6 +79,9 @@ struct HttpSyncProgress: Sendable, Equatable {
 
 /// Outcome of one reconcile pass. Granular counts so the UI can show a one-line summary.
 struct HttpSyncResult: Sendable {
+    /// A committed local import, removal, payload replacement, shelf move or bookmark move.
+    /// Network activity and unchanged remote metadata do not require rebuilding the bookshelf.
+    var localLibraryChanged = false
     var listedCloudBooks = 0
     var uploadedBookmarks = 0
     var uploadedChatEntries = 0
@@ -127,6 +130,7 @@ struct HttpSyncResult: Sendable {
 // detached tasks, so the main actor is never blocked on the expensive path.
 struct HttpSyncReconciler {
     private let transport: HttpSyncKvTransport
+    private let stillCurrent: @MainActor () -> Bool
     private let exchangeLegacyBookmarks: Bool
     private let payloadCodec = HttpSyncPayloadCodec()
     private let cloudBooks: HttpSyncCloudBooks
@@ -136,10 +140,18 @@ struct HttpSyncReconciler {
 
     private static let jsonContentType = "application/json; charset=utf-8"
 
-    init(transport: HttpSyncKvTransport, exchangeLegacyBookmarks: Bool = true, cloudBooks: HttpSyncCloudBooks = .shared) {
-        self.transport = transport
+    init(transport: HttpSyncKvTransport, exchangeLegacyBookmarks: Bool = true, cloudBooks: HttpSyncCloudBooks = .shared,
+         stillCurrent: @escaping @MainActor () -> Bool = { true }) {
+        self.transport = HttpSyncCurrentTransport(base: transport, stillCurrent: stillCurrent)
+        self.stillCurrent = stillCurrent
         self.exchangeLegacyBookmarks = exchangeLegacyBookmarks
         self.cloudBooks = cloudBooks
+    }
+
+    private var isCurrent: Bool { !Task.isCancelled && stillCurrent() }
+    private func checkCurrent() throws {
+        try Task.checkCancellation()
+        guard stillCurrent() else { throw CancellationError() }
     }
 
     /// One per-book reconciliation pass (inbound then outbound). The app-level AI-chat-settings
@@ -157,7 +169,7 @@ struct HttpSyncReconciler {
         onCloudBooksInstalled: @escaping () async -> [String]? = { [] }
     ) async -> HttpSyncResult {
         var result = HttpSyncResult()
-        guard !Task.isCancelled else { return result }
+        guard isCurrent else { return result }
 
         await onProgress(HttpSyncProgress(
             message: "Preparing sync",
@@ -167,12 +179,12 @@ struct HttpSyncReconciler {
                                             onCloudBooksInstalled: onCloudBooksInstalled)
         // A partial/failed listing is not a safe snapshot of the server. Do not push local state
         // against it: that could overwrite remote changes the failed listing never revealed.
-        guard !Task.isCancelled else { return result }
+        guard isCurrent else { return result }
         if inbound.listingSucceeded {
             await pushAllLocal(into: &result, onProgress: onProgress)
         }
 
-        guard !Task.isCancelled else { return result }
+        guard isCurrent else { return result }
         await onProgress(HttpSyncProgress(message: "Finishing sync", detail: "Saving the sync cursor."))
         result.newLastSyncedAt = safeNewCursor(currentCursor: sinceCursor, inbound: inbound)
         if result.newLastSyncedAt == sinceCursor { result.newLastSyncedAt = nil }
@@ -264,6 +276,7 @@ struct HttpSyncReconciler {
 
     /// Reads every local book directory once, deriving syncIds. Skips blank-titled books.
     private func loadLocalBooks() -> [LocalBook] {
+        guard isCurrent else { return [] }
         guard let booksDir = try? BookStorage.getBooksDirectory(),
               let metadatas = try? BookStorage.loadAllBooks() else { return [] }
         var out: [LocalBook] = []
@@ -433,7 +446,7 @@ struct HttpSyncReconciler {
                 }
             }
         } catch {
-            guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             result.errors.append("list: \(errorText(error))")
             cursor.listingSucceeded = false
             flushAppliedKeys()
@@ -449,12 +462,12 @@ struct HttpSyncReconciler {
         var deletedSyncIds: Set<String> = []
         var placementMetadataKeys: [(ParsedBookKey, HttpSyncKvKeyMeta)] = []
         for (parsed, meta) in metadataKeys {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             do {
                 guard let remote = try await fetchRemoteMetadata(key: meta.key) else {
                     throw HttpSyncError("Metadata at \(meta.key): missing.")
                 }
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 remoteFormatBySyncId[parsed.syncId] = remote.blob.contentType
                 remoteShelfBySyncId[parsed.syncId] = remote.blob.shelfName
                 remoteTitleBySyncId[parsed.syncId] = remote.blob.title
@@ -471,6 +484,7 @@ struct HttpSyncReconciler {
                     } else {
                         if let root = rootsBySyncId[parsed.syncId] {
                             try deleteBook(root: root, bookId: BookStorage.loadMetadata(root: root)?.id ?? localBookId(localBooks, parsed.syncId))
+                            if isInstalledBookRoot(root) { result.localLibraryChanged = true }
                         }
                         rootsBySyncId.removeValue(forKey: parsed.syncId)
                         shelfState.removeValue(forKey: parsed.syncId)
@@ -482,13 +496,35 @@ struct HttpSyncReconciler {
                     placementMetadataKeys.append((parsed, meta))
                 }
             } catch {
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("metadata \(parsed.syncId): \(errorText(error))")
                 // Unlike the side files, this read says whether another device deleted the book;
                 // installing without it would publish the copy over that deletion.
                 failedCloudIds[parsed.syncId] = errorText(error)
                 markUnhandled(meta)
             }
+        }
+
+        // A queued download is a remote copy, never a deliberate local re-import. Recheck after
+        // waits (including another manga's transfer) so a newly published tombstone cannot be
+        // defeated by the later importedAt assigned when this download starts.
+        func cloudBookIsLive(_ id: String) async throws -> Bool {
+            let remote = try await fetchRemoteMetadata(key: SyncKeys.metadata(id))
+            try checkCurrent()
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { throw CancellationError() }
+            if remote == nil, metadataKeys.contains(where: { $0.0.syncId == id }) {
+                throw HttpSyncError("Metadata for \(id) disappeared before its download could finish.")
+            }
+            return remote?.blob.deletedAt == nil
+        }
+        func discardCloudCopy(_ id: String, root: URL? = nil) throws {
+            if let root = root ?? rootsBySyncId[id], FileManager.default.fileExists(atPath: root.path) {
+                try deleteBook(root: root, bookId: BookStorage.loadMetadata(root: root)?.id)
+                if isInstalledBookRoot(root) { result.localLibraryChanged = true }
+            }
+            cloudBooks.remove(syncId: id)
+            rootsBySyncId.removeValue(forKey: id)
+            deletedSyncIds.insert(id)
         }
 
         // Pass 3: import remote-only books by their payload manifests, BEFORE bookmarks/chats.
@@ -533,7 +569,7 @@ struct HttpSyncReconciler {
             }
         }
         for (index, entry) in allManifests.enumerated() {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             let (meta, format) = entry
             guard let parsed = parseBookKey(meta.key) else { continue }
             await onProgress(HttpSyncProgress(
@@ -559,7 +595,7 @@ struct HttpSyncReconciler {
                     ), manifest.format == .mokuro, manifest.sizeBytes >= 0 else {
                         throw HttpSyncError("Missing or invalid manga manifest for \(parsed.syncId).")
                     }
-                    guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                    guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     if cloudBooks.recordListed(syncId: parsed.syncId, manifest: manifest, shelfName: remoteShelfBySyncId[parsed.syncId], title: remoteTitleBySyncId[parsed.syncId]) {
                         result.listedCloudBooks += 1
                     }
@@ -575,7 +611,7 @@ struct HttpSyncReconciler {
                         continue
                     }
                 } catch {
-                    guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                    guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     result.errors.append("payload \(parsed.syncId): \(errorText(error))")
                     failedCloudIds[parsed.syncId] = errorText(error)
                     markUnhandled(meta)
@@ -583,17 +619,26 @@ struct HttpSyncReconciler {
                 }
             }
             if let existingRoot = rootsBySyncId[parsed.syncId] {
+                let cloudTransfer = format == .mokuro && cloudBooks.requestedSyncIds.contains(parsed.syncId)
+                    && cloudBooks.record(syncId: parsed.syncId) != nil
+                if cloudTransfer { cloudBooks.beginDownload(syncId: parsed.syncId) }
                 do {
+                    defer { if cloudTransfer { cloudBooks.endTransfer(syncId: parsed.syncId) } }
+                    if cloudTransfer, !(try await cloudBookIsLive(parsed.syncId)) {
+                        try discardCloudCopy(parsed.syncId)
+                        continue
+                    }
                     if try await refreshExistingBookPayload(
                         syncId: parsed.syncId,
                         format: format,
                         root: existingRoot
                     ) {
                         result.downloadedPayloads += 1
+                        if isInstalledBookRoot(existingRoot) { result.localLibraryChanged = true }
                     }
                     markHandled(meta)
                 } catch {
-                    guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                    guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     result.errors.append("payload \(parsed.syncId): \(errorText(error))")
                     failedCloudIds[parsed.syncId] = errorText(error)
                     markUnhandled(meta)
@@ -603,16 +648,17 @@ struct HttpSyncReconciler {
             do {
                 let staging = format == .mokuro ? cloudBooks.stagingRoot(syncId: parsed.syncId) : nil
                 if let imported = try await importRemoteOnlyBook(syncId: parsed.syncId, format: format, stagingRoot: staging) {
-                    guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                    guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     rootsBySyncId[parsed.syncId] = imported
                     if staging != nil { stagedCloudIds.insert(parsed.syncId) }
+                    else { result.localLibraryChanged = true }
                     result.downloadedPayloads += 1
                     markHandled(meta)
                 } else {
                     markUnhandled(meta)
                 }
             } catch {
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("payload \(parsed.syncId): \(errorText(error))")
                 failedCloudIds[parsed.syncId] = errorText(error)
                 // A `skip` error (e.g. can't ever fit this book) advances the cursor so we don't
@@ -636,9 +682,8 @@ struct HttpSyncReconciler {
         cloudBooks.retain(syncIds: retainedCloudIds)
 
         // Pass 4: metadata shelf placement now that local roots exist.
-        let shelfSnapshot = ShelfSnapshot.load()
         for (index, pair) in placementMetadataKeys.enumerated() {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             let (parsed, meta) = pair
             await onProgress(HttpSyncProgress(
                 message: "Applying bookshelf folders",
@@ -651,14 +696,16 @@ struct HttpSyncReconciler {
                     syncId: parsed.syncId,
                     bookId: rootsBySyncId[parsed.syncId].flatMap { BookStorage.loadMetadata(root: $0)?.id },
                     meta: meta,
-                    snapshot: shelfSnapshot,
                     shelfState: &shelfState
                 )
+                if applied == .applied, let root = rootsBySyncId[parsed.syncId], isInstalledBookRoot(root) {
+                    result.localLibraryChanged = true
+                }
                 if applied == .missingLocal {
                     if cloudBooks.record(syncId: parsed.syncId) != nil { markHandled(meta) } else { markUnhandled(meta) }
                 } else { markHandled(meta) }
             } catch {
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("metadata \(parsed.syncId): \(errorText(error))")
                 markUnhandled(meta)
             }
@@ -667,7 +714,7 @@ struct HttpSyncReconciler {
 
         // Pass 5: bookmarks and chats now find their local roots.
         for (index, pair) in bookmarksAndChats.enumerated() {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             let (parsed, meta) = pair
             await onProgress(HttpSyncProgress(
                 message: "Applying remote reading data",
@@ -684,37 +731,42 @@ struct HttpSyncReconciler {
                 try await applyReadingItem(parsed, meta: meta, root: root, result: &result)
                 markHandled(meta, localArtifact: localArtifactAfterApplying(root: root, kind: parsed.kind))
             } catch {
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("\(parsed.syncId): \(errorText(error))")
                 markUnhandled(meta)
             }
         }
 
         for (id, root) in rootsBySyncId where !deletedSyncIds.contains(id) && !pendingTombstoneSyncIds.contains(id) {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             do {
-                try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas)
+                try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas, stillCurrent: stillCurrent)
+                try checkCurrent()
                 for key in ["books/\(id)/statistics", "books/\(id)/manga_statistics"] {
                     if let meta = statisticsMetas[key] { markHandled(meta) }
                 }
             } catch {
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("Statistics \(id): \(errorText(error))")
             }
         }
 
         for id in requestedCloudIds {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             if let message = failedCloudIds[id] {
                 cloudBooks.failDownload(syncId: id, message: message)
                 continue
             }
             guard let root = rootsBySyncId[id], cloudBooks.requestedSyncIds.contains(id) else { continue }
             do {
-                if stagedCloudIds.contains(id) { rootsBySyncId[id] = try installStagedCloudBook(syncId: id, root: root) }
+                guard try await cloudBookIsLive(id) else { try discardCloudCopy(id); continue }
+                if stagedCloudIds.contains(id) {
+                    rootsBySyncId[id] = try installStagedCloudBook(syncId: id, root: root)
+                    result.localLibraryChanged = true
+                }
                 cloudBooks.markAwaitingBookmarkMap(syncId: id)
             } catch {
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 cloudBooks.failDownload(syncId: id, message: errorText(error))
                 result.errors.append("Installing \(id): \(errorText(error))")
             }
@@ -735,7 +787,7 @@ struct HttpSyncReconciler {
                 .min { ($0.downloadRequestedAt ?? "", $0.syncId) < ($1.downloadRequestedAt ?? "", $1.syncId) }?.syncId
         }
         while let id = nextTappedManga() {
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             attemptedCloudIds.insert(id)
             let meta = cloudManifests[id]!
             await onProgress(HttpSyncProgress(
@@ -745,20 +797,26 @@ struct HttpSyncReconciler {
                 total: attemptedCloudIds.count + max(0, cloudBooks.requestedSyncIds.count - cloudBooks.readySyncIds.count - 1)
             ))
             // A copy left by a stopped pass may be from an older archive; never unpack over it.
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             try? FileManager.default.removeItem(at: cloudBooks.stagingRoot(syncId: id))
             cloudBooks.beginDownload(syncId: id)
             let root: URL
             do {
+                guard try await cloudBookIsLive(id) else {
+                    cloudBooks.endTransfer(syncId: id)
+                    try discardCloudCopy(id)
+                    continue
+                }
                 let imported = try await importRemoteOnlyBook(syncId: id, format: .mokuro, stagingRoot: cloudBooks.stagingRoot(syncId: id))
                 cloudBooks.endTransfer(syncId: id)
-                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 guard let imported else { markUnhandled(meta); continue }
                 root = imported
                 result.downloadedPayloads += 1
                 markHandled(meta)
             } catch {
                 cloudBooks.endTransfer(syncId: id)
-                guard cloudBooks.generation == cloudGeneration, !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("payload \(id): \(errorText(error))")
                 cloudBooks.failDownload(syncId: id, message: errorText(error))
                 // A `skip` error (e.g. can't ever fit this book) is not retried by the next sync.
@@ -772,7 +830,7 @@ struct HttpSyncReconciler {
             for (parsed, placementMeta) in placementMetadataKeys where parsed.syncId == id {
                 do {
                     _ = try await applyShelfPlacementFromRemote(syncId: id, bookId: staged, meta: placementMeta,
-                                                                snapshot: ShelfSnapshot.load(), shelfState: &placement)
+                                                                shelfState: &placement)
                     markHandled(placementMeta)
                 } catch { result.errors.append("metadata \(id): \(errorText(error))") }
             }
@@ -784,16 +842,19 @@ struct HttpSyncReconciler {
                 } catch { result.errors.append("\(id): \(errorText(error))") }
             }
             do {
-                try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas)
+                try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas, stillCurrent: stillCurrent)
+                try checkCurrent()
                 for key in ["books/\(id)/statistics", "books/\(id)/manga_statistics"] {
                     if let statisticsMeta = statisticsMetas[key] { markHandled(statisticsMeta) }
                 }
             } catch { result.errors.append("Statistics \(id): \(errorText(error))") }
-            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            guard isCurrent, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             // Cancelled while it downloaded: the staged copy is kept for a later tap.
             guard cloudBooks.requestedSyncIds.contains(id) else { continue }
             do {
+                guard try await cloudBookIsLive(id) else { try discardCloudCopy(id, root: root); continue }
                 rootsBySyncId[id] = try installStagedCloudBook(syncId: id, root: root)
+                result.localLibraryChanged = true
                 cloudBooks.markAwaitingBookmarkMap(syncId: id)
             } catch {
                 cloudBooks.failDownload(syncId: id, message: errorText(error))
@@ -825,7 +886,10 @@ struct HttpSyncReconciler {
     private func applyReadingItem(_ parsed: ParsedBookKey, meta: HttpSyncKvKeyMeta, root: URL, result: inout HttpSyncResult) async throws {
         switch parsed.kind {
         case .bookmark:
-            if try await applyBookmarkFromRemote(root: root, meta: meta) { result.downloadedBookmarks += 1 }
+            if try await applyBookmarkFromRemote(root: root, meta: meta) {
+                result.downloadedBookmarks += 1
+                if isInstalledBookRoot(root) { result.localLibraryChanged = true }
+            }
         case .chat:
             if try await applyChatEntryFromRemote(root: root, meta: meta) { result.downloadedChatEntries += 1 }
         case .pretranslations:
@@ -838,6 +902,7 @@ struct HttpSyncReconciler {
 
     /// Moves a downloaded manga from the catalogue's staging area into the library.
     private func installStagedCloudBook(syncId id: String, root: URL) throws -> URL {
+        try checkCurrent()
         let books = try BookStorage.getBooksDirectory()
         let installed = uniqueDirectory(base: books.appendingPathComponent(id, isDirectory: true))
         guard let old = BookStorage.loadMetadata(root: root) else { throw HttpSyncError("Downloaded manga metadata is missing.") }
@@ -934,7 +999,7 @@ struct HttpSyncReconciler {
         } catch {
             throw HttpSyncError("Bookmark at \(meta.key): malformed JSON.")
         }
-        try Task.checkCancellation()
+        try checkCurrent()
         guard blob.isValid else { throw HttpSyncError("Bookmark at \(meta.key): invalid position or timestamp.") }
         let local = BookStorage.loadBookmark(root: root)
         var localModified: String? = nil
@@ -1056,6 +1121,8 @@ struct HttpSyncReconciler {
         }
         let body = fetched.body
         let key = meta.key
+        let staged = root.appendingPathComponent(".hoshi-sentences-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: staged) }
         try await Task.detached(priority: .utility) {
             let blob: HttpSyncSentencesBlob
             do {
@@ -1069,8 +1136,14 @@ struct HttpSyncReconciler {
             ) {
                 throw HttpSyncError("Sentence translations at \(key): \(violation).")
             }
-            try body.write(to: target, options: .atomic)
+            try body.write(to: staged, options: .atomic)
         }.value
+        try checkCurrent()
+        if FileManager.default.fileExists(atPath: target.path) {
+            _ = try FileManager.default.replaceItemAt(target, withItemAt: staged)
+        } else {
+            try FileManager.default.moveItem(at: staged, to: target)
+        }
         EpubTranslationStore.invalidate(root: root)
         return true
     }
@@ -1083,7 +1156,6 @@ struct HttpSyncReconciler {
         syncId: String,
         bookId: UUID?,
         meta: HttpSyncKvKeyMeta,
-        snapshot: ShelfSnapshot,
         shelfState: inout [String: HttpSyncShelfPlacementRecord]
     ) async throws -> ShelfApplyResult {
         guard let remote = try await fetchRemoteMetadata(key: meta.key) else {
@@ -1096,17 +1168,22 @@ struct HttpSyncReconciler {
         guard let bookId else { return .missingLocal }
         guard remote.hasShelfName else { return .noop }
 
+        // A drag/drop can save a newer placement while the metadata GET is suspended.
+        // Compare against the live shelf and stamp together, after the network wait.
+        let snapshot = ShelfSnapshot.load()
+        shelfState = HttpSyncShelfStateStore.merged(shelfState, with: HttpSyncShelfStateStore.load())
         let localShelfName = snapshot.shelfName(for: bookId)
         let localUpdatedAt = localShelfUpdatedAt(syncId: syncId, shelfName: localShelfName, snapshot: snapshot, state: shelfState)
         if shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: remote.blob.shelfUpdatedAt, localShelvesUpdatedAt: localUpdatedAt) {
             let normalized = normalizeShelfName(remote.blob.shelfName)
-            applyShelfPlacement(bookId: bookId, shelfName: normalized)
+            let moved = try applyShelfPlacement(bookId: bookId, shelfName: normalized)
             if let stamp = remoteShelfPlacementStamp(shelfName: normalized, shelfUpdatedAt: remote.blob.shelfUpdatedAt, metadataModifiedAt: meta.lastModified) {
                 shelfState[syncId] = HttpSyncShelfPlacementRecord(shelfName: normalized, updatedAt: stamp)
             } else {
                 shelfState.removeValue(forKey: syncId)
             }
-            return .applied
+            HttpSyncShelfStateStore.save(shelfState)
+            return moved ? .applied : .noop
         }
         return .noop
     }
@@ -1131,7 +1208,10 @@ struct HttpSyncReconciler {
 
     /// Mutates `shelves.json`: remove `bookId` from every shelf, then add it to the target shelf
     /// (creating the shelf if needed). `nil` shelfName leaves the book unshelved.
-    private func applyShelfPlacement(bookId: UUID, shelfName: String?) {
+    @discardableResult
+    private func applyShelfPlacement(bookId: UUID, shelfName: String?) throws -> Bool {
+        try checkCurrent()
+        guard ShelfSnapshot.load().shelfName(for: bookId) != shelfName else { return false }
         var shelves = BookStorage.loadShelves() ?? []
         // Plain loops, not removeAll{…}/firstIndex(where:) — @MainActor closures into stdlib
         // generics trap when this runs off the main actor (see safeNewCursor).
@@ -1149,8 +1229,14 @@ struct HttpSyncReconciler {
                 shelves.append(BookShelf(name: shelfName, bookIds: [bookId]))
             }
         }
-        guard let booksDir = try? BookStorage.getBooksDirectory() else { return }
-        try? BookStorage.save(shelves, inside: booksDir, as: FileNames.shelves)
+        let booksDir = try BookStorage.getBooksDirectory()
+        try BookStorage.save(shelves, inside: booksDir, as: FileNames.shelves)
+        return true
+    }
+
+    private func isInstalledBookRoot(_ root: URL) -> Bool {
+        guard let books = try? BookStorage.getBooksDirectory() else { return false }
+        return root.deletingLastPathComponent().standardizedFileURL == books.standardizedFileURL
     }
 
     // MARK: - Remote-only import
@@ -1198,6 +1284,7 @@ struct HttpSyncReconciler {
                 targetDir: root,
                 downloadCacheBooks: booksDir
             )
+            try checkCurrent()
             let detected = ContentType.detect(bookDir: root)
             guard detected == format else {
                 throw HttpSyncError(
@@ -1271,6 +1358,7 @@ struct HttpSyncReconciler {
             cachedSha = cached
         } else {
             cachedSha = try await payloadCodec.ensurePayloadContentSha(bookRoot: root)
+            try checkCurrent()
         }
         if let remoteContentSha = remote.contentSha256, cachedSha == remoteContentSha { return false }
         // The server still points at the exact archive this install uploaded or installed, so the
@@ -1284,6 +1372,7 @@ struct HttpSyncReconciler {
         // builds through 0.11.3) is far cheaper to fix locally than a replacement that installs
         // identical content.
         let localSha = try await payloadCodec.refreshPayloadContentSha(bookRoot: root)
+        try checkCurrent()
         if let remoteContentSha = remote.contentSha256, localSha == remoteContentSha {
             // The bytes on disk are the archive the manifest describes, so a book that predates
             // the archive sidecar gains the baseline the guard above needs.
@@ -1320,6 +1409,7 @@ struct HttpSyncReconciler {
                 expectedFormat: format,
                 targetDir: staging
             )
+            try checkCurrent()
             let detected = ContentType.detect(bookDir: staging)
             guard detected == manifest.format else {
                 throw HttpSyncError(
@@ -1471,8 +1561,8 @@ struct HttpSyncReconciler {
         into result: inout HttpSyncResult,
         onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void
     ) async {
+        guard isCurrent else { return }
         let localBooks = loadLocalBooks()
-        let snapshot = ShelfSnapshot.load()
         var shelfState = HttpSyncShelfStateStore.load()
         var payloadBookCount = 0
         // Both formats now upload a payload, so the progress denominator must count both — a
@@ -1494,7 +1584,7 @@ struct HttpSyncReconciler {
                 shelfState.removeValue(forKey: syncId)
             }
             for (syncId, record) in pendingDeleted where !liveLocalSyncIds.contains(syncId) {
-            guard !Task.isCancelled else { return }
+            guard isCurrent else { return }
                 await onProgress(HttpSyncProgress(
                     message: "Uploading deleted book markers",
                     detail: record.title
@@ -1534,13 +1624,14 @@ struct HttpSyncReconciler {
                     HttpSyncDeletedBookStore.remove(syncId: syncId)
                     shelfState.removeValue(forKey: syncId)
                 } catch {
+                    guard isCurrent else { return }
                     result.errors.append("\(record.title): \(errorText(error))")
                 }
             }
         }
 
         for (index, book) in localBooks.enumerated() {
-            guard !Task.isCancelled else { return }
+            guard isCurrent else { return }
             do {
                 await onProgress(HttpSyncProgress(
                     message: "Uploading local book state",
@@ -1559,25 +1650,9 @@ struct HttpSyncReconciler {
                         continue
                     }
                     try deleteBook(root: book.root, bookId: book.id)
+                    result.localLibraryChanged = true
                     shelfState.removeValue(forKey: book.syncId)
                     continue
-                }
-
-                // Shelf placement to upload (with LWW against a fresher remote placement).
-                var uploadShelfName = snapshot.shelfName(for: book.id)
-                var uploadShelfUpdatedAt = localShelfUpdatedAt(
-                    syncId: book.syncId, shelfName: uploadShelfName, snapshot: snapshot, state: shelfState
-                )
-                if let remoteMetadata, remoteMetadata.hasShelfName,
-                   shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: remoteMetadata.blob.shelfUpdatedAt, localShelvesUpdatedAt: uploadShelfUpdatedAt) {
-                    uploadShelfName = normalizeShelfName(remoteMetadata.blob.shelfName)
-                    uploadShelfUpdatedAt = remoteShelfPlacementStamp(shelfName: uploadShelfName, shelfUpdatedAt: remoteMetadata.blob.shelfUpdatedAt, metadataModifiedAt: remoteMetadata.lastModified)
-                    applyShelfPlacement(bookId: book.id, shelfName: uploadShelfName)
-                    if let stamp = uploadShelfUpdatedAt {
-                        shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: stamp)
-                    } else {
-                        shelfState.removeValue(forKey: book.syncId)
-                    }
                 }
 
                 // Bookmark — only if local is strictly newer than the server's.
@@ -1587,43 +1662,76 @@ struct HttpSyncReconciler {
                     }
                 }
 
-                // Metadata — preserve / advance importedAt; clear deletedAt iff we overrode the tombstone.
-                let uploadImportedAt = tombstoneOverridden
-                    ? book.importedAt
-                    : maxRfc(remoteMetadata?.blob.importedAt, book.importedAt)
-                let uploadDeletedAt = tombstoneOverridden ? nil : remoteMetadata?.blob.deletedAt
-                let metadataKey = SyncKeys.metadata(book.syncId)
-                let localRev = HttpSyncRevisionStore.current(metadataKey).localRev
-                // Reconcile pushes merged state, not a new edit: carry the max of both revs
-                // forward without bumping (only deliberate edits bump, via the hooks).
-                let uploadRev = max(localRev, remoteMetadata?.blob.rev ?? 0)
-                let metaBlob = HttpSyncMetadataBlob(
-                    title: book.title,
-                    contentType: book.contentType,
-                    shelfName: uploadShelfName,
-                    shelfUpdatedAt: uploadShelfUpdatedAt,
-                    importedAt: uploadImportedAt,
-                    deletedAt: uploadDeletedAt,
-                    rev: uploadRev
-                )
-                var remoteForCompare = remoteMetadata?.blob
-                remoteForCompare?.rev = metaBlob.rev
-                if remoteForCompare == metaBlob {
-                    // Content identical to the server's — skip the PUT entirely.
-                    HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
-                } else {
-                    _ = try await transport.put(
-                        key: metadataKey,
-                        contentType: Self.jsonContentType,
-                        body: try jsonEncoder.encode(metaBlob)
+                while isCurrent {
+                    // Shelf placement to upload (with LWW against a fresher remote placement).
+                    let snapshot = ShelfSnapshot.load()
+                    shelfState = HttpSyncShelfStateStore.merged(shelfState, with: HttpSyncShelfStateStore.load())
+                    var uploadShelfName = snapshot.shelfName(for: book.id)
+                    var uploadShelfUpdatedAt = localShelfUpdatedAt(
+                        syncId: book.syncId, shelfName: uploadShelfName, snapshot: snapshot, state: shelfState
                     )
-                    HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
-                    result.uploadedMetadata += 1
-                }
-                if let uploadShelfUpdatedAt {
-                    shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: uploadShelfUpdatedAt)
-                } else {
-                    shelfState.removeValue(forKey: book.syncId)
+                    if let remoteMetadata, remoteMetadata.hasShelfName,
+                       shouldApplyRemoteShelfPlacement(remoteShelfUpdatedAt: remoteMetadata.blob.shelfUpdatedAt, localShelvesUpdatedAt: uploadShelfUpdatedAt) {
+                        uploadShelfName = normalizeShelfName(remoteMetadata.blob.shelfName)
+                        uploadShelfUpdatedAt = remoteShelfPlacementStamp(shelfName: uploadShelfName, shelfUpdatedAt: remoteMetadata.blob.shelfUpdatedAt, metadataModifiedAt: remoteMetadata.lastModified)
+                        if try applyShelfPlacement(bookId: book.id, shelfName: uploadShelfName) {
+                            result.localLibraryChanged = true
+                        }
+                        if let stamp = uploadShelfUpdatedAt {
+                            shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: stamp)
+                        } else {
+                            shelfState.removeValue(forKey: book.syncId)
+                        }
+                    }
+
+                    // Metadata — preserve / advance importedAt; clear deletedAt iff we overrode the tombstone.
+                    let uploadImportedAt = tombstoneOverridden
+                        ? book.importedAt
+                        : maxRfc(remoteMetadata?.blob.importedAt, book.importedAt)
+                    let uploadDeletedAt = tombstoneOverridden ? nil : remoteMetadata?.blob.deletedAt
+                    let metadataKey = SyncKeys.metadata(book.syncId)
+                    let localRev = HttpSyncRevisionStore.current(metadataKey).localRev
+                    // Reconcile pushes merged state, not a new edit: carry the max of both revs
+                    // forward without bumping (only deliberate edits bump, via the hooks).
+                    let uploadRev = max(localRev, remoteMetadata?.blob.rev ?? 0)
+                    let metaBlob = HttpSyncMetadataBlob(
+                        title: book.title,
+                        contentType: book.contentType,
+                        shelfName: uploadShelfName,
+                        shelfUpdatedAt: uploadShelfUpdatedAt,
+                        importedAt: uploadImportedAt,
+                        deletedAt: uploadDeletedAt,
+                        rev: uploadRev
+                    )
+                    var remoteForCompare = remoteMetadata?.blob
+                    remoteForCompare?.rev = metaBlob.rev
+                    if remoteForCompare == metaBlob {
+                        // Content identical to the server's — skip the PUT entirely.
+                        HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
+                    } else {
+                        _ = try await transport.put(
+                            key: metadataKey,
+                            contentType: Self.jsonContentType,
+                            body: try jsonEncoder.encode(metaBlob)
+                        )
+                        HttpSyncRevisionStore.noteRemote(metadataKey, rev: uploadRev, appliedLocally: true)
+                        result.uploadedMetadata += 1
+                    }
+                    if let uploadShelfUpdatedAt {
+                        shelfState[book.syncId] = HttpSyncShelfPlacementRecord(shelfName: uploadShelfName, updatedAt: uploadShelfUpdatedAt)
+                    } else {
+                        shelfState.removeValue(forKey: book.syncId)
+                    }
+
+                    // A local shelf hook may have completed while PUT was suspended. Repair that
+                    // request immediately rather than letting its older response win on the server.
+                    let latestSnapshot = ShelfSnapshot.load()
+                    shelfState = HttpSyncShelfStateStore.merged(shelfState, with: HttpSyncShelfStateStore.load())
+                    let latestName = latestSnapshot.shelfName(for: book.id)
+                    let latestStamp = localShelfUpdatedAt(syncId: book.syncId, shelfName: latestName,
+                                                          snapshot: latestSnapshot, state: shelfState)
+                    let freshness = compareRfc3339(latestStamp, uploadShelfUpdatedAt)
+                    if freshness < 0 || (freshness == 0 && latestName == uploadShelfName) { break }
                 }
 
                 // Payload — upload once if the server lacks a manifest. Mokuro goes to
@@ -1682,9 +1790,11 @@ struct HttpSyncReconciler {
                     }
                 }
             } catch {
+                guard isCurrent else { return }
                 result.errors.append("\(book.title): \(errorText(error))")
             }
         }
+        guard isCurrent else { return }
         HttpSyncShelfStateStore.save(shelfState)
     }
 
@@ -1750,8 +1860,11 @@ struct HttpSyncReconciler {
     /// MAIN ACTOR because `settings` is a non-Sendable `@Observable` store. The API key is never
     /// read or written here — that field stays per-device. Mirrors Android's `syncAppSettings`.
     @MainActor
-    static func syncAppSettings(transport: HttpSyncKvTransport, settings: AiSettingsSyncing) async -> AppSettingsOutcome {
+    static func syncAppSettings(transport: HttpSyncKvTransport, settings: AiSettingsSyncing,
+                                stillCurrent: @escaping @MainActor () -> Bool = { true }) async -> AppSettingsOutcome {
         var outcome = AppSettingsOutcome()
+        guard !Task.isCancelled, stillCurrent() else { return outcome }
+        let transport = HttpSyncCurrentTransport(base: transport, stillCurrent: stillCurrent)
         let decoder = JSONDecoder()
         let encoder = JSONEncoder()
 
@@ -1760,6 +1873,8 @@ struct HttpSyncReconciler {
         let remoteFetched: HttpSyncKvFetched?
         do {
             remoteFetched = try await transport.get(key: SyncKeys.aiChatSettingsKey)
+        } catch is CancellationError {
+            return outcome
         } catch {
             outcome.error = "ai_chat_settings GET: \((error as? HttpSyncError)?.message ?? error.localizedDescription)"
             return outcome
@@ -1786,6 +1901,8 @@ struct HttpSyncReconciler {
                     body: try encoder.encode(blob)
                 )
                 outcome.uploaded = true
+            } catch is CancellationError {
+                return
             } catch {
                 outcome.error = "ai_chat_settings PUT: \((error as? HttpSyncError)?.message ?? error.localizedDescription)"
             }
@@ -1836,6 +1953,7 @@ struct HttpSyncReconciler {
     // MARK: - Book deletion
 
     private func deleteBook(root: URL, bookId: UUID?) throws {
+        try checkCurrent()
         try BookStorage.delete(at: root)
         if let bookId {
             var shelves = BookStorage.loadShelves() ?? []
@@ -1864,6 +1982,61 @@ struct HttpSyncReconciler {
 
     private func errorText(_ error: Error) -> String {
         (error as? HttpSyncError)?.message ?? error.localizedDescription
+    }
+}
+
+/// The payload codec also performs follow-up manifest requests. Guarding its transport keeps an
+/// invalidated account from starting another request or acknowledging a response after a wait.
+@MainActor private final class HttpSyncCurrentTransport: HttpSyncKvTransport {
+    private let base: HttpSyncKvTransport
+    private let stillCurrent: @MainActor () -> Bool
+    init(base: HttpSyncKvTransport, stillCurrent: @escaping @MainActor () -> Bool) {
+        self.base = base; self.stillCurrent = stillCurrent
+    }
+    private func check() throws {
+        try Task.checkCancellation()
+        guard stillCurrent() else { throw CancellationError() }
+    }
+    @MainActor func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
+        try check()
+        let value = try await base.put(key: key, contentType: contentType, body: body)
+        try check()
+        return value
+    }
+    @MainActor func putFile(key: String, contentType: String, fileURL: URL) async throws -> HttpSyncKvWriteResponse {
+        try check()
+        let value = try await base.putFile(key: key, contentType: contentType, fileURL: fileURL)
+        try check()
+        return value
+    }
+    @MainActor func get(key: String) async throws -> HttpSyncKvFetched? {
+        try check()
+        let value = try await base.get(key: key)
+        try check()
+        return value
+    }
+    @MainActor func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
+        try check()
+        let value = try await base.getBounded(key: key, maxBytes: maxBytes)
+        try check()
+        return value
+    }
+    @MainActor func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? {
+        try check()
+        let value = try await base.downloadToFile(key: key, targetURL: targetURL)
+        try check()
+        return value
+    }
+    @MainActor func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList {
+        try check()
+        let value = try await base.list(prefix: prefix, since: since, cursor: cursor, limit: limit)
+        try check()
+        return value
+    }
+    @MainActor func delete(key: String) async throws {
+        try check()
+        try await base.delete(key: key)
+        try check()
     }
 }
 
@@ -1996,21 +2169,26 @@ enum HttpSyncShelfStateStore {
         // key, the newer `updatedAt` wins; disk-only keys are kept (a hook may have created
         // them mid-sync). The cost is that records removed for tombstoned books can linger as
         // harmless orphans until the book's syncId is reused.
-        var merged = state
-        if let data = try? Data(contentsOf: url),
-           let disk = try? JSONDecoder().decode([String: HttpSyncShelfPlacementRecord].self, from: data) {
-            for (key, diskRecord) in disk {
-                if let memory = merged[key] {
-                    if compareRfc3339(diskRecord.updatedAt, memory.updatedAt) > 0 {
-                        merged[key] = diskRecord
-                    }
-                } else {
-                    merged[key] = diskRecord
-                }
-            }
-        }
+        let merged = merged(state, with: load(), preferDiskOnEqual: false)
         guard let data = try? JSONEncoder().encode(merged) else { return }
         try? data.write(to: url, options: .atomic)
+    }
+
+    /// Refreshing a captured snapshot favors the live disk record on equal stamps. A deliberate
+    /// save favors its input on ties, so another local move in the same millisecond still saves.
+    static func merged(_ state: [String: HttpSyncShelfPlacementRecord],
+                       with disk: [String: HttpSyncShelfPlacementRecord],
+                       preferDiskOnEqual: Bool = true) -> [String: HttpSyncShelfPlacementRecord] {
+        var result = state
+        for (key, record) in disk {
+            if result[key].map({
+                let order = compareRfc3339(record.updatedAt, $0.updatedAt)
+                return order > 0 || (preferDiskOnEqual && order == 0)
+            }) ?? true {
+                result[key] = record
+            }
+        }
+        return result
     }
 }
 

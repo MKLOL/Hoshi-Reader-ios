@@ -23,7 +23,6 @@ cd "$(dirname "$0")"
 PROJECT="Hoshi Reader.xcodeproj"
 SCHEME="Hoshi Reader"
 CONFIG="${CONFIG:-Debug}"
-BUNDLE_ID="com.dragosristache.hoshi"
 DERIVED="build/DD"
 APP="$DERIVED/Build/Products/${CONFIG}-iphoneos/Hoshi Reader.app"
 FILTER="${1:-}"
@@ -86,6 +85,12 @@ for d in "${DEVICES[@]}"; do
         >/tmp/hoshi-build.log 2>&1; then
     err "  ✗ build failed — see /tmp/hoshi-build.log (last lines):"
     tail -n 15 /tmp/hoshi-build.log >&2
+    FAILED=1; continue
+  fi
+
+  BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+  if [ -z "$BUNDLE_ID" ]; then
+    err "  ✗ built app has no bundle identifier"
     FAILED=1; continue
   fi
 

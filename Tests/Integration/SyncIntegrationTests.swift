@@ -111,6 +111,21 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
     /// still count as applied: re-applying it rewrote the bookmark and announced a move on every
     /// five-second poll.
     @MainActor
+    func testUnrelatedRemoteMetadataForcesAFullPassWithoutReloadingTheShelf() async throws {
+        try await prepare()
+        await syncNow()
+        let transport = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        _ = try await transport.put(key: "tests/unrelated-metadata", contentType: "application/json", body: Data("{}".utf8))
+        var reloads = 0
+        let observer = NotificationCenter.default.addObserver(forName: .hoshiLibraryChanged, object: nil, queue: nil) { _ in
+            MainActor.assumeIsolated { reloads += 1 }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        await syncNow()
+        XCTAssertEqual(reloads, 0, "unchanged full reconciliation does not rebuild the shelf")
+    }
+
+    @MainActor
     func testAndroidEncodedBookmarkIsAppliedOnceNotOnEveryPoll() async throws {
         try await prepare()
         await syncNow()
@@ -500,6 +515,52 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
             // Blocking waits (synchronous IPC or IO) use no CPU but still hold the main thread.
             XCTAssertLessThan(stall.wall, 0.1, "\(name) held the main thread for \(Int(stall.wall * 1000)) ms")
         }
+
+        // Exercise the reader's real synchronous turn path against the same 80-book map and
+        // 30-day history, including statistics, the position journal and the durable outbox.
+        let readingBook = try book("large_library_7")
+        let reader = MangaReaderViewModel(metadata: readingBook.metadata)
+        let controller = MangaWebViewController()
+        let config = UserConfig()
+        config.enableSync = false // TTU is unrelated to the configured HTTP outbox under test.
+        HttpSyncActiveBooks.open("large_library_7")
+        defer {
+            reader.suspendStatistics()
+            reader.usage?.close()
+            reader.cancelPreload()
+            HttpSyncActiveBooks.close("large_library_7")
+        }
+        await reader.load(controller: controller, userConfig: config)
+        XCTAssertTrue(reader.isReady, reader.errorMessage ?? "manga did not load")
+        XCTAssertGreaterThan(reader.pageCount, 1)
+        reader.goToPage(0)
+        if reader.statistics?.isTracking != true { reader.toggleStatisticsTracking() }
+        let statisticsOrigin = reader.statisticsOrigin
+        let ownStatistics = expectation(forNotification: .readingStatisticsChanged, object: nil) { note in
+            note.object as? URL == readingBook.root && note.userInfo?["origin"] as? UUID == statisticsOrigin
+        }
+        ownStatistics.expectedFulfillmentCount = 2 // OCR counts and reading-time rows.
+        let startCPU = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        let startWall = ProcessInfo.processInfo.systemUptime
+        reader.navigate(.forward)
+        let turnCPU = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - startCPU
+        let turnWall = ProcessInfo.processInfo.systemUptime - startWall
+        let turnWallMilliseconds = String(format: "%.2f", turnWall * 1000)
+        print("manga page turn with 80 books: \(ms(turnCPU)) main-thread CPU, \(turnWallMilliseconds) ms wall")
+        XCTAssertLessThan(turnCPU, 8_000_000, "a page turn ran \(ms(turnCPU)) on the main thread")
+        XCTAssertLessThan(turnWall, 0.1, "a page turn blocked the main thread for \(turnWall) seconds")
+        XCTAssertEqual(reader.pageIndex, 1)
+        XCTAssertEqual(BookStorage.loadBookmark(root: readingBook.root)?.chapterIndex, 1, "the turn is durable before rendering or awaiting sync")
+        await fulfillment(of: [ownStatistics], timeout: 1)
+        reader.flushPendingBookmark()
+        reader.suspendStatistics()
+        reader.usage?.close()
+        await HttpSyncManager.shared.flushBookmarkSync()
+        // A fresh repository has no decoded cache: restore from the committed journal bytes.
+        let durable = ReadingPositionRepository(directory: ReadingPositionRepository.shared.directory,
+            device: ReadingPositionRepository.shared.device)
+        XCTAssertEqual(durable.open(bookId: "large_library_7", root: readingBook.root).initialBookmark?.chapterIndex, 1)
+        XCTAssertEqual(BookStorage.loadBookmark(root: readingBook.root)?.chapterIndex, 1, "close and sync cannot roll back the last page")
     }
 
     /// The longest main-thread CPU time between two heartbeats while `work` runs: work that ran

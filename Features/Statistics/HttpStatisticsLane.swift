@@ -66,8 +66,11 @@ nonisolated struct HttpStatisticsDisk: Sendable {
     /// Each book's statistics files as modified, so a pass can tell what changed since the last.
     var stamps: [String: String] = [:]
     var digest = ""
+    /// An ETag is only applied while its rows are still present locally. A backup restore may
+    /// replace or remove sidecars without changing the server's ETag.
+    var invalidShards: Set<String> = []
 
-    @concurrent static func read(booksDirectory: URL, stateFile: String) async -> HttpStatisticsDisk {
+    @concurrent static func read(booksDirectory: URL, stateFile: String, applied: [String: String] = [:], hashes: [String: String] = [:], scope: String = "", validatedDisk: String? = nil) async -> HttpStatisticsDisk {
         var disk = HttpStatisticsDisk(), installed: [String: StatisticsRoot] = [:]
         let manager = FileManager.default, decoder = JSONDecoder()
         do {
@@ -98,12 +101,55 @@ nonisolated struct HttpStatisticsDisk: Sendable {
         let files = [FileNames.metadata, FileNames.statistics, FileNames.mangaStatistics, stateFile, "history.json", ReadingStatisticsStore.migration]
         for root in disk.roots {
             disk.stamps[root.syncId] = root.root.path + files.map { name in
-                ((try? manager.attributesOfItem(atPath: root.root.appendingPathComponent(name).path))?[.modificationDate] as? Date)
-                    .map { String($0.timeIntervalSinceReferenceDate.bitPattern, radix: 36) } ?? "-"
+                let attributes = try? manager.attributesOfItem(atPath: root.root.appendingPathComponent(name).path)
+                return (attributes?[.modificationDate] as? Date)
+                    .map { String($0.timeIntervalSinceReferenceDate.bitPattern, radix: 36) + ":\(attributes?[.size] as? UInt64 ?? 0)" } ?? "-"
             }.joined(separator: ",")
         }
         disk.digest = SHA256.hash(data: Data(disk.roots.map { disk.stamps[$0.syncId] ?? "" }.joined(separator: "\n").utf8)).lowercaseHex
+        guard disk.digest != validatedDisk else { return disk }
+        var reading: [String: [Statistics]] = [:], text: [String: [MangaTextStatistic]] = [:]
+        func rows<T: Decodable>(_ root: URL, _ name: String) throws -> [T] {
+            let file = root.appendingPathComponent(name)
+            guard manager.fileExists(atPath: file.path) else { return [] }
+            return try decoder.decode([T].self, from: Data(contentsOf: file))
+        }
+        for key in applied.keys {
+            guard let parsed = HttpStatisticsLane.parse(key), parsed.month != "settings" else { continue }
+            do {
+                let body = try Data(contentsOf: cacheURL(key: key, scope: scope, booksDirectory: booksDirectory))
+                guard body.count <= 4 * 1024 * 1024, SHA256.hash(data: body).lowercaseHex == hashes[key] else { disk.invalidShards.insert(key); continue }
+                let shard = try decoder.decode(HttpStatisticsShard.self, from: body)
+                guard shard.deviceId == parsed.device, shard.month == parsed.month else { disk.invalidShards.insert(key); continue }
+                for (id, book) in shard.books where StatisticsHistory.validID(id) {
+                    let expected = book.reading.filter { $0.deviceId == parsed.device && $0.dateKey.hasPrefix(parsed.month + "-") && ReadingDay.parse($0.dateKey) != nil }
+                    let expectedText = book.mangaText.filter { $0.deviceId == parsed.device && $0.dateKey.hasPrefix(parsed.month + "-") && ReadingDay.parse($0.dateKey) != nil }
+                    guard !expected.isEmpty || !expectedText.isEmpty else { continue }
+                    guard let root = installed[id]?.root else { disk.invalidShards.insert(key); break }
+                    if reading[id] == nil { reading[id] = Statistics.merged(try rows(root, FileNames.statistics)) }
+                    if text[id] == nil { text[id] = MangaTextStatistic.merged(try rows(root, FileNames.mangaStatistics)) }
+                    if Statistics.merged(reading[id]! + expected) != reading[id]! || MangaTextStatistic.merged(text[id]! + expectedText) != text[id]! {
+                        disk.invalidShards.insert(key); break
+                    }
+                }
+            } catch { disk.invalidShards.insert(key) }
+        }
         return disk
+    }
+
+    private static func cacheURL(key: String, scope: String, booksDirectory: URL) -> URL {
+        let account = SHA256.hash(data: Data(scope.utf8)).lowercaseHex
+        let name = SHA256.hash(data: Data(key.utf8)).lowercaseHex + ".json"
+        return booksDirectory.appendingPathComponent(".http_sync_statistics_cache").appendingPathComponent(account).appendingPathComponent(name)
+    }
+    /// Keep the exact accepted evidence off the main actor. Validation can then distinguish a
+    /// normal reading advance from restored older rows without fetching every unchanged shard.
+    @concurrent static func cache(_ body: Data, key: String, scope: String, booksDirectory: URL) async throws {
+        let file = cacheURL(key: key, scope: scope, booksDirectory: booksDirectory)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try body.write(to: file, options: .atomic)
+        var directory = booksDirectory.appendingPathComponent(".http_sync_statistics_cache"), values = URLResourceValues()
+        values.isExcludedFromBackup = true; try directory.setResourceValues(values)
     }
 
     /// This device's rows of every book as encoded monthly shards with their hashes.
@@ -140,7 +186,7 @@ nonisolated struct HttpStatisticsDisk: Sendable {
 /// Legacy per-book keys remain bidirectional so devices can upgrade independently.
 @Observable @MainActor final class HttpStatisticsLane {
     static let shared = HttpStatisticsLane()
-    static let prefix = "sync/maps/stats/"
+    nonisolated static let prefix = "sync/maps/stats/"
     var lastChecked: Date?
     var problem: String?
     private struct Index: Codable, Equatable {
@@ -153,12 +199,15 @@ nonisolated struct HttpStatisticsDisk: Sendable {
         var settled: String?
         /// Per book, its files and server copies when its exchange last found nothing to do.
         var legacy: [String: String]?
+        /// The local file signature last checked against the cached, accepted shard evidence.
+        var validatedDisk: String?
     }
     private struct Failure { var etag: String?; var retry: Date; var attempts: Int; var message: String? }
     private var failures: [String: Failure] = [:]
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var scheduled: Task<Void, Never>?
+    private var scheduledConfig: HttpSyncConfig?
     private var polling: Task<Void, Never>?
     private var lastPush = Date.distantPast
     private var lastLegacyPush = Date.distantPast
@@ -177,7 +226,7 @@ nonisolated struct HttpStatisticsDisk: Sendable {
         return try encoder.encode(value)
     }
     private func sha(_ data: Data) -> String { SHA256.hash(data: data).lowercaseHex }
-    static func parse(_ key: String) -> (device: String, month: String)? {
+    nonisolated static func parse(_ key: String) -> (device: String, month: String)? {
         guard key.hasPrefix(prefix) else { return nil }
         let parts = key.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 2, StatisticsHistory.validID(parts[0]) else { return nil }
@@ -188,27 +237,33 @@ nonisolated struct HttpStatisticsDisk: Sendable {
         return (parts[0], month)
     }
     func schedule(flush: Bool = false) {
-        guard HttpSyncSettingsStore.shared.isConfigured else { return }
-        if flush { scheduled?.cancel(); scheduled = nil }
+        let config = HttpSyncSettingsStore.shared.currentConfig()
+        guard config.isConfigured else { return }
+        if flush || scheduledConfig != config { scheduled?.cancel(); scheduled = nil }
         guard scheduled == nil else { return } // First dirty save sets a deadline; subsequent saves cannot postpone it.
+        scheduledConfig = config
         scheduled = Task { @MainActor [weak self] in
             guard let self else { return }
             if !flush { do { try await Task.sleep(for: .seconds(30)) } catch { return } }
             self.scheduled = nil
+            self.scheduledConfig = nil
+            guard HttpSyncSettingsStore.shared.currentConfig() == config else { return }
             await self.refresh(flush: flush)
         }
     }
     func refresh(flush: Bool = true) async {
         let config = HttpSyncSettingsStore.shared.currentConfig()
         guard config.isConfigured else { return }
+        let stillCurrent = { @MainActor in HttpSyncSettingsStore.shared.currentConfig() == config }
         let work = Task { @MainActor in
             let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
             do {
                 var listing: [String: HttpSyncKvKeyMeta] = [:]
                 try await transport.listAll(prefix: nil, since: nil) { listing[$0.key] = $0 }
                 try Task.checkCancellation()
-                _ = await self.run(transport: transport, listing: listing, scope: config.baseURL + ":" + self.sha(Data(config.token.utf8)), flush: flush)
-            } catch { if !Task.isCancelled { self.markFailed(error) } }
+                guard stillCurrent() else { return }
+                _ = await self.run(transport: transport, listing: listing, scope: config.baseURL + ":" + self.sha(Data(config.token.utf8)), flush: flush, stillCurrent: stillCurrent)
+            } catch { if !Task.isCancelled, stillCurrent() { self.markFailed(error) } }
         }
         var lease = UIBackgroundTaskIdentifier.invalid
         lease = UIApplication.shared.beginBackgroundTask(withName: "Reading history sync") {
@@ -222,30 +277,49 @@ nonisolated struct HttpStatisticsDisk: Sendable {
     /// change with their keys, so an unchanged listing skips the pass (which reads every book's
     /// history); a pass still runs once a minute for backed-off keys. Local reading is pushed by
     /// `schedule`, not here.
-    private var polledStatistics: (scope: String, etags: [String: String?], at: Date)?
+    private var polledStatistics: (scope: String, keys: [String: String], at: Date, revision: UInt64)?
+    private var pollRevision: UInt64 = 0
 
-    func poll(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String) {
-        guard polling == nil else { return }
-        var etags: [String: String?] = [:]
-        for (key, meta) in listing where Self.parse(key) != nil { etags[key] = meta.etag }
-        if let previous = polledStatistics, previous.scope == scope, previous.etags == etags,
-           clock().timeIntervalSince(previous.at) < 60 { return }
-        polledStatistics = (scope, etags, clock())
-        polling = Task { @MainActor [weak self] in
+    @discardableResult func poll(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String, stillCurrent: @escaping @MainActor () -> Bool = { true }) -> Task<Void, Never>? {
+        guard polling == nil, !Task.isCancelled, stillCurrent() else { return nil }
+        let keys = listing.filter { Self.parse($0.key) != nil }.mapValues(Self.listed)
+        if let previous = polledStatistics, previous.scope == scope, previous.keys == keys,
+           clock().timeIntervalSince(previous.at) < 60 { return nil }
+        pollRevision &+= 1
+        let revision = pollRevision
+        polledStatistics = (scope, keys, clock(), revision)
+        let work = Task { @MainActor [weak self] in
             guard let self else { return }
-            _ = await self.run(transport: transport, listing: listing, scope: scope)
+            _ = await self.run(transport: transport, listing: listing, scope: scope, stillCurrent: stillCurrent)
+            if !stillCurrent() || Task.isCancelled, self.polledStatistics?.revision == revision { self.polledStatistics = nil }
             self.polling = nil
         }
+        polling = work
+        return work
+    }
+    private func noteUploaded(_ response: HttpSyncKvWriteResponse, key: String, scope: String, observed: HttpSyncKvKeyMeta?) {
+        guard var previous = polledStatistics, previous.scope == scope,
+              previous.keys[key] == observed.map(Self.listed) else { return }
+        // A pass may have waited behind a later poll. Change only a key still matching this
+        // pass's observation; never replace another account or a newer server observation.
+        previous.keys[key] = Self.listed(response)
+        polledStatistics = previous
     }
     func markFailed(_ error: Error) {
         problem = error is URLError ? "No connection. Other devices’ reading may be out of date." : "Could not check other devices’ reading: \(error.localizedDescription)"
     }
-    func run(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String = "", flush: Bool = false, retryFailed: Bool = false) async -> [String] {
+    func run(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String = "", flush: Bool = false, retryFailed: Bool = false, stillCurrent: @escaping @MainActor () -> Bool = { true }) async -> [String] {
         if busy { await withCheckedContinuation { waiters.append($0) } }
         busy = true
         defer { if waiters.isEmpty { busy = false } else { waiters.removeFirst().resume() } }
+        guard !Task.isCancelled, stillCurrent() else { return [] }
         let now = clock(), own = device ?? .current
+        var failures = self.failures, lastPush = self.lastPush, lastLegacyPush = self.lastLegacyPush
         var errors: [String] = []
+        func checkCurrent() throws {
+            try Task.checkCancellation()
+            guard stillCurrent() else { throw CancellationError() }
+        }
         do {
             let booksDirectory = try directory ?? BookStorage.getBooksDirectory()
             try FileManager.default.createDirectory(at: booksDirectory, withIntermediateDirectories: true)
@@ -255,9 +329,12 @@ nonisolated struct HttpStatisticsDisk: Sendable {
             if index.scope != scope { index = Index(scope: scope); failures = [:]; lastPush = .distantPast; lastLegacyPush = .distantPast }
             var rootErrors: [String] = []
             func finish() async throws {
+                try checkCurrent()
                 if let usageLane {
-                    errors += await usageLane.run(transport: transport, listing: listing, deviceID: own.id, scope: scope, flush: flush, retryFailed: retryFailed)
+                    errors += await usageLane.run(transport: transport, listing: listing, deviceID: own.id, scope: scope, flush: flush, retryFailed: retryFailed, stillCurrent: stillCurrent)
+                    try checkCurrent()
                 }
+                self.failures = failures; self.lastPush = lastPush; self.lastLegacyPush = lastLegacyPush
                 if index != stored {
                     try FileManager.default.createDirectory(at: booksDirectory, withIntermediateDirectories: true)
                     try BookStorage.save(index, inside: booksDirectory, as: file.lastPathComponent)
@@ -267,9 +344,10 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                 if !rootErrors.isEmpty { problem = "Some retained reading history could not be read." }
                 if problem == nil { lastChecked = now }
             }
-            let disk = try await readDisk(booksDirectory) { rootErrors.append($0) }
+            let disk = try await readDisk(booksDirectory, index: index, stillCurrent: stillCurrent) { rootErrors.append($0) }
+            try checkCurrent()
             let listed = Self.statisticsListing(listing)
-            if !flush, !retryFailed, failures.isEmpty, rootErrors.isEmpty,
+            if !flush, !retryFailed, failures.isEmpty, rootErrors.isEmpty, disk.invalidShards.isEmpty,
                index.settled == settledSignature(disk, listed) {
                 try await finish()
                 return errors
@@ -295,14 +373,15 @@ nonisolated struct HttpStatisticsDisk: Sendable {
             }
             var readThisPass = Set<String>(), touched = Set<String>()
             // Apply each key only after all its rows are safely saved, including own keys after restore.
-            try Task.checkCancellation()
+            try checkCurrent()
             for meta in listing.values.filter({ $0.key.hasPrefix(Self.prefix) }).sorted(by: { $0.key < $1.key }) {
-                guard let parsed = Self.parse(meta.key), index.applied[meta.key] != meta.etag || meta.etag == nil, !blocked(meta.key, meta.etag) else { continue }
+                guard let parsed = Self.parse(meta.key), index.applied[meta.key] != meta.etag || meta.etag == nil || disk.invalidShards.contains(meta.key), !blocked(meta.key, meta.etag) else { continue }
                 do {
-                    try Task.checkCancellation()
+                    try checkCurrent()
                     guard let fetched = try await transport.getBounded(key: meta.key, maxBytes: parsed.month == "settings" ? 65_536 : 4 * 1024 * 1024) else {
                         throw HttpSyncError("Statistics disappeared", skip: true)
                     }
+                    try checkCurrent()
                     let version = try JSONDecoder().decode(Version.self, from: fetched.body).version
                     guard version <= 1 else { throw HttpSyncError("Statistics need a newer app", skip: true) }
                     guard version == 1 else { throw HttpSyncError("Unsupported statistics version") }
@@ -324,12 +403,14 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                             let oldText = try ReadingStatisticsStore.strictText(root: root), newText = MangaTextStatistic.merged(oldText + text)
                             if newText != oldText { try ReadingStatisticsStore.saveText(newText, root: root, scheduleSync: false); touched.insert(id) }
                         }
+                        try await HttpStatisticsDisk.cache(fetched.body, key: meta.key, scope: scope, booksDirectory: booksDirectory)
+                        try checkCurrent()
                     }
                     readThisPass.insert(meta.key)
                     index.applied[meta.key] = fetched.etag
                     index.hashes[meta.key] = sha(fetched.body)
                     failures.removeValue(forKey: meta.key)
-                } catch { if Task.isCancelled { throw CancellationError() }; fail(meta.key, meta.etag, error, quiet: (error as? HttpSyncError)?.skip == true) }
+                } catch { try checkCurrent(); fail(meta.key, meta.etag, error, quiet: (error as? HttpSyncError)?.skip == true) }
             }
             // Legacy keys for every book on the server, regardless of payload availability or tombstones.
             for key in listed.keys.filter({ $0.hasPrefix("books/") }).sorted() {
@@ -349,21 +430,25 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                 if !retryFailed, !touched.contains(item.syncId), let signature = legacySignature(item.syncId, disk.stamps[item.syncId]), legacy[item.syncId] == signature { continue }
                 legacy[item.syncId] = nil
                 do {
-                    if try await HttpReadingStatisticsSync.shared.exchange(root: item.root, syncId: item.syncId, transport: transport, listing: listing, uploadLocal: legacyDue) {
+                    let exchanged = try await HttpReadingStatisticsSync.shared.exchange(root: item.root, syncId: item.syncId, transport: transport, listing: listing, uploadLocal: legacyDue, stillCurrent: stillCurrent)
+                    try checkCurrent()
+                    if exchanged {
                         legacySettled = false
                     } else { quietBooks.append(item.syncId) }
                     if item.book == nil, item.title == nil, let title = try ReadingStatisticsStore.strictReading(root: item.root).first?.title {
                         _ = try rootFor(item.syncId, title: title, type: item.contentType?.rawValue)
                     }
                     failures.removeValue(forKey: key)
-                } catch { legacySettled = false; fail(key, listing[key]?.etag, error, quiet: (error as? HttpSyncError)?.skip == true) }
+                } catch { try checkCurrent(); legacySettled = false; fail(key, listing[key]?.etag, error, quiet: (error as? HttpSyncError)?.skip == true) }
             }
             if legacyDue { lastLegacyPush = now }
-            try Task.checkCancellation()
+            try checkCurrent()
             // Re-read after all network awaits: live sessions and deletes may have changed the roots.
-            let current = try await readDisk(booksDirectory) { rootErrors.append($0) }
+            let current = try await readDisk(booksDirectory, index: index, stillCurrent: stillCurrent) { rootErrors.append($0) }
+            try checkCurrent()
             errors += rootErrors
             let shards = await HttpStatisticsDisk.shards(roots: current.roots, device: own.id)
+            try checkCurrent()
             var canPublish = rootErrors.isEmpty
             for item in current.roots {
                 if let message = shards.errors[item.syncId] { canPublish = false; fail("local:\(item.syncId)", nil, HttpSyncError(message)) }
@@ -378,9 +463,13 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                     guard listing[key] == nil || readThisPass.contains(key) || (index.applied[key] != nil && index.applied[key] == listing[key]?.etag), !blocked(key, listing[key]?.etag) else { continue }
                     do {
                         let response = try await transport.put(key: key, contentType: "application/json; charset=utf-8", body: shard.body)
+                        try checkCurrent()
+                        noteUploaded(response, key: key, scope: scope, observed: listing[key])
+                        try await HttpStatisticsDisk.cache(shard.body, key: key, scope: scope, booksDirectory: booksDirectory)
+                        try checkCurrent()
                         index.applied[key] = response.etag; index.hashes[key] = shard.sha; failures.removeValue(forKey: key)
                         listedAfter[key] = Self.listed(response)
-                    } catch { fail(key, listing[key]?.etag, error) }
+                    } catch { try checkCurrent(); fail(key, listing[key]?.etag, error) }
                 }
                 lastPush = now
             }
@@ -406,31 +495,40 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                listing[settingsKey] == nil || readThisPass.contains(settingsKey) || (index.applied[settingsKey] != nil && index.applied[settingsKey] == listing[settingsKey]?.etag), !blocked(settingsKey, listing[settingsKey]?.etag) {
                 do {
                     let response = try await transport.put(key: settingsKey, contentType: "application/json; charset=utf-8", body: settingsBody)
+                    try checkCurrent()
+                    noteUploaded(response, key: settingsKey, scope: scope, observed: listing[settingsKey])
                     index.applied[settingsKey] = response.etag; index.hashes[settingsKey] = sha(settingsBody); index.preferences[settingsKey] = local
                     failures.removeValue(forKey: settingsKey)
                     listedAfter[settingsKey] = Self.listed(response)
-                } catch { fail(settingsKey, listing[settingsKey]?.etag, error) }
+                } catch { try checkCurrent(); fail(settingsKey, listing[settingsKey]?.etag, error) }
             }
             // The stamps read before the exchange: a save after it must still look new.
             for id in quietBooks where !touched.contains(id) { legacy[id] = legacySignature(id, disk.stamps[id]) }
             legacy = legacy.filter { current.stamps[$0.key] != nil }
             index.legacy = legacy.isEmpty ? nil : legacy
             let settingsSynced = local.updatedAt <= 0 || index.hashes[settingsKey] == sha(settingsBody)
-            let settled = errors.isEmpty && failures.isEmpty && legacySettled && monthsSynced && settingsSynced && !current.needsAbsorb && current.digest == disk.digest
+            index.validatedDisk = current.invalidShards.isEmpty ? current.digest : nil
+            let settled = errors.isEmpty && failures.isEmpty && legacySettled && monthsSynced && settingsSynced && current.invalidShards.isEmpty && !current.needsAbsorb && current.digest == disk.digest
             index.settled = settled ? settledSignature(current, listedAfter) : nil
             try await finish()
-        } catch { errors.append(error.localizedDescription); markFailed(error) }
+        } catch {
+            guard !Task.isCancelled, stillCurrent() else { return [] }
+            errors.append(error.localizedDescription); markFailed(error)
+        }
         return errors
     }
     private struct Version: Decodable { let version: Int }
 
-    private func readDisk(_ booksDirectory: URL, onError: (String) -> Void) async throws -> HttpStatisticsDisk {
-        let disk = await HttpStatisticsDisk.read(booksDirectory: booksDirectory, stateFile: HttpReadingStatisticsSync.stateFile)
+    private func readDisk(_ booksDirectory: URL, index: Index, stillCurrent: @MainActor () -> Bool, onError: (String) -> Void) async throws -> HttpStatisticsDisk {
+        let disk = await HttpStatisticsDisk.read(booksDirectory: booksDirectory, stateFile: HttpReadingStatisticsSync.stateFile, applied: index.applied, hashes: index.hashes, scope: index.scope, validatedDisk: index.validatedDisk)
+        guard !Task.isCancelled, stillCurrent() else { throw CancellationError() }
         guard disk.needsAbsorb else { disk.errors.forEach(onError); return disk }
         var reported: [String] = []
         _ = try StatisticsHistory.roots(directory: booksDirectory, onError: { id, error in reported.append("\(id): \(error.localizedDescription)") })
         reported.forEach(onError)
-        return await HttpStatisticsDisk.read(booksDirectory: booksDirectory, stateFile: HttpReadingStatisticsSync.stateFile)
+        let absorbed = await HttpStatisticsDisk.read(booksDirectory: booksDirectory, stateFile: HttpReadingStatisticsSync.stateFile, applied: index.applied, hashes: index.hashes, scope: index.scope, validatedDisk: index.validatedDisk)
+        guard !Task.isCancelled, stillCurrent() else { throw CancellationError() }
+        return absorbed
     }
     private static func listed(_ meta: HttpSyncKvKeyMeta) -> String { "\(meta.etag ?? "")|\(meta.size ?? -1)|\(meta.lastModified)" }
     /// The statistics keys as listed, so an unchanged server is recognized without reading anything.

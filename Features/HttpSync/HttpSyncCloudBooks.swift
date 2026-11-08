@@ -40,7 +40,13 @@ final class HttpSyncCloudBooks {
     // Opens in the current account's scope: the shelf can load before the first sync or
     // foreground activation, and must already hide a manga that is installed but not yet shown.
     static let shared = HttpSyncCloudBooks(scope: HttpSyncSettingsStore.shared.currentConfig())
-    private(set) var records: [HttpSyncCloudBookRecord] = []
+    private(set) var records: [HttpSyncCloudBookRecord] = [] {
+        didSet {
+            let present = !records.isEmpty
+            if hasRecords != present { hasRecords = present }
+        }
+    }
+    private(set) var hasRecords = false
     private(set) var downloads: [String: Double] = [:]
     /// The manga whose archive a pass is transferring; only cancelling it stops the pass.
     private(set) var transferringSyncId: String?
@@ -48,6 +54,7 @@ final class HttpSyncCloudBooks {
     private var directory: URL
     private let baseDirectory: URL
     private var scope: String?
+    @ObservationIgnored private var coverRetries: [String: (archive: String, after: Date)] = [:]
 
     init(directory: URL? = nil, scope config: HttpSyncConfig? = nil) {
         let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -67,6 +74,7 @@ final class HttpSyncCloudBooks {
         scope = identity
         directory = baseDirectory.appendingPathComponent(identity, isDirectory: true)
         downloads = [:]
+        coverRetries = [:]
         transferringSyncId = nil
         reload()
         // Another account hides a different set of installed books. Not from init: observers
@@ -206,9 +214,13 @@ final class HttpSyncCloudBooks {
 
     /// Android publishes a bounded JPEG under an archive-specific key. Older servers without
     /// thumbnails keep a placeholder; listing a manga must never download its archive for a cover.
-    func fetchMissingCovers(transport: HttpSyncKvTransport) async {
+    func fetchMissingCovers(transport: HttpSyncKvTransport, now: Date = .now) async {
         let expectedGeneration = generation
-        let missing = records.filter { $0.downloadRequestedAt == nil && $0.coverArchiveSha256 != $0.archiveSha256 }
+        let missing = records.filter {
+            guard $0.downloadRequestedAt == nil, $0.coverArchiveSha256 != $0.archiveSha256 else { return false }
+            guard let retry = coverRetries[$0.syncId], retry.archive == $0.archiveSha256 else { return true }
+            return now >= retry.after
+        }
         for record in missing {
             guard !Task.isCancelled, generation == expectedGeneration else { return }
             let hash = String(record.archiveSha256.dropFirst("sha256:".count))
@@ -217,11 +229,16 @@ final class HttpSyncCloudBooks {
             do {
                 let fetched = try await transport.getBounded(key: "books/\(record.syncId)/cover/\(hash)", maxBytes: 8 * 1024 * 1024)
                 guard !Task.isCancelled, generation == expectedGeneration else { return }
-                let thumbnail = fetched.flatMap { Self.thumbnail($0.body) }
+                let thumbnail: Data?
+                if let fetched { thumbnail = await Self.makeThumbnail(fetched.body) } else { thumbnail = nil }
+                guard !Task.isCancelled, generation == expectedGeneration else { return }
                 guard let index = records.firstIndex(where: { $0.syncId == record.syncId && $0.archiveSha256 == record.archiveSha256 }) else { continue }
-                // An absent thumbnail may be backfilled by another device later: don't mark it
-                // permanently unavailable. A future sync can discover it without the archive.
-                guard let thumbnail else { continue }
+                // Retry later for server-side backfills; a new archive is eligible immediately.
+                guard let thumbnail else {
+                    coverRetries[record.syncId] = (record.archiveSha256, now.addingTimeInterval(5 * 60))
+                    continue
+                }
+                coverRetries[record.syncId] = nil
                 let name = Self.digest(record.syncId + record.archiveSha256) + ".jpg"
                 let covers = directory.appendingPathComponent("covers", isDirectory: true)
                 try FileManager.default.createDirectory(at: covers, withIntermediateDirectories: true)
@@ -256,6 +273,8 @@ final class HttpSyncCloudBooks {
               ] as CFDictionary) else { return nil }
         return UIImage(cgImage: image).jpegData(compressionQuality: 0.82)
     }
+
+    @concurrent private static func makeThumbnail(_ data: Data) async -> Data? { thumbnail(data) }
 
     nonisolated private static func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()

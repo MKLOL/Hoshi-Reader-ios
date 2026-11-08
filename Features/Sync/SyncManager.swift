@@ -169,9 +169,9 @@ class SyncManager {
         }
     }
     
-    private func determineSyncDirection(local: Bookmark?, remoteProgressFile: DriveFile?) -> SyncDirection {
-        let localModified = local?.lastModified
-        let remoteModified = remoteProgressFile.flatMap(parseProgressTimestamp)
+    func determineSyncDirection(local: Bookmark?, remoteProgressFile: DriveFile?) -> SyncDirection {
+        let localModified = local?.lastModified.flatMap(Self.progressMilliseconds)
+        let remoteModified = remoteProgressFile.flatMap(Self.parseProgressTimestamp)
         
         switch (localModified, remoteModified) {
         case (nil, nil):
@@ -187,13 +187,21 @@ class SyncManager {
         }
     }
     
-    private func parseProgressTimestamp(from file: DriveFile) -> Date? {
+    private static func parseProgressTimestamp(from file: DriveFile) -> Int64? {
         guard file.name.hasPrefix("progress_") else { return nil }
         let parts = file.name.split(separator: "_")
-        guard parts.count > 4, let timestamp = Int(parts[3]) else { return nil }
-        return Date(timeIntervalSince1970: TimeInterval(timestamp) / 1000.0)
+        guard parts.count > 4 else { return nil }
+        return Int64(parts[3])
     }
     
+    /// Drive progress filenames contain integer milliseconds. Compare at that same precision
+    /// without changing the journal's authoritative navigation timestamp after an upload.
+    static func progressMilliseconds(_ date: Date) -> Int64? {
+        let value = date.timeIntervalSince1970 * 1000
+        guard value.isFinite, value >= Double(Int64.min), value < Double(Int64.max) else { return nil }
+        return Int64(value.rounded(.towardZero))
+    }
+
     private func importProgress(ttuProgress: TtuProgress, to url: URL, bookId: String?, explicit: Bool) throws {
         guard let bookInfo = BookStorage.loadBookInfo(root: url) else { throw HttpSyncError("Book layout is unavailable for importing reading progress.") }
         
@@ -239,9 +247,8 @@ class SyncManager {
     
     private func exportProgress(localBookmark: Bookmark, ttuProgress: TtuProgress?, folderId: String, fileId: String?, url: URL) async throws {
         guard let bookInfo = BookStorage.loadBookInfo(root: url),
-              let lastModified = localBookmark.lastModified else { return }
-        
-        let unixTimestamp = Int(lastModified.timeIntervalSince1970 * 1000)
+              let lastModified = localBookmark.lastModified,
+              let unixTimestamp = Self.progressMilliseconds(lastModified) else { return }
         let roundedDate = Date(timeIntervalSince1970: TimeInterval(unixTimestamp) / 1000.0)
         
         let progress = TtuProgress(
@@ -256,18 +263,6 @@ class SyncManager {
             fileId: fileId,
             progress: progress
         )
-        
-        let bookmark = Bookmark(
-            chapterIndex: localBookmark.chapterIndex,
-            progress: localBookmark.progress,
-            characterCount: localBookmark.characterCount,
-            lastModified: roundedDate
-        )
-        if let current = BookStorage.loadBookmark(root: url), current.chapterIndex == localBookmark.chapterIndex,
-           current.progress == localBookmark.progress, current.characterCount == localBookmark.characterCount,
-           current.lastModified == localBookmark.lastModified {
-            try? BookStorage.save(bookmark, inside: url, as: FileNames.bookmark)
-        }
     }
 
     private func exportStats(stats: [Statistics]?, folderId: String, fileId: String?) async throws {

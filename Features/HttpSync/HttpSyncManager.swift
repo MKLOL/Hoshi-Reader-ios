@@ -117,7 +117,7 @@ final class HttpSyncManager {
     }
 
     @discardableResult
-    private func beginReconcile(preflight: HttpSyncMapChanges?) -> Task<Void, Never> {
+    private func beginReconcile(preflight: HttpSyncMapChanges?, expectedConfig: HttpSyncConfig? = nil) -> Task<Void, Never> {
         if let reconcileTask { return reconcileTask }
         // `@MainActor in` is load-bearing: without it this Task runs on the cooperative pool, so the
         // whole reconcile (which the author intends to be MainActor-isolated for race-free file IO)
@@ -127,7 +127,7 @@ final class HttpSyncManager {
         let taskId = UUID()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.runReconcile(preflight: preflight)
+            await self.runReconcile(preflight: preflight, expectedConfig: expectedConfig)
         }
         reconcileTaskId = taskId
         reconcileTask = task
@@ -141,7 +141,8 @@ final class HttpSyncManager {
         return task
     }
 
-    private func runReconcile(preflight: HttpSyncMapChanges?) async {
+    private func runReconcile(preflight: HttpSyncMapChanges?, expectedConfig: HttpSyncConfig?) async {
+        if let expectedConfig, settings.currentConfig() != expectedConfig { return }
         tokenRejected = false
         lastError = nil
         lastErrors = []
@@ -162,7 +163,7 @@ final class HttpSyncManager {
         var cursor = settings.lastSyncedAt
         let queuedBefore = HttpSyncCloudBooks.shared.requestedSyncIds
         // A pass that changed nothing on this device must not reload the whole shelf.
-        var libraryChanged = true
+        var libraryChanged = false
 
         log.info("syncNow starting (cursor=\(cursor ?? "nil", privacy: .public))")
         isSyncing = true
@@ -202,10 +203,13 @@ final class HttpSyncManager {
         // The reconciler streams phased progress through `onProgress`; we hop back onto the main
         // actor to update the @Observable `progress` so the settings screen's bar/label tracks it.
         let operationID = reconcileTaskId
+        let progressThrottle = HttpSyncProgressThrottle()
         let transport = HttpSyncWriteTrackingTransport(
             base: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token) { [weak self] sample in
+                guard progressThrottle.shouldPublish(sample) else { return }
                 Task { @MainActor in
-                    guard let self, self.isSyncing, self.reconcileTaskId == operationID else { return }
+                    guard let self, self.isSyncing, self.reconcileTaskId == operationID,
+                          self.settings.currentConfig() == config else { return }
                     HttpSyncCloudBooks.shared.updateTransfer(sample)
                     self.transferProgress = self.transferMeter.update(sample, now: ProcessInfo.processInfo.systemUptime)
                 }
@@ -216,8 +220,9 @@ final class HttpSyncManager {
             mapChanges = preflight
         } else {
             do {
-                mapChanges = try await batchState.syncMaps(transport: transport)
+                mapChanges = try await batchState.syncMaps(transport: transport, scope: statisticsScope(config), stillCurrent: { self.settings.currentConfig() == config })
             } catch {
+                guard !(error is CancellationError), settings.currentConfig() == config else { return }
                 tokenRejected = [401, 403].contains((error as? HttpSyncError)?.statusCode ?? 0)
                 let message = error.localizedDescription
                 lastErrors = [message]
@@ -227,20 +232,24 @@ final class HttpSyncManager {
                 return
             }
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, settings.currentConfig() == config else { return }
+        libraryChanged = mapChanges.downloadedBookmarks > 0
         let positions = await HttpReadingPositionLane.shared.run(
             transport: transport, listing: mapChanges.statisticsMetadata, scope: statisticsScope(config)
         ) { self.settings.currentConfig() == config }
+        libraryChanged = libraryChanged || !positions.moved.isEmpty
         // The metadata snapshot is also the availability index for statistics. Without it,
         // an installed tablet with missing history and missing sync state can return here
         // forever with an unchanged book map and an empty streak.
         let statisticsErrors = await HttpStatisticsLane.shared.run(
-            transport: transport, listing: mapChanges.statisticsMetadata, scope: statisticsScope(config), flush: true, retryFailed: true
+            transport: transport, listing: mapChanges.statisticsMetadata, scope: statisticsScope(config), flush: true, retryFailed: true,
+            stillCurrent: { self.settings.currentConfig() == config }
         )
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, settings.currentConfig() == config else { return }
         let readerPreferencesOutcome = await HttpReaderPreferencesLane.shared.run(transport: transport, listing: mapChanges.statisticsMetadata, scope: statisticsScope(config)) {
             self.settings.currentConfig() == config
         }
+        guard !Task.isCancelled, settings.currentConfig() == config else { return }
         // Sync the small model/prompt blob FIRST and independently. A corrupt book, a huge payload,
         // or a later rate-limit error must never prevent the user's prompt/model edit from reaching
         // the other device.
@@ -252,9 +261,10 @@ final class HttpSyncManager {
         if let aiSettings, mapChanges.needsBootstrap || mapChanges.booksChanged || mapChanges.otherChanged || !statisticsErrors.isEmpty {
             appSettingsOutcome = await HttpSyncReconciler.syncAppSettings(
                 transport: transport,
-                settings: aiSettings
+                settings: aiSettings, stillCurrent: { self.settings.currentConfig() == config }
             )
         }
+        guard !Task.isCancelled, settings.currentConfig() == config else { return }
 
         if mapChanges.needsBootstrap || mapChanges.booksChanged { cursor = nil }
         if !mapChanges.needsBootstrap && !mapChanges.booksChanged && !mapChanges.otherChanged && !HttpSyncCloudBooks.shared.hasRequestedDownloads {
@@ -279,7 +289,8 @@ final class HttpSyncManager {
             log.info("syncNow done from maps: \(result.summary(), privacy: .public)")
             return
         }
-        let reconciler = HttpSyncReconciler(transport: transport, exchangeLegacyBookmarks: mapChanges.needsBootstrap)
+        let reconciler = HttpSyncReconciler(transport: transport, exchangeLegacyBookmarks: mapChanges.needsBootstrap,
+            stillCurrent: { self.settings.currentConfig() == config })
         var revealedPositions = 0
         var result = await reconciler.syncOnce(sinceCursor: cursor, onProgress: { [weak self] update in
             await MainActor.run { self?.progress = update; self?.transferProgress = nil }
@@ -289,11 +300,12 @@ final class HttpSyncManager {
             revealedPositions += revealed.moved
             return revealed.errors
         })
+        libraryChanged = libraryChanged || result.localLibraryChanged || result.downloadedBookmarks > 0
         result.downloadedBookmarks += revealedPositions
         result.uploadedAppSettings = appSettingsOutcome.uploaded
         result.downloadedAppSettings = appSettingsOutcome.downloaded
         result.uploadedBookmarks += mapChanges.uploadedBookmarks
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, settings.currentConfig() == config else { return }
         result.downloadedBookmarks += mapChanges.downloadedBookmarks + positions.moved.count
         for error in statisticsErrors + positions.errors + readerPreferencesOutcome.errors where !result.errors.contains(error) { result.errors.append(error) }
         if let error = appSettingsOutcome.error { result.errors.append(error) }
@@ -305,7 +317,8 @@ final class HttpSyncManager {
                 ), after == expected {
                     let published = try await batchState.publishMaps(
                         transport: transport,
-                        acknowledgedLegacyEtags: expected
+                        acknowledgedLegacyEtags: expected,
+                        scope: statisticsScope(config), stillCurrent: { self.settings.currentConfig() == config }
                     )
                     result.downloadedBookmarks += published.downloadedBookmarks
                 }
@@ -319,6 +332,7 @@ final class HttpSyncManager {
         if let newCursor = result.newLastSyncedAt {
             settings.recordCursor(newCursor, for: config)
         }
+        libraryChanged = libraryChanged || result.downloadedBookmarks > 0
         lastErrors = result.errors
         lastStatus = result.summary() + Self.readerPreferencesSummary(readerPreferencesOutcome)
         noteFullReconcileOutcome(errors: result.errors)
@@ -343,7 +357,7 @@ final class HttpSyncManager {
         let ready = HttpSyncCloudBooks.shared.readySyncIds
         guard !ready.isEmpty else { return (0, []) }
         do {
-            let afterImport = try await batchState.syncMaps(transport: transport)
+            let afterImport = try await batchState.syncMaps(transport: transport, scope: statisticsScope(config), stillCurrent: { self.settings.currentConfig() == config })
             let positions = await HttpReadingPositionLane.shared.run(
                 transport: transport, listing: afterImport.statisticsMetadata, scope: statisticsScope(config)
             ) { self.settings.currentConfig() == config }
@@ -424,6 +438,7 @@ final class HttpSyncManager {
         // Persist first, then coalesce every dirty book into one exchange at most five
         // seconds later. The outbox survives process death and is cleared only by an
         // acknowledgement for the exact mutation id.
+        guard settings.enabled, settings.isConfigured else { return }
         batchState.queueBookmark(book: book)
         scheduleBookmarkSync()
     }
@@ -510,7 +525,8 @@ final class HttpSyncManager {
         let changes = await exchangeMapsOnly()
         guard changes?.needsBootstrap == true else { return }
         do {
-            _ = try await batchState.syncLegacyBookmark(book: book, config: settings.currentConfig())
+            let config = settings.currentConfig()
+            _ = try await batchState.syncLegacyBookmark(book: book, config: config, stillCurrent: { self.settings.currentConfig() == config })
         } catch {
             log.error("legacy bookmark bootstrap failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -568,18 +584,20 @@ final class HttpSyncManager {
 
     private func performMapExchange() async -> HttpSyncMapChanges? {
         guard settings.enabled, settings.isConfigured else { return nil }
+        let config = settings.currentConfig()
         do {
-            let config = settings.currentConfig()
             HttpSyncCloudBooks.shared.activateScope(config: config)
             let ready = HttpSyncCloudBooks.shared.readySyncIds
             let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
-            let changes = try await batchState.syncMaps(transport: transport)
+            let changes = try await batchState.syncMaps(transport: transport, scope: statisticsScope(config), stillCurrent: { self.settings.currentConfig() == config })
+            guard settings.currentConfig() == config, !Task.isCancelled else { return nil }
             _ = await HttpReadingPositionLane.shared.run(
                 transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)
             ) { self.settings.currentConfig() == config }
+            guard settings.currentConfig() == config, !Task.isCancelled else { return nil }
             // A manga left waiting by a stopped or failed pass is shown once its maps were exchanged.
             if !ready.isEmpty, settings.currentConfig() == config { HttpSyncCloudBooks.shared.reveal(ready) }
-            HttpStatisticsLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config))
+            HttpStatisticsLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
             HttpReaderPreferencesLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
             notePushOutcome(success: true)
             guard foreground else { return changes }
@@ -587,13 +605,14 @@ final class HttpSyncManager {
                 if fullRetryDeferredForReader, HttpSyncActiveBooks.hasAny { return changes }
                 if fullRetryDeferredForReader { fullRetryDeferredForReader = false }
                 if let fullRetryAfter, Date() < fullRetryAfter { return changes }
-                beginReconcile(preflight: changes)
+                beginReconcile(preflight: changes, expectedConfig: config)
             } else {
                 fullRetryDeferredForReader = false
                 fullRetryAfter = nil
             }
             return changes
         } catch {
+            guard !(error is CancellationError), settings.currentConfig() == config else { return nil }
             notePushOutcome(success: false)
             HttpStatisticsLane.shared.markFailed(error)
             log.error("map exchange failed: \(error.localizedDescription, privacy: .public)")
@@ -620,7 +639,7 @@ final class HttpSyncManager {
     }
 
     private func statisticsScope(_ config: HttpSyncConfig) -> String {
-        config.baseURL + ":" + SHA256.hash(data: Data(config.token.utf8)).lowercaseHex
+        HttpSyncBatchState.scope(config)
     }
 
     /// Call after the user moves `book` onto `shelfName` (nil = unshelved). Records the placement

@@ -54,7 +54,7 @@ struct MangaStatisticsView: View {
                         extraRows: [
                             ("Pages Remaining", remainingPages.formatted()),
                             ("Time to Finish", Self.secondsRemaining(remainingPages: remainingPages, medianPageSeconds: median)
-                                .map { Duration.seconds($0).formatted() } ?? Self.pacePending),
+                                .map { StatisticsNumbers.formattedDuration($0) } ?? Self.pacePending),
                         ]
                     )
                     statisticsSection(
@@ -99,7 +99,7 @@ struct MangaStatisticsView: View {
             statRow("Pages Read", "\(stat.charactersRead.formatted())")
             let pace = pace ?? ("Average Pace", "\(stat.lastReadingSpeed.formatted()) pages / h")
             statRow(pace.label, pace.value)
-            statRow("Reading Time", Duration.seconds(stat.readingTime).formatted())
+            statRow("Reading Time", StatisticsNumbers.formattedDuration(stat.readingTime))
             ForEach(extraRows, id: \.0) { statRow($0.0, $0.1) }
         } header: {
             HStack {

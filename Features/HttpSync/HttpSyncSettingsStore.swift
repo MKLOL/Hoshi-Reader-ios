@@ -47,13 +47,17 @@ final class HttpSyncSettingsStore {
     /// Bumping this after a successful paste makes `isConfigured` and the Sync button refresh in
     /// the same UI transaction.
     private var tokenRevision = 0
+    private var connectionGeneration: UInt64 = 0
 
     /// Base URL of the sync server, e.g. `https://dragos.games/api/book_sync`. No trailing slash.
     var baseURL: String {
         didSet {
             // Preserve the draft while typing (especially the two slashes in https://).
             defaults.set(baseURL, forKey: Keys.baseURL)
-            if Self.normalizeBaseURL(oldValue) != Self.normalizeBaseURL(baseURL) { lastSyncedAt = nil }
+            if Self.normalizeBaseURL(oldValue) != Self.normalizeBaseURL(baseURL) {
+                connectionGeneration &+= 1
+                lastSyncedAt = nil
+            }
         }
     }
 
@@ -96,7 +100,7 @@ final class HttpSyncSettingsStore {
             if Keychain.set(trimmed.isEmpty ? nil : trimmed, for: SecretKeys.httpSyncToken) {
                 cachedToken = trimmed
                 tokenRevision &+= 1
-                if changed { lastSyncedAt = nil }
+                if changed { connectionGeneration &+= 1; lastSyncedAt = nil }
             }
         }
     }
@@ -123,7 +127,7 @@ final class HttpSyncSettingsStore {
 
     /// Snapshot of the connection parameters for handing to a transport off the main actor.
     func currentConfig() -> HttpSyncConfig {
-        HttpSyncConfig(baseURL: Self.normalizeBaseURL(baseURL), token: token)
+        HttpSyncConfig(baseURL: Self.normalizeBaseURL(baseURL), token: token, generation: connectionGeneration)
     }
 
     func recordCursor(_ cursor: String, for config: HttpSyncConfig) {
@@ -170,5 +174,10 @@ final class HttpSyncSettingsStore {
 nonisolated struct HttpSyncConfig: Sendable, Equatable {
     let baseURL: String
     let token: String
+    /// Distinguishes an old A operation from a new A after switching A → B → A.
+    let generation: UInt64
+    init(baseURL: String, token: String, generation: UInt64 = 0) {
+        self.baseURL = baseURL; self.token = token; self.generation = generation
+    }
     var isConfigured: Bool { !baseURL.isEmpty && !token.isEmpty && HttpSyncSettingsStore.isSecureBaseURL(baseURL) }
 }

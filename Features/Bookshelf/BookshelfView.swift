@@ -47,7 +47,7 @@ struct BookshelfView: View {
                 NavigationStack(path: $navigationPath) {
                     ScrollView {
                         let sections = viewModel.shelfSections(sortedBy: userConfig.bookshelfSortOption, showReading: userConfig.bookshelfShowReading)
-                        if viewModel.books.isEmpty && HttpSyncCloudBooks.shared.records.isEmpty {
+                        if viewModel.books.isEmpty && !HttpSyncCloudBooks.shared.hasRecords {
                             ContentUnavailableView {
                                 Label("No Books", systemImage: "books.vertical")
                             } description: {

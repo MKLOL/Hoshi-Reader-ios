@@ -18,6 +18,15 @@ nonisolated enum StatisticsNumbers {
     }
     static func nextStamp(_ stamp: Int) -> Int { adding(stamp, 1) }
 
+    /// Duration's floating-point initializer traps outside its representable range. Imported
+    /// totals and pace estimates can be much larger than any real session, but still valid JSON.
+    static func safeDuration(_ seconds: Double) -> Duration {
+        guard !seconds.isNaN, seconds > 0 else { return .zero }
+        guard seconds.isFinite, seconds < Double(Int.max) else { return .seconds(Int.max) }
+        return .seconds(seconds)
+    }
+    static func formattedDuration(_ seconds: Double) -> String { safeDuration(seconds).formatted() }
+
     /// Kotlin's data-class tie-break uses Double.toString: shortest decimal digits, scientific
     /// notation below 1e-3 or at/above 1e7, uppercase E and a mandatory fractional digit. Swift
     /// already supplies the shortest digits; only their decimal placement/notation differs.
@@ -113,18 +122,23 @@ nonisolated extension Statistics {
     /// Weighted median of completed page durations, averaging both middle pages for even counts.
     var medianPageSeconds: Double? {
         let samples = mangaPageSeconds.filter { $0.key > 0 && $0.value > 0 }.sorted { $0.key < $1.key }
-        let count = samples.reduce(0) { StatisticsNumbers.adding($0, $1.value) }
-        guard count > 0 else { return nil }
-        let lower = (count - 1) / 2, upper = count / 2
-        var seen = 0
-        var lowerSeconds = 0
-        for (seconds, occurrences) in samples {
-            let next = StatisticsNumbers.adding(seen, occurrences)
-            if seen <= lower && next > lower { lowerSeconds = seconds }
-            if next > upper { return (Double(lowerSeconds) + Double(seconds)) / 2 }
-            seen = next
+        guard !samples.isEmpty else { return nil }
+        // Removing the same number of pages from both ends preserves the middle. No total
+        // occurrence count is needed, so even several Int.max buckets retain their exact weight.
+        var lower = 0, upper = samples.count - 1
+        var lowCount = samples[lower].value, highCount = samples[upper].value
+        while lower < upper {
+            if lowCount == highCount {
+                if lower + 1 == upper { return (Double(samples[lower].key) + Double(samples[upper].key)) / 2 }
+                lower += 1; upper -= 1
+                lowCount = samples[lower].value; highCount = samples[upper].value
+            } else if lowCount < highCount {
+                highCount -= lowCount; lower += 1; lowCount = samples[lower].value
+            } else {
+                lowCount -= highCount; upper -= 1; highCount = samples[upper].value
+            }
         }
-        return nil
+        return Double(samples[lower].key)
     }
     static func total(_ entries: [Statistics], title: String = "", day: String = "") -> Statistics {
         var total = empty(title: title, day: day)

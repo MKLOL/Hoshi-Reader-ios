@@ -59,16 +59,20 @@ import Foundation
             PodcastDownloads.shared.restore()
         }
         guard !id.isEmpty else { invalidate(); return }
+        var validatedInSession = false
         while !Task.isCancelled {
             do {
                 let accepted = try await api.access(config: config)
                 guard !Task.isCancelled, id == configID else { return }
                 if accepted {
-                    files.validatedAccount = id
-                    files.prune(except: id)
+                    if !validatedInSession || account != id {
+                        files.validatedAccount = id
+                        files.prune(except: id)
+                        PodcastDownloads.shared.restore()
+                        validatedInSession = true
+                    }
                     if account != id { account = id; catalogue = files.load(id) }
-                    PodcastDownloads.shared.restore()
-                } else { invalidate() }
+                } else { validatedInSession = false; invalidate() }
             } catch {
                 guard !Task.isCancelled, id == configID else { return }
                 handle(error)

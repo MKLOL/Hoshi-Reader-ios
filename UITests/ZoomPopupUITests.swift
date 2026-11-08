@@ -154,7 +154,8 @@ final class ZoomPopupUITests: XCTestCase {
     }
 
     func testUltraThinActionButtonsStayVisibleAndTappable() throws {
-        let app = try launchZoomFixture(aiStub: true)
+        continueAfterFailure = false
+        let app = try launchZoomFixture(aiStub: true, syntheticFixture: true)
         let webView = app.webViews.firstMatch
         XCTAssertTrue(webView.waitForExistence(timeout: 5))
 
@@ -230,7 +231,8 @@ final class ZoomPopupUITests: XCTestCase {
     }
 
     func testSelectionRectStaysNearZoomedMangaTap() throws {
-        let app = try launchZoomFixture()
+        continueAfterFailure = false
+        let app = try launchZoomFixture(syntheticFixture: true)
 
         let japaneseBox = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "日本語")).firstMatch
         XCTAssertTrue(japaneseBox.waitForExistence(timeout: 5))
@@ -255,7 +257,10 @@ final class ZoomPopupUITests: XCTestCase {
             app: app,
             boxFrame: zoomedFrame,
             visibleBounds: webView.frame,
-            probe: probe
+            probe: probe,
+            // The fixture has one horizontal line. Target its first glyph, not an arbitrary
+            // suffix near the right edge, so the selected text has a deterministic meaning.
+            offsets: [CGVector(dx: 0.06, dy: 0.30), CGVector(dx: 0.10, dy: 0.30)]
         )
         let selection = try parseSelectionProbe(probe.label)
         XCTAssertTrue(
@@ -465,14 +470,19 @@ final class ZoomPopupUITests: XCTestCase {
         add(attachment)
     }
 
-    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true) throws -> XCUIApplication {
+    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
         app.launchArguments += ["-mangaShowCopyButton", showCopy ? "YES" : "NO"]
+        if syntheticFixture {
+            app.launchEnvironment["HOSHI_UI_TESTING_ZOOM"] = "1"
+            app.launchArguments += ["-mangaSingleTapLookup", "NO", "-mangaShowFurigana", "NO"]
+        }
         if aiStub {
             app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"
         }
         app.launch()
+        XCUIDevice.shared.orientation = .portrait
 
         let fixture = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "IDB Zoom Fixture")).firstMatch
         guard fixture.waitForExistence(timeout: 5) else {
@@ -712,22 +722,18 @@ final class ZoomPopupUITests: XCTestCase {
         app: XCUIApplication,
         boxFrame: CGRect,
         visibleBounds: CGRect,
-        probe: XCUIElement
+        probe: XCUIElement,
+        offsets: [CGVector] = [
+            CGVector(dx: 0.75, dy: 0.18), CGVector(dx: 0.75, dy: 0.32),
+            CGVector(dx: 0.75, dy: 0.46), CGVector(dx: 0.50, dy: 0.24),
+            CGVector(dx: 0.50, dy: 0.40), CGVector(dx: 0.25, dy: 0.24),
+            CGVector(dx: 0.25, dy: 0.40)
+        ]
     ) throws -> CGPoint {
         let tappableFrame = boxFrame.intersection(visibleBounds.insetBy(dx: 8, dy: 8))
         guard !tappableFrame.isNull, tappableFrame.width > 1, tappableFrame.height > 1 else {
             throw ProbeError("Zoomed OCR box is not visible enough to tap: box=\(boxFrame), visible=\(visibleBounds)")
         }
-        let offsets = [
-            CGVector(dx: 0.75, dy: 0.18),
-            CGVector(dx: 0.75, dy: 0.32),
-            CGVector(dx: 0.75, dy: 0.46),
-            CGVector(dx: 0.50, dy: 0.24),
-            CGVector(dx: 0.50, dy: 0.40),
-            CGVector(dx: 0.25, dy: 0.24),
-            CGVector(dx: 0.25, dy: 0.40),
-        ]
-
         for offset in offsets {
             let point = CGPoint(
                 x: tappableFrame.minX + tappableFrame.width * offset.dx,

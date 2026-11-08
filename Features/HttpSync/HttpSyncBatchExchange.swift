@@ -60,6 +60,7 @@ extension Notification.Name {
 }
 
 nonisolated private struct HttpSyncCachedMapState: Codable, Equatable, Sendable {
+    var scope: String?
     var booksEtag: String?
     var books: [String: String]
     var bookmarkEtags: [String: String]
@@ -69,6 +70,7 @@ nonisolated private struct HttpSyncCachedMapState: Codable, Equatable, Sendable 
     var initialized: Bool
 
     init(
+        scope: String? = nil,
         booksEtag: String? = nil,
         books: [String: String] = [:],
         bookmarkEtags: [String: String] = [:],
@@ -77,6 +79,7 @@ nonisolated private struct HttpSyncCachedMapState: Codable, Equatable, Sendable 
         legacyEtags: [String: String] = [:],
         initialized: Bool = false
     ) {
+        self.scope = scope
         self.booksEtag = booksEtag
         self.books = books
         self.bookmarkEtags = bookmarkEtags
@@ -180,15 +183,20 @@ final class HttpSyncBatchState {
         UIDevice.current.identifierForVendor?.uuidString.lowercased()
         ?? UUID().uuidString.lowercased()
 
-    private init() {
-        if let books = try? BookStorage.getBooksDirectory() {
+    private let booksDirectory: URL?
+    private let scanLibrary: @Sendable (URL) async -> HttpSyncLocalLibrary
+
+    init(booksDirectory: URL? = nil, scanLibrary: @escaping @Sendable (URL) async -> HttpSyncLocalLibrary = { await HttpSyncLocalLibrary.scan(booksDirectory: $0) }) {
+        self.booksDirectory = booksDirectory
+        self.scanLibrary = scanLibrary
+        if let books = booksDirectory ?? (try? BookStorage.getBooksDirectory()) {
             HttpSyncPayloadCodec().recoverInterruptedReplacements(booksDirectory: books)
         }
     }
 
     func queueBookmark(book: BookMetadata) {
         guard let id = syncId(for: book), let folder = book.folder,
-              let books = try? BookStorage.getBooksDirectory() else { return }
+              let books = libraryDirectory() else { return }
         let root = books.appendingPathComponent(folder)
         guard let bookmark = BookStorage.loadBookmark(root: root) else { return }
         let key = SyncKeys.bookmark(id)
@@ -196,19 +204,12 @@ final class HttpSyncBatchState {
         var blob = bookmark.toBlob()
         blob.rev = rev
         guard let body = try? encoder.encode(blob) else { return }
-        let entry = HttpSyncBookmarkMapEntry(
-            etag: sha256Etag(body), lastModified: blob.lastModified, value: blob
-        )
-
         var pending = loadPending()
         pending.removeAll { $0.key == key }
         pending.append(HttpSyncPendingBookmark(
             key: key, mutationId: UUID().uuidString, bodyBase64: body.base64EncodedString()
         ))
         savePending(pending.sorted { $0.key < $1.key })
-        var state = loadState()
-        state.ownedBookmarks[id] = entry
-        saveState(state)
     }
 
     var hasPending: Bool { !loadPending().isEmpty }
@@ -223,20 +224,23 @@ final class HttpSyncBatchState {
 
     /// Migration-only pull for the book being opened when maps do not exist yet. This closes the
     /// upgrade window without waiting for a full all-books reconcile in the background.
-    func syncLegacyBookmark(book: BookMetadata, config: HttpSyncConfig) async throws -> Bool {
+    func syncLegacyBookmark(book: BookMetadata, config: HttpSyncConfig, stillCurrent: @MainActor () -> Bool = { true }) async throws -> Bool {
         try await syncLegacyBookmark(
             book: book,
-            transport: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+            transport: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token), stillCurrent: stillCurrent
         )
     }
 
-    func syncLegacyBookmark(book: BookMetadata, transport: HttpSyncKvTransport) async throws -> Bool {
+    func syncLegacyBookmark(book: BookMetadata, transport: HttpSyncKvTransport, stillCurrent: @MainActor () -> Bool = { true }) async throws -> Bool {
         await acquireOperation()
         defer { releaseOperation() }
+        try ensureCurrent(stillCurrent)
         guard let id = syncId(for: book), let folder = book.folder,
-              let books = try? BookStorage.getBooksDirectory() else { return false }
+              let books = libraryDirectory() else { return false }
         let key = SyncKeys.bookmark(id)
-        guard let fetched = try await transport.get(key: key) else { return false }
+        let response = try await transport.get(key: key)
+        try ensureCurrent(stillCurrent)
+        guard let fetched = response else { return false }
         let blob: HttpSyncBookmarkBlob
         do { blob = try decoder.decode(HttpSyncBookmarkBlob.self, from: fetched.body) }
         catch { throw HttpSyncError("Bookmark at \(key): malformed JSON.") }
@@ -277,20 +281,22 @@ final class HttpSyncBatchState {
         return true
     }
 
-    func syncMaps(config: HttpSyncConfig) async throws -> HttpSyncMapChanges {
-        try await syncMaps(transport: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token))
+    func syncMaps(config: HttpSyncConfig, stillCurrent: @MainActor () -> Bool = { true }) async throws -> HttpSyncMapChanges {
+        try await syncMaps(transport: HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token), scope: Self.scope(config), stillCurrent: stillCurrent)
     }
 
     /// No-change is one list request. Any number of local turns add one PUT of this device's shard.
-    func syncMaps(transport: HttpSyncKvTransport) async throws -> HttpSyncMapChanges {
+    func syncMaps(transport: HttpSyncKvTransport, scope: String = "", stillCurrent: @MainActor () -> Bool = { true }) async throws -> HttpSyncMapChanges {
         await acquireOperation()
         defer { releaseOperation() }
-        return try await syncMapsLocked(transport: transport)
+        try ensureCurrent(stillCurrent)
+        return try await syncMapsLocked(transport: transport, scope: scope, stillCurrent: stillCurrent)
     }
 
-    private func syncMapsLocked(transport: HttpSyncKvTransport) async throws -> HttpSyncMapChanges {
-        let before = loadState()
-        let listing = await HttpSyncListedKeys.index(try await listAllMetadata(transport: transport))
+    private func syncMapsLocked(transport: HttpSyncKvTransport, scope: String, stillCurrent: @MainActor () -> Bool) async throws -> HttpSyncMapChanges {
+        let before = loadState(scope: scope)
+        let listing = await HttpSyncListedKeys.index(try await listAllMetadata(transport: transport, stillCurrent: stillCurrent))
+        try ensureCurrent(stillCurrent)
         let legacyKeyEtags = listing.legacyEtags, statisticsMetadata = listing.all
         guard let booksMeta = listing.all[httpSyncBooksMapKey] else {
             return HttpSyncMapChanges(
@@ -313,6 +319,7 @@ final class HttpSyncBatchState {
             guard let fetched = try await transport.get(key: httpSyncBooksMapKey) else {
                 throw HttpSyncError("The server's book map disappeared during sync.")
             }
+            try ensureCurrent(stillCurrent)
             do { remoteBooks = try decoder.decode([String: String].self, from: fetched.body) }
             catch { throw HttpSyncError("The server's book map is malformed.") }
         } else {
@@ -327,6 +334,7 @@ final class HttpSyncBatchState {
                 guard let fetched = try await transport.get(key: meta.key) else {
                     throw HttpSyncError("A bookmark-map shard disappeared during sync.")
                 }
+                try ensureCurrent(stillCurrent)
                 do {
                     let decoded = try decoder.decode([String: HttpSyncBookmarkMapEntry].self, from: fetched.body)
                     shards[meta.key] = decoded.filter { _, entry in
@@ -342,10 +350,13 @@ final class HttpSyncBatchState {
         let listedLegacyFingerprint = legacyKeyEtags
         let legacyChangedBeforeWrites = before.initialized &&
             before.legacyEtags.filter { httpNeedsFullReconcile($0.key) } != listedLegacyFingerprint
-        guard let booksDirectory = try? BookStorage.getBooksDirectory() else { throw HttpSyncError("The library folder is unavailable.") }
-        let library = await HttpSyncLocalLibrary.scan(booksDirectory: booksDirectory)
+        guard let booksDirectory = libraryDirectory() else { throw HttpSyncError("The library folder is unavailable.") }
+        // A scan suspends while readers can save again. Acknowledge only this earlier snapshot.
+        let captured = loadPending()
+        let library = await scanLibrary(booksDirectory)
+        try ensureCurrent(stillCurrent)
         let localBooks = library.metadata
-        let local = localBookmarkEntries(library.books.map { ($0.metadata, $0.bookmark) })
+        let local = merge(remote: localBookmarkEntries(library.books.map { ($0.metadata, $0.bookmark) }), local: pendingEntries(captured))
         let downloaded = try applyRemoteWinners(remote: remote, local: local, books: localBooks)
         let deviceKey = bookmarkMapKey(deviceId())
         let serverOwned = shards[deviceKey] ?? [:]
@@ -356,7 +367,6 @@ final class HttpSyncBatchState {
             if newerThanRemote && newerThanOwned { owned[id] = entry }
         }
 
-        let captured = loadPending()
         var ownEtag = bookmarkMetas.first(where: { $0.key == deviceKey })?.etag
         var uploaded = 0
         if owned != serverOwned {
@@ -365,13 +375,14 @@ final class HttpSyncBatchState {
                 contentType: "application/json; charset=utf-8",
                 body: try encoder.encode(owned)
             )
+            try ensureCurrent(stillCurrent)
             ownEtag = response.etag
             shards[deviceKey] = owned
             uploaded = captured.count
         }
         let completed = Dictionary(uniqueKeysWithValues: captured.map { ($0.key, $0.mutationId) })
         savePending(loadPending().filter { completed[$0.key] != $0.mutationId })
-        let latest = loadState()
+        let latest = loadState(scope: scope)
         let acknowledgedLegacy = legacyChangedBeforeWrites
             ? before.legacyEtags
             : legacyKeyEtags
@@ -380,6 +391,7 @@ final class HttpSyncBatchState {
         })
         if let ownEtag { etags[deviceKey] = ownEtag }
         saveState(HttpSyncCachedMapState(
+            scope: scope,
             booksEtag: booksMeta.etag,
             books: remoteBooks,
             bookmarkEtags: etags,
@@ -413,23 +425,29 @@ final class HttpSyncBatchState {
     /// Called only after a full reconcile succeeds. It acknowledges the non-map metadata snapshot.
     func publishMaps(
         transport: HttpSyncKvTransport,
-        acknowledgedLegacyEtags: [String: String] = [:]
+        acknowledgedLegacyEtags: [String: String] = [:],
+        scope: String = "",
+        stillCurrent: @MainActor () -> Bool = { true }
     ) async throws -> HttpSyncMapChanges {
         await acquireOperation()
         defer { releaseOperation() }
         return try await publishMapsLocked(
             transport: transport,
-            acknowledgedLegacyEtags: acknowledgedLegacyEtags
+            acknowledgedLegacyEtags: acknowledgedLegacyEtags, scope: scope, stillCurrent: stillCurrent
         )
     }
 
     private func publishMapsLocked(
         transport: HttpSyncKvTransport,
-        acknowledgedLegacyEtags: [String: String]
+        acknowledgedLegacyEtags: [String: String], scope: String, stillCurrent: @MainActor () -> Bool
     ) async throws -> HttpSyncMapChanges {
-        let before = loadState()
+        try ensureCurrent(stillCurrent)
+        let before = loadState(scope: scope)
         let captured = loadPending()
-        let localBooks = (try? BookStorage.loadAllBooks()) ?? []
+        guard let directory = libraryDirectory() else { throw HttpSyncError("The library folder is unavailable.") }
+        let library = await scanLibrary(directory)
+        try ensureCurrent(stillCurrent)
+        let localBooks = library.metadata
         // The preflight fetched every shard before the reconcile imported remote-only books, so
         // it could not place their positions yet. Apply the newest known position to the books
         // that exist now; otherwise a fresh install's first "Sync now" leaves each imported book
@@ -440,8 +458,11 @@ final class HttpSyncBatchState {
             books: localBooks
         )
         let local = readLocalBookmarks(books: localBooks)
-        let owned = merge(remote: before.ownedBookmarks, local: local)
-        var books = cachedLocalBookHashes(books: localBooks)
+        let owned = merge(remote: merge(remote: before.ownedBookmarks, local: local), local: pendingEntries(captured))
+        var books: [String: String] = [:]
+        for book in library.books {
+            if let id = syncId(for: book.metadata), let hash = book.payloadSha { books[id] = hash }
+        }
         for record in HttpSyncCloudBooks.shared.records where books[record.syncId] == nil {
             if let remoteHash = before.books[record.syncId] { books[record.syncId] = remoteHash }
         }
@@ -453,15 +474,18 @@ final class HttpSyncBatchState {
             contentType: "application/json; charset=utf-8",
             body: try encoder.encode(books)
         )
+        try ensureCurrent(stillCurrent)
         let deviceKey = bookmarkMapKey(deviceId())
         let bookmarksResponse = try await transport.put(
             key: deviceKey,
             contentType: "application/json; charset=utf-8",
             body: try encoder.encode(owned)
         )
+        try ensureCurrent(stillCurrent)
         var bookmarkEtags = before.bookmarkEtags
         if let responseEtag = bookmarksResponse.etag { bookmarkEtags[deviceKey] = responseEtag }
         saveState(HttpSyncCachedMapState(
+            scope: scope,
             booksEtag: booksResponse.etag,
             books: books,
             bookmarkEtags: bookmarkEtags,
@@ -503,7 +527,7 @@ final class HttpSyncBatchState {
     }
 
     private func readLocalBookmarks(books localBooks: [BookMetadata]) -> [String: HttpSyncBookmarkMapEntry] {
-        guard let booksDir = try? BookStorage.getBooksDirectory() else { return [:] }
+        guard let booksDir = libraryDirectory() else { return [:] }
         return localBookmarkEntries(localBooks.map { book in
             (book, book.folder.flatMap { BookStorage.loadBookmark(root: booksDir.appendingPathComponent($0)) })
         })
@@ -534,7 +558,7 @@ final class HttpSyncBatchState {
         local: [String: HttpSyncBookmarkMapEntry],
         books localBooks: [BookMetadata]
     ) throws -> Int {
-        guard let booksDir = try? BookStorage.getBooksDirectory() else { return 0 }
+        guard let booksDir = libraryDirectory() else { return 0 }
         // A root is built only for the rare position that may win; every poll checks them all.
         let folders: [String: String] = Dictionary(localBooks.compactMap { book -> (String, String)? in
             guard let id = syncId(for: book), let folder = book.folder else { return nil }
@@ -601,7 +625,7 @@ final class HttpSyncBatchState {
     }
 
     private func cachedLocalBookHashes(books localBooks: [BookMetadata]) -> [String: String] {
-        guard let booksDir = try? BookStorage.getBooksDirectory() else { return [:] }
+        guard let booksDir = libraryDirectory() else { return [:] }
         var result: [String: String] = [:]
         for book in localBooks {
             guard let id = syncId(for: book), let folder = book.folder,
@@ -613,8 +637,10 @@ final class HttpSyncBatchState {
         return result
     }
 
-    private func loadState() -> HttpSyncCachedMapState {
-        fileURL(cacheFilename).flatMap { stateFile.load($0, decoder: decoder) } ?? HttpSyncCachedMapState()
+    private func loadState(scope: String) -> HttpSyncCachedMapState {
+        let stored = fileURL(cacheFilename).flatMap { stateFile.load($0, decoder: decoder) }
+        // Old unscoped acknowledgements are not safe for a newly selected account.
+        return stored?.scope == scope ? stored! : HttpSyncCachedMapState(scope: scope)
     }
 
     private func saveState(_ state: HttpSyncCachedMapState) {
@@ -631,17 +657,40 @@ final class HttpSyncBatchState {
         pendingFile.save(pending, to: url, encoder: encoder)
     }
 
+    private func pendingEntries(_ pending: [HttpSyncPendingBookmark]) -> [String: HttpSyncBookmarkMapEntry] {
+        var entries: [String: HttpSyncBookmarkMapEntry] = [:]
+        for mutation in pending {
+            guard mutation.key.hasPrefix("books/"), mutation.key.hasSuffix("/bookmark"),
+                  let data = Data(base64Encoded: mutation.bodyBase64),
+                  let blob = try? decoder.decode(HttpSyncBookmarkBlob.self, from: data), blob.isValid,
+                  parseRfc3339(blob.lastModified) != nil else { continue }
+            let id = String(mutation.key.dropFirst(6).dropLast(9))
+            entries[id] = HttpSyncBookmarkMapEntry(etag: sha256Etag(data), lastModified: blob.lastModified, value: blob)
+        }
+        return entries
+    }
+
+    private func ensureCurrent(_ stillCurrent: @MainActor () -> Bool) throws {
+        try Task.checkCancellation()
+        guard stillCurrent() else { throw CancellationError() }
+    }
+
+    static func scope(_ config: HttpSyncConfig) -> String {
+        config.baseURL + ":" + SHA256.hash(data: Data(config.token.utf8)).lowercaseHex
+    }
+
     private func deviceId() -> String {
         // identifierForVendor is device-local and is not copied with a Books backup. A copied
         // shard identifier would let two devices overwrite the same key and lose page turns.
         installationId
     }
 
-    private func listAllMetadata(transport: HttpSyncKvTransport) async throws -> HttpSyncKvList {
+    private func listAllMetadata(transport: HttpSyncKvTransport, stillCurrent: @MainActor () -> Bool = { true }) async throws -> HttpSyncKvList {
         var keys: [HttpSyncKvKeyMeta] = []
         var cursor: String?
         repeat {
             let page = try await transport.list(prefix: nil, since: nil, cursor: cursor, limit: 2_000)
+            try ensureCurrent(stillCurrent)
             keys.append(contentsOf: page.keys)
             guard page.truncated == true else { break }
             guard let next = page.nextCursor else {
@@ -652,8 +701,10 @@ final class HttpSyncBatchState {
         return HttpSyncKvList(keys: keys)
     }
 
+    private func libraryDirectory() -> URL? { booksDirectory ?? (try? BookStorage.getBooksDirectory()) }
+
     private func fileURL(_ name: String) -> URL? {
-        (try? BookStorage.getBooksDirectory())?.appendingPathComponent(name)
+        libraryDirectory()?.appendingPathComponent(name)
     }
 
     private func sha256Etag(_ data: Data) -> String {

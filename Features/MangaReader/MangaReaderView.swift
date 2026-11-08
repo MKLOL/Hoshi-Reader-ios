@@ -44,6 +44,7 @@ struct MangaReaderView: View {
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
     @State private var pageOpacity: Double = 1
+    @State private var topBarBottom: CGFloat = 0
     @State private var uiTestSelectionProbe = "none"
     @State private var uiTestCropProbe = "none"
     @State private var uiTestActionProbe = "actions=pending"
@@ -246,7 +247,8 @@ struct MangaReaderView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { note in
-            guard let changed = note.object as? URL, changed.standardizedFileURL == model.bookRoot?.standardizedFileURL else { return }
+            guard let changed = note.object as? URL, changed.standardizedFileURL == model.bookRoot?.standardizedFileURL,
+                  note.userInfo?["origin"] as? UUID != model.statisticsOrigin else { return }
             model.reloadStatistics()
         }
         .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
@@ -688,6 +690,11 @@ struct MangaReaderView: View {
         .padding(.top, 0)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity)
+        .onGeometryChange(for: CGFloat.self) { geometry in
+            geometry.frame(in: .global).maxY
+        } action: { bottom in
+            topBarBottom = bottom
+        }
         // No full-width hit-testable background: with the full-bleed page, an (invisible)
         // bar background would swallow taps meant for bubbles under the strip. Only the
         // buttons themselves are tappable.
@@ -696,9 +703,9 @@ struct MangaReaderView: View {
     private func mangaActionTopInset(for geometry: GeometryProxy) -> CGFloat {
         let safeTop = geometry.safeAreaInsets.top.isFinite ? max(0, geometry.safeAreaInsets.top) : 0
         guard !focusMode, !screenshotCropMode else { return safeTop + 8 }
-        // The WebView is full-bleed under the reader chrome. Keep in-page OCR action buttons below
-        // the native top controls so visible buttons are also reliably hit-testable.
-        return safeTop + (AiChatSettingsStore.shared.isConfigured ? 140 : 72)
+        // Convert the measured native chrome edge into the full-bleed WebView's coordinates.
+        // History, options and the optional screenshot control all reserve their actual height.
+        return max(safeTop, topBarBottom - geometry.frame(in: .global).minY) + 8
     }
 
     private var bottomBar: some View {

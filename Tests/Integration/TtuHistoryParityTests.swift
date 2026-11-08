@@ -57,4 +57,28 @@ nonisolated final class TtuHistoryParityTests: XCTestCase {
         coordinator.unregister(observer)
         XCTAssertEqual(order, ["flush", "replace", "reload"])
     }
+    @MainActor func testJournalTimestampConvergesWithDriveMillisecondsAfterReopening() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("ttu-precision-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = ReadingPositionRepository(directory: root.appendingPathComponent("journal"),
+            device: ReadingDevice(id: "fixture", name: "Fixture"))
+        let bookID = UUID().uuidString.lowercased()
+        let session = repository.open(bookId: bookID, root: root)
+        let timestamp = Date(timeIntervalSince1970: 1_794_100_000.123456)
+        let event = try XCTUnwrap(session.navigate(bookmark: Bookmark(chapterIndex: 0, progress: 0.5,
+            characterCount: 50, lastModified: timestamp)))
+        _ = repository.record(root: root, event: event)
+        let original = try XCTUnwrap(BookStorage.loadBookmark(root: root))
+        let milliseconds = try XCTUnwrap(SyncManager.progressMilliseconds(timestamp))
+        let remote = DriveFile(id: "fixture", name: "progress_1_6_\(milliseconds)_0.5.json")
+        XCTAssertEqual(SyncManager.shared.determineSyncDirection(local: original, remoteProgressFile: remote), .synced)
+        let reopened = repository.open(bookId: bookID, root: root).initialBookmark
+        XCTAssertEqual(reopened?.lastModified, original.lastModified)
+        XCTAssertEqual(SyncManager.shared.determineSyncDirection(local: reopened, remoteProgressFile: remote), .synced)
+        let newer = DriveFile(id: "fixture", name: "progress_1_6_\(milliseconds + 1)_0.6.json")
+        XCTAssertEqual(SyncManager.shared.determineSyncDirection(local: reopened, remoteProgressFile: newer), .importFromTtu)
+        XCTAssertNil(SyncManager.progressMilliseconds(Date(timeIntervalSince1970: .infinity)))
+    }
+
 }

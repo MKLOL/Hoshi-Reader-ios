@@ -36,6 +36,11 @@ struct HoshiReaderApp: App {
         _ = DictionaryManager.shared
         configureTabBarAppearance()
         #if DEBUG
+        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_ZOOM"] == "1" {
+            HttpSyncSettingsStore.shared.token = ""
+            do { try ZoomUITestFixture.seed() }
+            catch { assertionFailure("Could not prepare the zoom fixture: \(error)") }
+        }
         if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_STATISTICS"] == "1" {
             HttpSyncSettingsStore.shared.token = ""
             UserDefaults.standard.set(StatisticsZone.defaultID, forKey: StatisticsZone.key)
@@ -420,6 +425,46 @@ private enum OfflineLlmLaunchSelfTest {
 
     private static var logFileURL: URL {
         FileManager.default.temporaryDirectory.appendingPathComponent("HoshiLlmSelfTest.log")
+    }
+}
+#endif
+
+#if DEBUG
+/// Generated only inside an explicitly requested UI-test process. Each launch resets this one
+/// synthetic book, so zoom scenarios do not depend on a developer's library or a seeded simulator.
+@MainActor private enum ZoomUITestFixture {
+    static func seed() throws {
+        let title = "IDB Zoom Fixture"
+        let root = try BookStorage.getBooksDirectory().appendingPathComponent(title, isDirectory: true)
+        if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("images"), withIntermediateDirectories: true)
+        let width = 1179, height = 2556
+        let blocks: [[String: Any]] = [
+            ["box": [200, 900, 760, 1050], "vertical": false, "font_size": 72,
+             "lines": ["日本語のテキスト"], "lines_coords": [[[200, 900], [760, 900], [760, 1050], [200, 1050]]]],
+            ["box": [200, 1700, 700, 1850], "vertical": false, "font_size": 72,
+             "lines": ["二回目のテスト"], "lines_coords": [[[200, 1700], [700, 1700], [700, 1850], [200, 1850]]]]
+        ]
+        var pages: [[String: Any]] = []
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
+        let image = UIGraphicsImageRenderer(size: CGSize(width: CGFloat(width), height: CGFloat(height)), format: format).image { context in
+            UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+            UIColor.lightGray.setFill()
+            context.fill(CGRect(x: 200, y: 900, width: 560, height: 150))
+            context.fill(CGRect(x: 200, y: 1700, width: 500, height: 150))
+        }
+        guard let data = image.pngData() else { throw CocoaError(.fileWriteUnknown) }
+        for index in 0..<3 {
+            let path = "images/page\(index).png"
+            try data.write(to: root.appendingPathComponent(path))
+            pages.append(["img_width": width, "img_height": height, "img_path": path, "blocks": index == 0 ? blocks : []])
+        }
+        try JSONSerialization.data(withJSONObject: ["title": title, "pages": pages])
+            .write(to: root.appendingPathComponent(FileNames.mokuro))
+        let metadata = BookMetadata(title: title, cover: nil, folder: title, lastAccess: Date(),
+                                    contentType: .mokuro, syncId: "ui_zoom_fixture")
+        try BookStorage.save(metadata, inside: root, as: FileNames.metadata)
+        try BookStorage.save(Bookmark(chapterIndex: 0, progress: 0, characterCount: 0), inside: root, as: FileNames.bookmark)
     }
 }
 #endif

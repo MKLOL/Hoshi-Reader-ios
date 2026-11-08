@@ -79,6 +79,8 @@ def main():
             "-only-testing:HoshiReaderUITests/PodcastTranscriptUITests",
             "-only-testing:HoshiReaderUITests/StatisticsSyncUITests",
             "-only-testing:HoshiReaderUITests/CloudMangaDownloadUITests",
+            "-only-testing:HoshiReaderUITests/ZoomPopupUITests/testUltraThinActionButtonsStayVisibleAndTappable",
+            "-only-testing:HoshiReaderUITests/ZoomPopupUITests/testSelectionRectStaysNearZoomedMangaTap",
         ] + shlex.split(env["HOSHI_XCODEBUILD_ARGS"])
         log = ROOT / "build/ios-parity-ui.log"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +94,7 @@ def main():
             ui_env = dict(env, TEST_RUNNER_HOSHI_KV_BASE_URL=base, TEST_RUNNER_HOSHI_KV_TOKEN=token)
             ui = subprocess.run(command, cwd=ROOT, env=ui_env, stdout=output, stderr=subprocess.STDOUT, check=False, timeout=900)
         output = log.read_text()
-        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"), ("CloudMangaDownloadUITests", "testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage"))
+        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"), ("CloudMangaDownloadUITests", "testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage"), ("ZoomPopupUITests", "testUltraThinActionButtonsStayVisibleAndTappable"), ("ZoomPopupUITests", "testSelectionRectStaysNearZoomedMangaTap"))
         passed = all(any(suite in line and method in line and "passed" in line
                          for line in output.splitlines()) for suite, method in required)
         if ui.returncode or "** TEST SUCCEEDED **" not in output or not passed:

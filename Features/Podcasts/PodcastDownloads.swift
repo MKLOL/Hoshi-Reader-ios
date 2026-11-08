@@ -14,6 +14,7 @@ import Foundation
     private var tasks: [String: URLSessionTask] = [:]
     private var forcedErrors: [Int: String] = [:]
     private var epochs = PodcastDownloadEpochs()
+    private var progressThrottles: [Int: HttpSyncProgressThrottle] = [:]
     var backgroundCompletion: (() -> Void)?
 
     func restore() {
@@ -57,7 +58,7 @@ import Foundation
         var accounts = Set(tasks.values.compactMap { Self.pair($0.taskDescription)?.account })
         if let account = PodcastStore.shared.account { accounts.insert(account) }
         epochs.retire(accounts: accounts)
-        for task in tasks.values { task.cancel() }; tasks = [:]
+        for task in tasks.values { task.cancel() }; tasks = [:]; progressThrottles = [:]
         Task {
             for task in await session.allTasks {
                 if let pair = Self.pair(task.taskDescription), isRetired(task, account: pair.account) { task.cancel() }
@@ -72,6 +73,7 @@ import Foundation
     }
     private func finishTracking(_ task: URLSessionTask, pair: PodcastDownloadReference) {
         tasks[pair.key] = nil
+        progressThrottles[task.taskIdentifier] = nil
         epochs.record(task.taskIdentifier)
     }
     static func pair(_ description: String?) -> PodcastDownloadReference? { PodcastDownloadReference(description) }
@@ -81,6 +83,9 @@ import Foundation
             forcedErrors[task.taskIdentifier] = pair.part == .transcript ? "The podcast transcript exceeds the 2 MB download limit." : "The recording exceeds the 512 MB download limit."
             task.cancel(); return
         }
+        let throttle = progressThrottles[task.taskIdentifier] ?? HttpSyncProgressThrottle()
+        progressThrottles[task.taskIdentifier] = throttle
+        guard throttle.shouldPublish(.init(key: pair.description, uploading: false, completed: written, total: total)) else { return }
         PodcastStore.shared.downloadProgress(account: pair.account, id: pair.id, fraction: pair.part == .transcript ? 0 : (total > 0 ? min(1, Double(written) / Double(total)) : 0), transcript: pair.part.isTranscript)
     }
     func completed(task: URLSessionTask, staged: URL) {

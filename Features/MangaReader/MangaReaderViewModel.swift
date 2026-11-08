@@ -48,6 +48,7 @@ final class MangaReaderViewModel {
 
     /// Reading statistics tracker (page/time based). `nil` until the book loads.
     private(set) var usage: ReaderUsageSession?
+    let statisticsOrigin = UUID()
     private(set) var statistics: MangaStatisticsTracker?
     private var pagesRead = 0
     private var resumeTracking = false
@@ -171,7 +172,7 @@ final class MangaReaderViewModel {
         row.lastModified = max(Int(Date().timeIntervalSince1970 * 1000), StatisticsNumbers.nextStamp(row.lastModified))
         textStatistics = MangaTextStatistic.merged(textStatistics + [row])
         sessionCharacters = StatisticsNumbers.adding(sessionCharacters, characters)
-        if let root = bookRoot { try? ReadingStatisticsStore.saveText(textStatistics, root: root) }
+        if let root = bookRoot { try? ReadingStatisticsStore.saveText(textStatistics, root: root, origin: statisticsOrigin) }
     }
 
     func reloadStatistics() {
@@ -184,7 +185,7 @@ final class MangaReaderViewModel {
         guard let bookRoot else { return }
         statistics?.update(currentPage: pagesRead)
         if let rows = statistics?.statisticsForPersistence() {
-            try? ReadingStatisticsStore.save(rows, root: bookRoot)
+            try? ReadingStatisticsStore.save(rows, root: bookRoot, origin: statisticsOrigin)
         }
     }
 

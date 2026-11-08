@@ -41,9 +41,11 @@ private struct Position {
 @MainActor
 class ReaderLoaderViewModel {
     var document: EPUBDocument?
+    private(set) var readerModel: ReaderViewModel?
     let book: BookMetadata
     private(set) var reservedSyncId: String?
     private var didAttemptLoad = false
+    private let usageLog: UsageLog
     
     var rootURL: URL? {
         guard let booksFolder = try? BookStorage.getBooksDirectory(),
@@ -53,11 +55,12 @@ class ReaderLoaderViewModel {
         return booksFolder.appendingPathComponent(folder)
     }
     
-    init(book: BookMetadata) {
+    init(book: BookMetadata, usageLog: UsageLog = .shared) {
         self.book = book
+        self.usageLog = usageLog
     }
     
-    func loadBook() async {
+    func loadBook(userConfig: UserConfig) async {
         guard !didAttemptLoad else { return }
         didAttemptLoad = true
         reservedSyncId = syncId(for: book)
@@ -65,7 +68,7 @@ class ReaderLoaderViewModel {
         // Keep the loading view non-interactive until map/legacy bookmark migration has applied.
         // ReaderViewModel must never capture a stale sidecar and then timestamp it as a new turn.
         await HttpSyncManager.shared.syncBookmarksBeforeReading(book: book)
-        guard let root = rootURL else {
+        guard !Task.isCancelled, let root = rootURL else {
             return
         }
         
@@ -77,6 +80,15 @@ class ReaderLoaderViewModel {
         bookCopy.lastAccess = Date()
         try? BookStorage.save(bookCopy, inside: root, as: FileNames.metadata)
         
+        readerModel = ReaderViewModel(book: book, document: doc, rootURL: root,
+            enableStatistics: userConfig.enableStatistics,
+            autostartStatistics: userConfig.statisticsAutostartMode == .on,
+            autoSyncEnabled: userConfig.enableSync && userConfig.enableAutoSync,
+            syncStats: userConfig.enableSync && userConfig.statisticsEnableSync,
+            statsSyncMode: userConfig.statisticsSyncMode,
+            syncAudioBook: userConfig.enableSasayaki && userConfig.sasayakiEnableSync,
+            showSentenceTranslations: userConfig.readerShowSentenceTranslations,
+            statisticsAutostartMode: userConfig.statisticsAutostartMode, usageLog: usageLog)
         self.document = doc
     }
 }
@@ -113,11 +125,16 @@ class ReaderViewModel {
     private var readingTracker: MangaStatisticsTracker?
     private var statisticsTask: Task<Void, Never>?
     private var didSyncOnOpen = false
+    private var hasStarted = false
+    private var hasFinished = false
+    private let usageLog: UsageLog
+    let statisticsOrigin = UUID()
     var sessionStatistics: Statistics { readingTracker?.session ?? Self.getDefaultStatistic(title: document.title ?? "") }
     var todaysStatistics: Statistics { readingTracker?.today ?? Self.getDefaultStatistic(title: document.title ?? "") }
     var allTimeStatistics: Statistics { readingTracker?.allTime ?? Self.getDefaultStatistic(title: document.title ?? "") }
     let enableStatistics: Bool
     let autostartStatistics: Bool
+    let statisticsAutostartMode: StatisticsAutostartMode
     
     // sasayaki
     var sasayakiPlayer: SasayakiPlayer!
@@ -156,6 +173,7 @@ class ReaderViewModel {
         statsSyncMode: StatisticsSyncMode,
         syncAudioBook: Bool,
         showSentenceTranslations: Bool,
+        statisticsAutostartMode: StatisticsAutostartMode? = nil,
         usageLog: UsageLog = .shared
     ) {
         self.book = book
@@ -163,11 +181,13 @@ class ReaderViewModel {
         self.rootURL = rootURL
         self.enableStatistics = enableStatistics
         self.autostartStatistics = autostartStatistics
+        self.statisticsAutostartMode = statisticsAutostartMode ?? (autostartStatistics ? .on : .off)
         self.autoSyncEnabled = autoSyncEnabled
         self.syncStats = syncStats
         self.statsSyncMode = statsSyncMode
         self.syncAudioBook = syncAudioBook
         self.showSentenceTranslations = showSentenceTranslations
+        self.usageLog = usageLog
         
         if let bookmark = BookStorage.loadBookmark(root: rootURL) {
             index = bookmark.chapterIndex
@@ -181,15 +201,6 @@ class ReaderViewModel {
             bookInfo = b
         } else {
             bookInfo = BookInfo(characterCount: 0, chapterInfo: [:])
-        }
-        
-        usage = ReaderUsageSession(book: book, log: usageLog)
-        if enableStatistics {
-            loadStatistics()
-        }
-        
-        if autostartStatistics {
-            startTracking()
         }
         
         sasayakiPlayer = SasayakiPlayer(
@@ -208,7 +219,16 @@ class ReaderViewModel {
                 self?.scheduleAutoExport()
             }
         )
-        
+    }
+
+    /// Construction can happen while SwiftUI evaluates a parent. Reader effects begin only
+    /// when the retained model is actually presented, and never repeat after a redraw.
+    func start() {
+        guard !hasStarted, !hasFinished else { return }
+        hasStarted = true
+        usage = ReaderUsageSession(book: book, log: usageLog)
+        if enableStatistics { loadStatistics() }
+        if enableStatistics, autostartStatistics { startTracking() }
         highlights = BookStorage.loadHighlights(root: rootURL) ?? []
 
         if let id = syncId(for: book) {
@@ -226,6 +246,18 @@ class ReaderViewModel {
         preloadSentenceTranslationsAndReloadIfNeeded()
     }
     
+    @discardableResult
+    func finish() -> Bool {
+        guard !hasFinished else { return false }
+        hasFinished = true
+        closePopups()
+        persistReadingTime()
+        stopTracking()
+        usage?.close()
+        sasayakiPlayer.teardown()
+        return true
+    }
+
     var currentChapterCount: Int {
         guard document.spine.items.indices.contains(index),
               let manifestItem = document.manifest.items[document.spine.items[index].idref],
@@ -296,7 +328,7 @@ class ReaderViewModel {
     }
     
     func syncOnOpen() async {
-        guard !didSyncOnOpen else { return }
+        guard !didSyncOnOpen, !hasFinished else { return }
         didSyncOnOpen = true
         if autoSyncEnabled {
             let result = try? await SyncManager.shared.syncBook(
@@ -312,6 +344,7 @@ class ReaderViewModel {
                 reloadAfterImport()
             }
         }
+        guard !hasFinished else { return }
         loadCurrentChapter()
         resetTrackingBaseline()
     }
@@ -410,10 +443,7 @@ class ReaderViewModel {
         persistBookmark(progress: point.progress, action: point.progress >= 1 ? "finishBook" : "sentenceTurn")
         usage?.record(.page, source: "sentence", chapter: index + 1, character: currentCharacter)
         lastUsagePosition = "\(index):\(currentCharacter)"
-        if !isTracking, enableStatistics,
-           UserDefaults.standard.string(forKey: "statisticsAutostartMode") == StatisticsAutostartMode.pageturn.rawValue {
-            startTracking()
-        }
+        if enableStatistics, !isTracking, statisticsAutostartMode == .pageturn { startTracking() }
         flushStats()
     }
 
@@ -575,6 +605,7 @@ class ReaderViewModel {
     }
     
     func startTracking() {
+        guard enableStatistics, !hasFinished, !isTracking else { return }
         isTracking = true
         isPaused = UIApplication.shared.applicationState != .active
         usage?.reading(!isPaused)
@@ -760,6 +791,8 @@ class ReaderViewModel {
     }
 
     isolated deinit {
+        statisticsTask?.cancel()
+        usage?.close()
         if let importRegistration { ReadingImportCoordinator.shared.unregister(importRegistration) }
     }
     
@@ -838,7 +871,7 @@ class ReaderViewModel {
     // https://github.com/ttu-ttu/ebook-reader/blob/2703b50ec52b2e4f70afcab725c0f47dd8a66bf4/apps/web/src/lib/components/book-reader/book-reading-tracker/book-reading-tracker.svelte#L722
     private func saveStats() {
         if let rows = readingTracker?.statisticsForPersistence() {
-            try? ReadingStatisticsStore.save(rows, root: rootURL)
+            try? ReadingStatisticsStore.save(rows, root: rootURL, origin: statisticsOrigin)
         }
         scheduleAutoExport()
     }
@@ -981,9 +1014,6 @@ class ReaderViewModel {
     }
     
     private static func formattedDate(date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.timeZone = TimeZone.current
-        formatter.formatOptions = [.withFullDate]
-        return formatter.string(from: date)
+        MangaStatisticsTracker.dateKey(for: date)
     }
 }

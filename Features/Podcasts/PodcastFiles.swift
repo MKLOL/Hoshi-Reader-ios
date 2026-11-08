@@ -23,6 +23,7 @@ import Foundation
     var validatedAccount: String? {
         get { (try? String(contentsOf: root.appendingPathComponent("validated-account"), encoding: .utf8)) }
         set {
+            guard newValue != validatedAccount else { return }
             guard let newValue else { try? FileManager.default.removeItem(at: root.appendingPathComponent("validated-account")); return }
             guard PodcastRules.validID(newValue), (try? directory(newValue)) != nil else { return }
             try? Data(newValue.utf8).write(to: root.appendingPathComponent("validated-account"), options: .atomic)

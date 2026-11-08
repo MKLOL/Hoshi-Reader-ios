@@ -33,7 +33,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
     /// Whether the book needed any exchange: false when its rows and the server's copy were as
     /// the last exchange left them, with nothing waiting to upload.
     @discardableResult
-    func exchange(root: URL, syncId: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil, uploadLocal: Bool = true) async throws -> Bool {
+    func exchange(root: URL, syncId: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil, uploadLocal: Bool = true, stillCurrent: @escaping @MainActor () -> Bool = { true }) async throws -> Bool {
         let lock = root.standardizedFileURL.path
         if busy.contains(lock) { await withCheckedContinuation { waiters[lock, default: []].append($0) } }
         busy.insert(lock)
@@ -42,17 +42,20 @@ nonisolated struct MangaStatisticsBlob: Codable {
                 let next = pending.removeFirst(); waiters[lock] = pending; next.resume()
             } else { busy.remove(lock) }
         }
+        try checkCurrent(stillCurrent)
         guard FileManager.default.fileExists(atPath: root.path) else { return false }
         try ReadingStatisticsStore.migrate(root: root)
-        var exchanged = try await exchangeReading(root: root, id: syncId, transport: transport, listing: listing, uploadLocal: uploadLocal)
+        var exchanged = try await exchangeReading(root: root, id: syncId, transport: transport, listing: listing, uploadLocal: uploadLocal, stillCurrent: stillCurrent)
+        try checkCurrent(stillCurrent)
         if ReadingStatisticsStore.contentType(root: root) == .mokuro {
-            exchanged = try await exchangeText(root: root, id: syncId, transport: transport, listing: listing, uploadLocal: uploadLocal) || exchanged
+            exchanged = try await exchangeText(root: root, id: syncId, transport: transport, listing: listing, uploadLocal: uploadLocal, stillCurrent: stillCurrent) || exchanged
+            try checkCurrent(stillCurrent)
         }
         return exchanged
     }
 
-    private func exchangeReading(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool) async throws -> Bool {
-        try await exchangeRows(root: root, key: "books/\(id)/statistics", transport: transport, listing: listing, uploadLocal: uploadLocal,
+    private func exchangeReading(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool, stillCurrent: @escaping @MainActor () -> Bool) async throws -> Bool {
+        try await exchangeRows(root: root, key: "books/\(id)/statistics", transport: transport, listing: listing, uploadLocal: uploadLocal, stillCurrent: stillCurrent,
             load: { try ReadingStatisticsStore.strictReading(root: root) },
             save: { try ReadingStatisticsStore.save($0, root: root, scheduleSync: false) },
             merge: Statistics.merged,
@@ -64,8 +67,8 @@ nonisolated struct MangaStatisticsBlob: Codable {
                 return blob.entries
             })
     }
-    private func exchangeText(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool) async throws -> Bool {
-        try await exchangeRows(root: root, key: "books/\(id)/manga_statistics", transport: transport, listing: listing, uploadLocal: uploadLocal,
+    private func exchangeText(root: URL, id: String, transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool, stillCurrent: @escaping @MainActor () -> Bool) async throws -> Bool {
+        try await exchangeRows(root: root, key: "books/\(id)/manga_statistics", transport: transport, listing: listing, uploadLocal: uploadLocal, stillCurrent: stillCurrent,
             load: { try ReadingStatisticsStore.strictText(root: root) },
             save: { try ReadingStatisticsStore.saveText($0, root: root, scheduleSync: false) },
             merge: MangaTextStatistic.merged,
@@ -78,6 +81,10 @@ nonisolated struct MangaStatisticsBlob: Codable {
             })
     }
     private func hash(_ data: Data) -> String { SHA256.hash(data: data).lowercaseHex }
+    private func checkCurrent(_ stillCurrent: @MainActor () -> Bool) throws {
+        try Task.checkCancellation()
+        guard stillCurrent() else { throw CancellationError() }
+    }
 
     func pushLocalChanges(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta]? = nil) async -> [String] {
         do {
@@ -105,8 +112,9 @@ nonisolated struct MangaStatisticsBlob: Codable {
         return try encoder.encode(value)
     }
     private func exchangeRows<T: Equatable>(root: URL, key: String, transport: any HttpSyncKvTransport,
-        listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool, load: () throws -> [T], save: ([T]) throws -> Void,
+        listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool, stillCurrent: @MainActor () -> Bool, load: () throws -> [T], save: ([T]) throws -> Void,
         merge: ([T]) -> [T], encode: ([T]) throws -> Data, decode: (Data) throws -> [T]) async throws -> Bool {
+        try checkCurrent(stillCurrent)
         let local = try load()
         let body = try encode(local)
         let localHash = hash(body)
@@ -125,6 +133,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         // fetch again before a nonempty upload so we merge rather than erase its first day.
         if listing != nil, meta == nil, local.isEmpty { return false }
         let fetched = try await transport.getBounded(key: key, maxBytes: 4 * 1024 * 1024)
+        try checkCurrent(stillCurrent)
         if let fetched, fetched.body.count > 4 * 1024 * 1024 { throw HttpSyncError("Statistics exceed the size limit") }
         let remote = try fetched.map { merge(try decode($0.body)) } ?? []
         // The reader can save while GET is in flight. Re-read before merging.
@@ -139,6 +148,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         let etag: String?
         if merged != remote && uploadLocal {
             let written = try await transport.put(key: key, contentType: "application/json; charset=utf-8", body: mergedBody)
+            try checkCurrent(stillCurrent)
             size = mergedBody.count; stamp = written.lastModified; etag = written.etag
         } else {
             size = fetched?.body.count ?? 0; stamp = fetched?.lastModified ?? ""; etag = fetched?.etag ?? ""

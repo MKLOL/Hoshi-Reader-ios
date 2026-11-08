@@ -7,6 +7,23 @@ nonisolated struct HttpSyncTransferSample: Sendable, Equatable {
     let total: Int64
 }
 
+/// Limit presentation work to ten updates a second, keeping starts, retries and completion.
+/// This runs before enqueuing UI tasks, so fast transports cannot flood the main actor.
+nonisolated final class HttpSyncProgressThrottle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var previous: HttpSyncTransferSample?
+    private var publishedAt: TimeInterval = 0
+    func shouldPublish(_ sample: HttpSyncTransferSample, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let changedTransfer = previous?.key != sample.key || previous?.uploading != sample.uploading
+        let retry = sample.completed < (previous?.completed ?? 0)
+        let finished = sample.total > 0 && sample.completed >= sample.total
+        guard changedTransfer || retry || sample != previous && (finished || now - publishedAt >= 0.1) else { return false }
+        previous = sample; publishedAt = now
+        return true
+    }
+}
+
 nonisolated struct HttpSyncTransferProgress: Sendable, Equatable {
     let sample: HttpSyncTransferSample
     let bytesPerSecond: Double?
