@@ -481,11 +481,7 @@ final class HttpSyncBatchState {
     func observeLegacyEtags(transport: HttpSyncKvTransport) async throws -> [String: String] {
         await acquireOperation()
         defer { releaseOperation() }
-        let listing = try await listAllMetadata(transport: transport)
-        return Dictionary(uniqueKeysWithValues: listing.keys.compactMap { meta in
-            guard httpNeedsFullReconcile(meta.key), let etag = meta.etag else { return nil }
-            return (meta.key, etag)
-        })
+        return await HttpSyncListedKeys.index(try await listAllMetadata(transport: transport)).legacyEtags
     }
 
     private func acquireOperation() async {

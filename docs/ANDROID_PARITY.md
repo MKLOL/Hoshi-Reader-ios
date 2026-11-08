@@ -25,6 +25,15 @@ November 8 scrolling follow-up: profiling the idle five-second poll with an 80-b
 
 The idle poll went from 61 ms to under 3 ms of uninterrupted work, and the statistics pass from 54 ms to about 1 ms (about 3 ms after a book's reading was saved). `testForegroundPollNeverStallsTheMainThreadWithALargeLibrary` holds each to 4 ms and fails if an idle poll writes a file or uploads. `testAndroidEncodedBookmarkIsAppliedOnceNotOnEveryPoll` covers the loop.
 
+An adversarial review then found four ways the skips could miss a change, each now covered by a test that failed before its fix:
+
+- A reading save made while the statistics pass waited on the network was remembered as already exchanged. Books are now remembered by the times read before their exchange.
+- Rows received from another device's shard waited for a flush pass before reaching the per-book key. A pass that changed anything on disk no longer counts as settled.
+- A month missing from the server could count as synced.
+- A crash between the journal write and its bookmark projection was no longer repaired at launch. Journal times are now observed too.
+
+The sync test server now exits as soon as its state is saved, instead of occasionally outlasting the 10 s stop timeout on a loaded host.
+
 Validation on November 7, 2026, with `tools/test_ios_parity.py` on a newly created iOS 27 iPhone simulator: 19 KV-server contract tests, 104 host regressions, 237 hosted XCTest cases against the real local sync server (no skips) and the 3 required native UI scenarios (podcast transcript playback and appearance, synced statistics/streak and trends) all passed. The test server no longer waits on its daemon request threads at shutdown, and the runner writes its stderr to `build/sync-test-server.log` instead of an undrained pipe. A Debug build for a physical iPad mini also succeeded. Physical-device background and audio behavior remain manual checks.
 
 Known differences: chapters in quirks mode (no doctype) measure `body.clientHeight` as the viewport in the shared `textlayout.js`; the reader's web view never overlaps a safe area, so pages match today. iOS sentence mode follows the iOS statistics autostart setting, while Android always tracks.

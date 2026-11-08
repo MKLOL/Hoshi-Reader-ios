@@ -293,7 +293,7 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                 roots[id] = StatisticsRoot(syncId: id, root: root, title: info?.title, contentType: info?.contentType, book: nil)
                 return root
             }
-            var readThisPass = Set<String>()
+            var readThisPass = Set<String>(), touched = Set<String>()
             // Apply each key only after all its rows are safely saved, including own keys after restore.
             try Task.checkCancellation()
             for meta in listing.values.filter({ $0.key.hasPrefix(Self.prefix) }).sorted(by: { $0.key < $1.key }) {
@@ -320,9 +320,9 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                             try ReadingStatisticsStore.migrate(root: root)
                             let existing = try ReadingStatisticsStore.strictReading(root: root)
                             let merged = Statistics.merged(existing + reading)
-                            if merged != existing { try ReadingStatisticsStore.save(merged, root: root, scheduleSync: false) }
+                            if merged != existing { try ReadingStatisticsStore.save(merged, root: root, scheduleSync: false); touched.insert(id) }
                             let oldText = try ReadingStatisticsStore.strictText(root: root), newText = MangaTextStatistic.merged(oldText + text)
-                            if newText != oldText { try ReadingStatisticsStore.saveText(newText, root: root, scheduleSync: false) }
+                            if newText != oldText { try ReadingStatisticsStore.saveText(newText, root: root, scheduleSync: false); touched.insert(id) }
                         }
                     }
                     readThisPass.insert(meta.key)
@@ -346,7 +346,7 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                 let key = "books/\(item.syncId)/statistics"
                 guard !blocked(key, listing[key]?.etag) else { legacySettled = false; continue }
                 // Files and server copies as its last exchange left them: nothing to exchange.
-                if !retryFailed, let signature = legacySignature(item.syncId, disk.stamps[item.syncId]), legacy[item.syncId] == signature { continue }
+                if !retryFailed, !touched.contains(item.syncId), let signature = legacySignature(item.syncId, disk.stamps[item.syncId]), legacy[item.syncId] == signature { continue }
                 legacy[item.syncId] = nil
                 do {
                     if try await HttpReadingStatisticsSync.shared.exchange(root: item.root, syncId: item.syncId, transport: transport, listing: listing, uploadLocal: legacyDue) {
@@ -384,7 +384,10 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                 }
                 lastPush = now
             }
-            let monthsSynced = shards.months.allSatisfy { month, shard in index.hashes[Self.prefix + own.id + "/" + month + ".json"] == shard.sha }
+            let monthsSynced = shards.months.allSatisfy { month, shard in
+                let key = Self.prefix + own.id + "/" + month + ".json"
+                return index.hashes[key] == shard.sha && listedAfter[key] != nil
+            }
             var local = StatisticsPreferencesStore.load(defaults: defaults)
             let choices = index.preferences.compactMap { key, value -> (String, HttpStatisticsPreferences)? in
                 Self.parse(key).map { ($0.device, value) }
@@ -408,11 +411,12 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                     listedAfter[settingsKey] = Self.listed(response)
                 } catch { fail(settingsKey, listing[settingsKey]?.etag, error) }
             }
-            for id in quietBooks { legacy[id] = legacySignature(id, current.stamps[id]) }
+            // The stamps read before the exchange: a save after it must still look new.
+            for id in quietBooks where !touched.contains(id) { legacy[id] = legacySignature(id, disk.stamps[id]) }
             legacy = legacy.filter { current.stamps[$0.key] != nil }
             index.legacy = legacy.isEmpty ? nil : legacy
             let settingsSynced = local.updatedAt <= 0 || index.hashes[settingsKey] == sha(settingsBody)
-            let settled = errors.isEmpty && failures.isEmpty && legacySettled && monthsSynced && settingsSynced && !current.needsAbsorb
+            let settled = errors.isEmpty && failures.isEmpty && legacySettled && monthsSynced && settingsSynced && !current.needsAbsorb && current.digest == disk.digest
             index.settled = settled ? settledSignature(current, listedAfter) : nil
             try await finish()
         } catch { errors.append(error.localizedDescription); markFailed(error) }

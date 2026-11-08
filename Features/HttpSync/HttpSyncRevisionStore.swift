@@ -56,8 +56,8 @@ enum HttpSyncRevisionStore {
 
     private static func save(_ state: [String: HttpSyncRevisionRecord]) {
         guard let url = fileURL(), let data = try? JSONEncoder().encode(state) else { return }
-        try? data.write(to: url, options: .atomic)
-        if let (stamp, size) = fileStamp(url) { cached = (url, stamp, size, state) } else { cached = nil }
+        guard (try? data.write(to: url, options: .atomic)) != nil, let (stamp, size) = fileStamp(url) else { cached = nil; return }
+        cached = (url, stamp, size, state)
     }
 
     /// The record for `key` (zeros when never seen).

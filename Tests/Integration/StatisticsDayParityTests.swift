@@ -495,3 +495,133 @@ private actor DayParityKV: HttpSyncKvTransport {
     func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList { HttpSyncKvList(keys: bodies.keys.compactMap(metadata)) }
     func delete(key: String) async throws { bodies[key] = nil }
 }
+
+
+// MARK: - A skipped statistics pass must never drop an upload
+
+/// DayParityKV plus a hook that runs on the main actor (where the reader saves statistics)
+/// just before one key is fetched, i.e. while the lane is suspended on the network.
+private actor HookedKV: HttpSyncKvTransport {
+    let base = DayParityKV()
+    private var hooks: [String: @MainActor @Sendable () -> Void] = [:]
+    func beforeGet(_ key: String, _ hook: @escaping @MainActor @Sendable () -> Void) { hooks[key] = hook }
+    func listing() async throws -> [String: HttpSyncKvKeyMeta] {
+        Dictionary(uniqueKeysWithValues: try await base.list(prefix: nil, since: nil, cursor: nil, limit: nil).keys.map { ($0.key, $0) })
+    }
+    func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse { try await base.put(key: key, contentType: contentType, body: body) }
+    func putFile(key: String, contentType: String, fileURL: URL) async throws -> HttpSyncKvWriteResponse { try await base.putFile(key: key, contentType: contentType, fileURL: fileURL) }
+    func get(key: String) async throws -> HttpSyncKvFetched? {
+        if let hook = hooks.removeValue(forKey: key) { await hook() }
+        return try await base.get(key: key)
+    }
+    func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? { nil }
+    func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList { try await base.list(prefix: prefix, since: since, cursor: cursor, limit: limit) }
+    func delete(key: String) async throws { try await base.delete(key: key) }
+}
+
+@MainActor private final class PassClock { var now = Date(timeIntervalSince1970: 1_790_000_000) }
+
+nonisolated final class StatisticsPassSkipTests: XCTestCase {
+    private func row(_ day: String, seconds: Double, device: String = "ios") -> Statistics {
+        var value = Statistics.empty(title: "Fixture", day: day, device: ReadingDevice(id: device, name: device))
+        value.readingTime = seconds; value.charactersRead = Int(seconds); value.lastStatisticModified = Int(seconds)
+        return value
+    }
+    @MainActor private func install(_ id: String, in root: URL, rows: [Statistics]) throws -> URL {
+        let folder = root.appendingPathComponent(id)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try BookStorage.save(BookMetadata(title: id, cover: nil, folder: id, lastAccess: .now, syncId: id), inside: folder, as: FileNames.metadata)
+        try ReadingStatisticsStore.save(rows, root: folder, scheduleSync: false)
+        return folder
+    }
+    @MainActor private func legacyDays(_ kv: HookedKV, _ id: String) async throws -> Set<String> {
+        guard let fetched = try await kv.get(key: "books/\(id)/statistics") else { return [] }
+        return Set(try JSONDecoder().decode(ReadingStatisticsBlob.self, from: fetched.body).entries.map { "\($0.deviceId ?? "?")@\($0.dateKey)" })
+    }
+    private func fixture() throws -> (URL, UserDefaults, String) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("review-stats-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let suite = "ReviewLane." + UUID().uuidString
+        return (root, UserDefaults(suiteName: suite)!, suite)
+    }
+
+    /// A book found quiet early in a pass is remembered with the file stamps read at the END of the
+    /// pass. A reading save that lands in between (the lane is suspended on another book's GET) is
+    /// then recorded as already exchanged, and the legacy per-book key never receives it.
+    @MainActor func testReadingSavedDuringAPassStillReachesTheLegacyKey() async throws {
+        let (root, defaults, suite) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root); defaults.removePersistentDomain(forName: suite) }
+        let kv = HookedKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"), defaults: defaults)
+        let first = try install("aaa_book", in: root, rows: [row("2026-10-01", seconds: 600)])
+        let second = try install("bbb_book", in: root, rows: [row("2026-10-01", seconds: 300)])
+        var errors = await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        XCTAssertEqual(errors, [])
+        errors = await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        XCTAssertEqual(errors, [])
+        // The user opens aaa_book (metadata rewritten) and reads bbb_book on another device's turn:
+        // aaa_book is exchanged and found quiet, then bbb_book's GET suspends the lane, during which
+        // the reader saves new reading to aaa_book.
+        try BookStorage.save(BookMetadata(title: "aaa_book", cover: nil, folder: "aaa_book", lastAccess: .now.addingTimeInterval(5), syncId: "aaa_book"), inside: first, as: FileNames.metadata)
+        try ReadingStatisticsStore.save([row("2026-10-01", seconds: 420)], root: second, scheduleSync: false)
+        let saved = row("2026-10-02", seconds: 900)
+        await kv.beforeGet("books/bbb_book/statistics") { try? ReadingStatisticsStore.save([saved], root: first, scheduleSync: false) }
+        errors = await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        XCTAssertEqual(errors, [])
+        XCTAssertTrue(ReadingStatisticsStore.reading(root: first).contains { $0.dateKey == "2026-10-02" }, "fixture: the save landed")
+        // Two ordinary later passes (reader close / app background are flush passes).
+        errors = await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        errors += await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        XCTAssertEqual(errors, [])
+        let ownShard = try await kv.get(key: HttpStatisticsLane.prefix + "ios/2026-10.json")
+        XCTAssertNotNil(ownShard, "the monthly shard is pushed")
+        let legacy = try await legacyDays(kv, "aaa_book")
+        XCTAssertTrue(legacy.contains("ios@2026-10-02"), "legacy key books/aaa_book/statistics never received the save; it holds \(legacy.sorted())")
+    }
+
+    /// Another device's rows applied from its monthly shard used to be relayed to the legacy
+    /// per-book key by the next due legacy exchange. Now the book is skipped by its pre-apply
+    /// signature, the pass is marked settled, and every non-flush pass skips until a flush pass.
+    @MainActor func testRowsReceivedFromAShardAreRelayedToTheLegacyKeyByTheNextDuePass() async throws {
+        let (root, defaults, suite) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root); defaults.removePersistentDomain(forName: suite) }
+        let clock = PassClock()
+        let kv = HookedKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"), defaults: defaults, now: { clock.now })
+        _ = try install("aaa_book", in: root, rows: [row("2026-10-01", seconds: 600)])
+        var errors = await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        errors += await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        XCTAssertEqual(errors, [])
+        let shard = HttpStatisticsShard(deviceId: "android", month: "2026-10", books: ["aaa_book": HttpStatisticsShardBook(title: "aaa_book", contentType: "Epub", reading: [row("2026-10-03", seconds: 1200, device: "android")])])
+        _ = try await kv.put(key: HttpStatisticsLane.prefix + "android/2026-10.json", contentType: "application/json", body: JSONEncoder().encode(shard))
+        // The five-second poll's statistics passes (flush: false), the second after the 180 s legacy interval.
+        clock.now += 60
+        errors = await lane.run(transport: kv, listing: try await kv.listing())
+        clock.now += 200
+        errors += await lane.run(transport: kv, listing: try await kv.listing())
+        XCTAssertEqual(errors, [])
+        let legacy = try await legacyDays(kv, "aaa_book")
+        XCTAssertTrue(legacy.contains("android@2026-10-03"), "legacy key not relayed after a due pass; it holds \(legacy.sorted())")
+    }
+
+    /// A pass throttled by the 30 s push interval marks itself settled when the hashes match even
+    /// though the server no longer lists this device's month, so later polls never re-push it.
+    @MainActor func testOwnMonthMissingFromTheServerIsPushedByTheNextUnthrottledPass() async throws {
+        let (root, defaults, suite) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root); defaults.removePersistentDomain(forName: suite) }
+        let clock = PassClock()
+        let kv = HookedKV(), lane = HttpStatisticsLane(directory: root, device: ReadingDevice(id: "ios", name: "iOS"), defaults: defaults, now: { clock.now })
+        _ = try install("aaa_book", in: root, rows: [row("2026-10-01", seconds: 600)])
+        let key = HttpStatisticsLane.prefix + "ios/2026-10.json"
+        var errors = await lane.run(transport: kv, listing: try await kv.listing(), flush: true)
+        XCTAssertEqual(errors, [])
+        let pushed = try await kv.get(key: key)
+        XCTAssertNotNil(pushed)
+        try await kv.delete(key: key)  // e.g. the server was restored from an older snapshot
+        clock.now += 10
+        errors = await lane.run(transport: kv, listing: try await kv.listing())
+        clock.now += 300
+        errors += await lane.run(transport: kv, listing: try await kv.listing())
+        XCTAssertEqual(errors, [])
+        let restored = try await kv.get(key: key)
+        XCTAssertNotNil(restored, "this device's month was never pushed again")
+    }
+}

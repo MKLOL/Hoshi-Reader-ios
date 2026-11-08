@@ -675,7 +675,12 @@ def serve(host: str, port: int, token: str, max_body: int, state_path: str | Non
         if state_path:
             with open(state_path, "w", encoding="utf-8") as handle:
                 json.dump(store.dump(), handle, indent=1)
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        # Exit at once: the state is saved and nothing else needs finishing. A graceful
+        # serve_forever shutdown plus interpreter teardown occasionally outlasted callers'
+        # 10 s stop timeout on a loaded host.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)

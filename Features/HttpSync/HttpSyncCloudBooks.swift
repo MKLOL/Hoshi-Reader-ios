@@ -62,12 +62,16 @@ final class HttpSyncCloudBooks {
         while endpoint.hasSuffix("/") { endpoint.removeLast() }
         let identity = Self.digest(endpoint + "\n" + config.token)
         guard scope != identity else { return }
+        let switching = scope != nil
         generation += 1
         scope = identity
         directory = baseDirectory.appendingPathComponent(identity, isDirectory: true)
         downloads = [:]
         transferringSyncId = nil
         reload()
+        // Another account hides a different set of installed books. Not from init: observers
+        // would reach `shared` while it is still being created.
+        if switching { NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil) }
     }
 
     func reload() {

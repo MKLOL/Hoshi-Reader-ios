@@ -163,6 +163,11 @@ final class ReadingPositionRepository {
         }
         return ownIndex ?? [:]
     }
+    /// The journal is committed before its bookmark projection; its time reveals a projection
+    /// that was never written (the process ended in between, or the bookmark write failed).
+    func journalModified(bookId: String) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: fileURL(bookId).path))?[.modificationDate] as? Date
+    }
     func loadSyncIndex() -> (Data?, Int) { ((try? Data(contentsOf: directory.appendingPathComponent("sync-index.json"))), indexGeneration) }
     func saveSyncIndex(_ data: Data, generation: Int) {
         guard generation == indexGeneration else { return }
@@ -248,7 +253,10 @@ final class ReadingPositionRepository {
         guard let lhs else { return false }
         return lhs.chapterIndex == rhs.chapterIndex && lhs.progress == rhs.progress && lhs.characterCount == rhs.characterCount && lhs.lastModified == rhs.lastModified
     }
-    private func fileURL(_ bookId: String) -> URL { directory.appendingPathComponent("book-" + Self.digest(Data(bookId.utf8)) + ".json") }
+    private func fileURL(_ bookId: String) -> URL { Self.journalURL(bookId, in: directory) }
+    nonisolated static func journalURL(_ bookId: String, in directory: URL) -> URL {
+        directory.appendingPathComponent("book-" + digest(Data(bookId.utf8)) + ".json")
+    }
     nonisolated static func digest(_ data: Data) -> String { SHA256.hash(data: data).lowercaseHex }
 }
 

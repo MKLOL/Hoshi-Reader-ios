@@ -15,6 +15,9 @@ final class HttpReadingPositionLane {
         /// a bookmark changed since then can hold a local move to record, so the five-second poll
         /// does not read every book's files, including on its first pass after launch.
         var observed: [String: Date]?
+        /// The journal is written before its bookmark; a newer journal means the bookmark may never
+        /// have been projected (the app ended in between), so the book is observed again.
+        var observedJournals: [String: Date]?
     }
     /// A different account/server cannot reuse another server's ETag acknowledgements.
     private struct Scoped: Codable { var scope: String; var index: Index }
@@ -44,14 +47,26 @@ final class HttpReadingPositionLane {
             }
             guard stillCurrent(), !Task.isCancelled else { return Outcome() }
         }
-        return await exchange(transport: transport, listing: listing, roots: roots, bookmarkStamps: stamps, scope: scope, stillCurrent: stillCurrent)
+        let journals = await Self.journalStamps(ids: Array(roots.keys), directory: store.directory)
+        guard stillCurrent(), !Task.isCancelled else { return Outcome() }
+        return await exchange(transport: transport, listing: listing, roots: roots, bookmarkStamps: stamps, journalStamps: journals, scope: scope, stillCurrent: stillCurrent)
+    }
+
+    /// Each book's journal modification time, read off the main thread with the library scan.
+    @concurrent nonisolated static func journalStamps(ids: [String], directory: URL) async -> [String: Date] {
+        var result: [String: Date] = [:]
+        for id in ids {
+            let file = ReadingPositionRepository.journalURL(id, in: directory)
+            if let date = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date { result[id] = date }
+        }
+        return result
     }
 
     /// Explicit roots and a separate repository make the actual transport behavior testable.
     /// `bookmarkStamps` are the bookmark modification times read with the roots; without them
     /// each root's bookmark file is checked here.
     func exchange(transport: HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], roots: [String: URL],
-                  bookmarkStamps: [String: Date]? = nil, scope: String,
+                  bookmarkStamps: [String: Date]? = nil, journalStamps: [String: Date]? = nil, scope: String,
                   stillCurrent: @escaping @MainActor () -> Bool = { true }) async -> Outcome {
         let (stored, generation) = store.loadSyncIndex()
         if let stored, indexFile?.data != stored {
@@ -71,18 +86,21 @@ final class HttpReadingPositionLane {
         func modified(_ root: URL) -> Date? {
             (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent(FileNames.bookmark).path(percentEncoded: false)))?[.modificationDate] as? Date
         }
-        var observed: [String: Date] = [:]
+        var observed: [String: Date] = [:], journals: [String: Date] = [:]
         for (bookId, root) in roots {
             // A book without a bookmark yet is remembered as such, so it is not read every poll either.
             let stamp = (bookmarkStamps.map { $0[bookId] } ?? modified(root)) ?? .distantPast
-            if index.observed?[bookId] == stamp { observed[bookId] = stamp; continue }
+            let journal = (journalStamps.map { $0[bookId] } ?? store.journalModified(bookId: bookId)) ?? .distantPast
+            if index.observed?[bookId] == stamp, index.observedJournals?[bookId] == journal { observed[bookId] = stamp; journals[bookId] = journal; continue }
             let before = BookStorage.loadBookmark(root: root).map(ReadingPosition.init)
             store.observe(bookId: bookId, root: root)
             let after = BookStorage.loadBookmark(root: root).map(ReadingPosition.init)
             if let after, before == nil || !after.samePlace(as: before!) { outcome.moved.insert(bookId) }
             observed[bookId] = modified(root) ?? .distantPast
+            journals[bookId] = store.journalModified(bookId: bookId) ?? .distantPast
         }
         index.observed = observed.isEmpty ? nil : observed
+        index.observedJournals = journals.isEmpty ? nil : journals
         let device = store.device.id
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         func checkpoint() {

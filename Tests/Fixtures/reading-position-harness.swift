@@ -155,6 +155,29 @@ actor MemoryTransport: HttpSyncKvTransport {
   _ = await budgetLane.exchange(transport:budgetTransport,listing:budgetListing,roots:["test-book":budgetRoot],scope:"budget")
   _ = await budgetLane.exchange(transport:budgetTransport,listing:budgetListing,roots:["test-book":budgetRoot],scope:"budget")
   let finalBudgetCounts=await budgetTransport.counts();precondition(finalBudgetCounts.0 == 35 && finalBudgetCounts.1 == 0)
-  print("PASS: intent, backwards clock, causal merge, 50-event retention, restart, wire round trip, deletion, lane dedupe, invalid body memory, failed-key backoff, explicit TTU import")
+  // A journal commit whose bookmark projection was never written (the app was killed between
+  // the two writes, or the bookmark write failed) is still projected after the next launch.
+  do {
+   let book = root.appendingPathComponent("projection-book"), positions = root.appendingPathComponent("projection-positions")
+   try FileManager.default.createDirectory(at: book, withIntermediateDirectories: true)
+   let device = ReadingDevice(id: "ios-device", name: "iPhone")
+   let store = ReadingPositionRepository(directory: positions, device: device)
+   let session = store.open(bookId: "b", root: book)
+   let first = session.navigate(bookmark: Bookmark(chapterIndex: 0, progress: 0.2, characterCount: 20, lastModified: Date(timeIntervalSinceReferenceDate: 1000)))!
+   precondition(store.record(root: book, event: first)?.progress == 0.2)
+   let projectionTransport = MemoryTransport()
+   _ = await HttpReadingPositionLane(store: store).exchange(transport: projectionTransport, listing: [:], roots: ["b": book], scope: "s")
+   try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: book.path)
+   let second = session.navigate(bookmark: Bookmark(chapterIndex: 0, progress: 0.6, characterCount: 60, lastModified: Date(timeIntervalSinceReferenceDate: 2000)))!
+   _ = store.record(root: book, event: second)
+   try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: book.path)
+   precondition(BookStorage.loadBookmark(root: book)?.progress == 0.2, "fixture: the bookmark write failed")
+   let relaunched = ReadingPositionRepository(directory: positions, device: device)
+   precondition(relaunched.snapshot(bookId: "b").winner?.position.progress == 0.6, "fixture: the journal holds 0.6")
+   let projectionListing = await projectionTransport.listing()
+   _ = await HttpReadingPositionLane(store: relaunched).exchange(transport: projectionTransport, listing: projectionListing, roots: ["b": book], scope: "s")
+   precondition(BookStorage.loadBookmark(root: book)?.progress == 0.6, "the journal winner is projected after relaunch")
+  }
+  print("PASS: intent, backwards clock, causal merge, 50-event retention, restart, wire round trip, deletion, lane dedupe, invalid body memory, failed-key backoff, explicit TTU import, projection after relaunch")
  }
 }
