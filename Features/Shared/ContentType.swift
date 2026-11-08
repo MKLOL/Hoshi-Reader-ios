@@ -18,7 +18,7 @@ nonisolated enum ContentType: String, Codable, Hashable, Sendable {
 extension ContentType {
     /// Detects a book directory's type by the presence of the `mokuro.json` sidecar. This is the
     /// routing source of truth (a stored `BookMetadata.contentType` is a hint/fallback).
-    static func detect(bookDir: URL) -> ContentType {
+    nonisolated static func detect(bookDir: URL) -> ContentType {
         let mokuro = bookDir.appendingPathComponent(FileNames.mokuro)
         return FileManager.default.fileExists(atPath: mokuro.path(percentEncoded: false)) ? .mokuro : .epub
     }

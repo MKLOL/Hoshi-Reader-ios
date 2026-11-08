@@ -98,6 +98,83 @@ nonisolated final class HttpSyncTransferTests: XCTestCase {
         }
     }
 
+    func testReadingLaneWritesAndDeletesLeaveFullReconcileFingerprintUnchanged() async throws {
+        let base = FingerprintMemoryKV(), payload = "books/fixture/payload.manifest"
+        _ = try await base.put(key: payload, contentType: "application/json", body: Data("payload".utf8))
+        let ignored = ["app/reader_settings/device", "books/fixture/statistics",
+                       "books/fixture/manga_statistics", "books/fixture/bookmark",
+                       "sync/maps/books.json", "sync/maps/bookmarks/device.json"]
+        for key in ignored {
+            _ = try await base.put(key: key, contentType: "application/json", body: Data("before".utf8))
+        }
+        let baseline = try await fingerprint(base)
+        XCTAssertEqual(Set(baseline.keys), [payload])
+        let tracking = HttpSyncWriteTrackingTransport(base: base)
+        for key in ignored {
+            _ = try await tracking.put(key: key, contentType: "application/json", body: Data("after".utf8))
+            let afterWrite = try await fingerprint(base)
+            XCTAssertEqual(tracking.expectedLegacyEtags(after: baseline), afterWrite,
+                           "an independent reading lane must not prevent map publication: \(key)")
+            try await tracking.delete(key: key)
+            let afterDelete = try await fingerprint(base)
+            XCTAssertEqual(tracking.expectedLegacyEtags(after: baseline), afterDelete,
+                           "deleting an independent reading key must not change the fingerprint: \(key)")
+        }
+        XCTAssertEqual(tracking.expectedLegacyEtags(after: baseline), baseline)
+    }
+
+    func testReconcileFingerprintTracksPayloadChangesAndPreservesUnchangedKeys() async throws {
+        let base = FingerprintMemoryKV(), manifest = "books/fixture/payload.manifest"
+        let archive = "books/fixture/payload.zip", metadata = "books/fixture/metadata"
+        for key in [manifest, archive, metadata] {
+            _ = try await base.put(key: key, contentType: "application/octet-stream", body: Data("original".utf8))
+        }
+        let baseline = try await fingerprint(base), tracking = HttpSyncWriteTrackingTransport(base: base)
+        _ = try await tracking.get(key: manifest)
+        _ = try await tracking.list(prefix: nil, since: nil, cursor: nil, limit: nil)
+        XCTAssertEqual(tracking.expectedLegacyEtags(after: baseline), baseline,
+                       "reading an unchanged payload must preserve its acknowledged identity")
+        let manifestWrite = try await tracking.put(key: manifest, contentType: "application/json", body: Data("replacement".utf8))
+        let file = try temporaryDirectory().appendingPathComponent("payload.zip")
+        try Data("replacement archive".utf8).write(to: file)
+        let archiveWrite = try await tracking.putFile(key: archive, contentType: "application/zip", fileURL: file)
+        let expected = try XCTUnwrap(tracking.expectedLegacyEtags(after: baseline))
+        XCTAssertEqual(expected[manifest], manifestWrite.etag)
+        XCTAssertEqual(expected[archive], archiveWrite.etag)
+        XCTAssertEqual(expected[metadata], baseline[metadata], "an untouched relevant key must remain in the fingerprint")
+        let afterUploads = try await fingerprint(base)
+        XCTAssertEqual(expected, afterUploads)
+        try await tracking.delete(key: metadata)
+        let afterDelete = try await fingerprint(base)
+        XCTAssertEqual(tracking.expectedLegacyEtags(after: baseline), afterDelete)
+        XCTAssertNil(afterDelete[metadata])
+        _ = try await base.put(key: archive, contentType: "application/zip", body: Data("peer's newer archive".utf8))
+        let afterPeerWrite = try await fingerprint(base)
+        XCTAssertNotEqual(tracking.expectedLegacyEtags(after: baseline), afterPeerWrite,
+                          "a concurrent payload change must still prevent map acknowledgement")
+    }
+
+    func testMissingETagOnlyPreventsAcknowledgingRelevantWrites() async throws {
+        let preference = "app/reader_settings/device", statistics = "books/fixture/statistics"
+        let bookmark = "books/fixture/bookmark", payload = "books/fixture/payload.manifest"
+        let base = FingerprintMemoryKV(withoutEtags: [preference, statistics, bookmark, payload])
+        let tracking = HttpSyncWriteTrackingTransport(base: base)
+        for key in [preference, statistics, bookmark] {
+            let response = try await tracking.put(key: key, contentType: "application/json", body: Data("reading state".utf8))
+            XCTAssertNil(response.etag)
+            XCTAssertEqual(tracking.expectedLegacyEtags(after: [:]), [:],
+                           "an excluded key's missing ETag must not block map publication")
+        }
+        _ = try await tracking.put(key: payload, contentType: "application/json", body: Data("payload".utf8))
+        XCTAssertNil(tracking.expectedLegacyEtags(after: [:]),
+                     "a relevant write without an ETag cannot be safely acknowledged")
+    }
+
+    private func fingerprint(_ transport: any HttpSyncKvTransport) async throws -> [String: String] {
+        let listing = try await transport.list(prefix: nil, since: nil, cursor: nil, limit: nil)
+        return await HttpSyncListedKeys.index(listing).legacyEtags
+    }
+
     // Uses the production background URLSession, its delegate and Foundation's real opaque
     // resume checkpoint, against the same HTTP server as the cross-platform integration suite.
     @MainActor func testNativeBackgroundDownloadCancelsResumesAndPreservesExactBytes() async throws {
@@ -219,4 +296,35 @@ nonisolated private final class TransferSignal: @unchecked Sendable {
     private let lock = NSLock()
     private var sent = false
     func first() -> Bool { lock.withLock { if sent { return false }; sent = true; return true } }
+}
+
+private actor FingerprintMemoryKV: HttpSyncKvTransport {
+    private struct Value {
+        let body: Data
+        let contentType: String
+        let etag: String?
+    }
+    private var values: [String: Value] = [:]
+    private let withoutEtags: Set<String>
+    init(withoutEtags: Set<String> = []) { self.withoutEtags = withoutEtags }
+    func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
+        let etag = withoutEtags.contains(key) ? nil : "body:" + body.base64EncodedString()
+        values[key] = Value(body: body, contentType: contentType, etag: etag)
+        return .init(key: key, lastModified: "2026-11-08T00:00:00Z", etag: etag, size: body.count)
+    }
+    func putFile(key: String, contentType: String, fileURL: URL) async throws -> HttpSyncKvWriteResponse {
+        try await put(key: key, contentType: contentType, body: Data(contentsOf: fileURL))
+    }
+    func get(key: String) async throws -> HttpSyncKvFetched? {
+        values[key].map { .init(body: $0.body, contentType: $0.contentType,
+                               lastModified: "2026-11-08T00:00:00Z", etag: $0.etag ?? "") }
+    }
+    func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? { nil }
+    func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList {
+        .init(keys: values.compactMap { key, value in
+            guard prefix == nil || key.hasPrefix(prefix!) else { return nil }
+            return .init(key: key, lastModified: "2026-11-08T00:00:00Z", etag: value.etag, size: value.body.count)
+        })
+    }
+    func delete(key: String) async throws { values[key] = nil }
 }

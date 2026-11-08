@@ -215,3 +215,102 @@ geometry. Device-specific UIKit focus-inference costs remain unmeasured; physica
 hardware profiling and device installation were outside this simulator run.
 The durable per-turn journal remains synchronous, with its reduced complete
 navigation path measured above. No confirmed review findings remain open.
+
+
+---
+
+## Expanded commit and scrolling audit — November 8, 2026
+
+A further four-reviewer pass covered the complete recent Claude sequence,
+`46def8c..5f5baaf`, including the original port. The handoff had already completed
+before this pass. Review coverage was:
+
+| Commit | Reviewed change |
+| --- | --- |
+| `58ddd70` | Reader/sentence/manga port, AI lifetime, setup, settings, dictionary, audiobook, cloud books, preference and position protocols, statistics/import baseline |
+| `d0bc226` | Manga pace, reader parity, download and position corrections |
+| `135212b` | Sequential tapped-manga downloads and per-item shelf reveal |
+| `1f6260c` | Five-second poll work, background library scanning and Statistics redesign |
+| `a0e1dd7` | Idle skips, background statistics/index work and unchanged-write suppression |
+| `195ef50` | Hours/minutes reading-time formatting |
+| `c1e38d5` | Hourly reading and trends |
+| `10c0bd8` | Overview, history charts, devices and book details |
+| `3e99e11` | Four-month, three-device statistics fixture |
+| `4a29907` | Accessibility-size book-cover behavior |
+| `f576220` | Unused Charts import removal |
+| `4a781d2` | Usage-aware current-day counts |
+| `7b3df47` | Shipped Statistics documentation |
+| `5f5baaf` | Journal recovery and statistics idle-skip races |
+
+The independent assignments covered feature/reader changes, sync/protocol changes,
+statistics and day arithmetic, and a separate poll/main-thread crosscheck. Findings
+already fixed in `4a472e4` were checked against current source and tests.
+
+### Additional findings fixed
+
+- The poll still constructed ICU date parsers for every monthly statistics key.
+  Fixed wire-format validation now uses strict ASCII year/month bounds.
+- A changed monthly shard still decoded, merged and encoded statistics on the
+  main actor. Preparation now runs in the background. A short final commit checks
+  exact root/file stamps and the account; concurrent reading saves/imports retry,
+  and removed/replaced payload directories cannot be recreated.
+- Each saved book could trigger a whole-library Statistics reload. Reloads now
+  debounce in bursts, load/aggregate in the background and publish cached arrays.
+  Generation checks prevent an older load replacing newer data.
+- Incoming position journals still hashed, decoded, validated, merged, selected a
+  winner and serialized on the main actor. These operations and cold-cache journal
+  reads now run in the background. Commits preserve newer local navigation and
+  reject an invalidated account or removed/replaced root. Eight failed snapshot
+  attempts leave the journal unacknowledged for a later poll.
+- Successful-write fingerprints included keys excluded by the observed fingerprint.
+  Reader-preference/legacy-reading writes could therefore prevent acknowledging a
+  full reconcile and schedule another full pass. Both filters now use the same
+  production predicate; payload changes still prevent unsafe acknowledgement.
+- Local journal persistence no longer sorts every inherited causal key or serializes
+  an unchanged state. File-stamp checks retain no-op bytes/timestamps, and the journal
+  still commits synchronously before projecting the page bookmark.
+- A valid 512-origin history could produce an invalid next local event whose causal
+  frontier exceeded the protocol's 256-entry limit. Generated frontiers now retain
+  the current winner and local origin within that bound; both navigation and legacy
+  imports survive a fresh repository reload. Large-history winner selection avoids
+  repeated pairwise scans while preserving self-observation and duplicate behavior.
+
+### Expanded verification
+
+`build/parity-python/bin/python tools/test_ios_parity.py` exited **0** on the
+final source. Results:
+
+- **20** real-server tests passed.
+- **107** Python regressions passed, including the standalone position-protocol
+  harness and hosted simulator wrapper.
+- **298** hosted XCTest cases passed with zero failures.
+- **6** UI cases passed: cloud manga download, both podcast scenarios, Statistics,
+  zoomed manga selection and thin manga action buttons.
+- The settled **80-book / 108-monthly-shard** fixture measured **1.93 ms** main-thread
+  CPU on its first poll, **2.72 ms** over later polls, **1.85 ms** in a statistics
+  pass and **2.26 ms** after a reading save. Maximum heartbeat gap: **4 ms**.
+  Unchanged polls made no file writes or uploads.
+- The production bookshelf scrolled through **4 real polls**, with **985** display
+  callbacks and a maximum display gap of **18 ms**. A separate native scroll through
+  a **999,133-byte / 512-event** incoming position journal peaked at **16 ms**.
+- The production Statistics screen kept scrolling throughout the complete
+  **2,400-row / 80-book** import: **14 seconds**, **859** display callbacks and a
+  maximum display gap of **43 ms**. All imported rows were verified on disk.
+- An actual manga page turn after those imports took **6.79 ms CPU / 7.21 ms wall**,
+  within the unchanged **8 ms** CPU budget. Its final page survived close, sync and
+  reopening an uncached position repository. The isolated durable position turn
+  after a **1.3 MB** causal import took **3.09 ms CPU**.
+- New native tests verified cold journal loading, 512-origin winner/frontier
+  behavior, next-navigation and legacy-import durability, concurrent saves/imports,
+  invalidated accounts, removed/replaced roots, unchanged journal bytes/timestamps,
+  coalesced notifications and stale snapshot rejection.
+
+Logs: `build/codex-poll-full-gate.log`, `build/ios-sync-integration.log`,
+`build/ios-parity-ui.log` and `build/codex-poll-focused-final.log`. Generated
+fixtures and logs remain ignored. The gate removed only its own disposable
+Simulator; the pre-existing `hoshi-perf` Simulator was preserved.
+
+These measurements use programmatic native scrolling of the real screens on a
+Simulator. Physical hardware and one-time legacy migration/retained-history
+absorption were not performance-profiled. No confirmed findings from this
+expanded review remain open.

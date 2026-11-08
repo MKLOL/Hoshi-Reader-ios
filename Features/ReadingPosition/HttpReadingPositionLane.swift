@@ -68,6 +68,8 @@ final class HttpReadingPositionLane {
     func exchange(transport: HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], roots: [String: URL],
                   bookmarkStamps: [String: Date]? = nil, journalStamps: [String: Date]? = nil, scope: String,
                   stillCurrent: @escaping @MainActor () -> Bool = { true }) async -> Outcome {
+        do { try await store.prepareForSync(stillCurrent: stillCurrent) }
+        catch { return Outcome() }
         let (stored, generation) = store.loadSyncIndex()
         if let stored, indexFile?.data != stored {
             indexFile = (try? JSONDecoder().decode(Scoped.self, from: stored)).map { (stored, $0) }
@@ -134,14 +136,11 @@ final class HttpReadingPositionLane {
                 // dropped or weakened the header, so the next listing matches; otherwise the header
                 // of a body that changed after the listing.
                 let header = fetched.etag.trimmingCharacters(in: .whitespaces)
-                let listedBody = meta.etag == "sha256:" + ReadingPositionRepository.digest(fetched.body)
+                let listedBody = meta.etag == "sha256:" + (await ReadingPositionRepository.remoteDigest(fetched.body))
                 let etag = meta.etag == nil || listedBody || header.isEmpty || header.hasPrefix("W/") ? stamp(meta) : header
                 do {
-                    let journal = try JSONDecoder().decode(ReadingPositionJournal.self, from: fetched.body)
-                    guard journal.version == 1, journal.bookId == book, journal.deviceId == writer else {
-                        throw ReadingPositionProtocolError.invalidJournal
-                    }
-                    if try store.merge(journal, root: roots[book]) { outcome.moved.insert(book) }
+                    if try await store.mergeRemote(body: fetched.body, bookId: book, writer: writer,
+                                                   root: roots[book], stillCurrent: stillCurrent) { outcome.moved.insert(book) }
                     index.applied[meta.key] = etag; index.unusable[meta.key] = nil
                 } catch is DecodingError {
                     index.unusable[meta.key] = etag; index.applied[meta.key] = nil

@@ -163,29 +163,43 @@ nonisolated enum ReadingDay {
     }
 }
 
-struct BookReadingSummary: Identifiable {
+nonisolated struct BookReadingSummary: Identifiable, Sendable {
     let book: BookMetadata
     let reading: [Statistics]
     let mangaText: [MangaTextStatistic]
     let finished: Bool
-    var resetHour: Int = 3
+    let resetHour: Int
+    let seconds: Double
+    let characters: Int
+    let pages: Int
+    let devices: [DeviceReadingSummary]
+    let days: [DailyReading]
+    let streakHistory: (days: [DailyReading], estimated: Bool)
     var id: UUID { book.id }
     var isManga: Bool { book.resolvedContentType == .mokuro }
-    var seconds: Double { reading.reduce(0.0) { StatisticsNumbers.adding($0, $1.readingTime) } }
-    var characters: Int { isManga ? mangaText.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } : reading.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } }
-    var pages: Int { isManga ? reading.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } : 0 }
-    var devices: [DeviceReadingSummary] { StatisticsMath.devices(reading: reading, text: mangaText, isManga: isManga, resetHour: resetHour) }
-    var days: [DailyReading] { ReadingDay.days(reading: reading, text: isManga ? mangaText : nil, resetHour: resetHour) }
+
+    init(book: BookMetadata, reading: [Statistics], mangaText: [MangaTextStatistic], finished: Bool,
+         resetHour: Int = 3, calendar: Calendar = StatisticsZone.calendar) {
+        self.book = book; self.reading = reading; self.mangaText = mangaText
+        self.finished = finished; self.resetHour = resetHour
+        let isManga = book.resolvedContentType == .mokuro
+        seconds = reading.reduce(0.0) { StatisticsNumbers.adding($0, $1.readingTime) }
+        characters = isManga ? mangaText.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } : reading.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) }
+        pages = isManga ? reading.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } : 0
+        days = ReadingDay.days(reading: reading, text: isManga ? mangaText : nil, resetHour: resetHour, calendar: calendar)
+        devices = StatisticsMath.devices(reading: reading, text: mangaText, isManga: isManga, resetHour: resetHour, calendar: calendar)
+        streakHistory = ReadingDay.streakHistory(reading, resetHour: resetHour, calendar: calendar)
+    }
 }
 
-nonisolated struct DailyReading: Identifiable {
+nonisolated struct DailyReading: Identifiable, Sendable {
     let date: Date
     var seconds: Double = 0
     var characters: Int = 0
     var id: Date { date }
 }
 
-nonisolated struct DeviceReadingSummary: Identifiable {
+nonisolated struct DeviceReadingSummary: Identifiable, Sendable {
     let deviceId: String?
     var name: String?
     var seconds: Double
@@ -207,7 +221,7 @@ nonisolated enum StatisticsMath {
         return isManga && bookmark.progress >= 0.999
     }
 
-    static func devices(reading: [Statistics], text: [MangaTextStatistic], isManga: Bool, resetHour: Int = 0) -> [DeviceReadingSummary] {
+    static func devices(reading: [Statistics], text: [MangaTextStatistic], isManga: Bool, resetHour: Int = 0, calendar: Calendar = StatisticsZone.calendar) -> [DeviceReadingSummary] {
         let reading = Statistics.merged(reading), text = MangaTextStatistic.merged(text)
         let ids = Set(reading.map(\.deviceId) + text.map(\.deviceId))
         return ids.compactMap { id in
@@ -219,7 +233,7 @@ nonisolated enum StatisticsMath {
             let named = names.filter { !($0.1?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }.max { $0.0 < $1.0 }
             return DeviceReadingSummary(deviceId: id, name: named?.1, seconds: total.readingTime, characters: characters,
                 pages: isManga ? total.charactersRead : 0, books: 1,
-                lastRead: ReadingDay.days(reading: own, resetHour: resetHour).filter { $0.seconds > 0 }.map(\.date).max(),
+                lastRead: ReadingDay.days(reading: own, resetHour: resetHour, calendar: calendar).filter { $0.seconds > 0 }.map(\.date).max(),
                 newestStamp: named?.0 ?? names.map(\.0).max() ?? 0)
         }.sorted { $0.seconds == $1.seconds ? $0.id < $1.id : $0.seconds > $1.seconds }
     }
@@ -286,25 +300,96 @@ nonisolated enum StatisticsMath {
     }
 }
 
+/// File IO, JSON decoding and calendar aggregation belong to a background snapshot. Rendering
+/// reads only the finished arrays, including book rows, instead of re-parsing every historic day.
+nonisolated struct StatisticsOverviewSnapshot: Sendable {
+    var books: [BookReadingSummary]
+    var days: [DailyReading]
+    var devices: [DeviceReadingSummary]
+    var streakHistory: (days: [DailyReading], estimated: Bool)
+    var maintenance: [URL] = []
+    var needsAbsorb = false
+    init(books: [BookReadingSummary]) {
+        self.books = books
+        days = StatisticsMath.combine(books.flatMap(\.days))
+        devices = StatisticsMath.combineDevices(books.flatMap(\.devices))
+        let histories = books.map(\.streakHistory)
+        streakHistory = (StatisticsMath.combine(histories.flatMap(\.days)), histories.contains { $0.estimated })
+    }
+    private struct FinishInfo: Decodable { let characterCount: Int }
+    @concurrent static func read(directory: URL, resetHour: Int, calendar: Calendar) async -> Self {
+        let disk = await HttpStatisticsDisk.read(booksDirectory: directory, stateFile: HttpReadingStatisticsSync.stateFile)
+        let decoder = JSONDecoder(), manager = FileManager.default
+        func load<T: Decodable>(_ type: T.Type, root: URL, name: String) -> T? {
+            (try? Data(contentsOf: root.appendingPathComponent(name))).flatMap { try? decoder.decode(type, from: $0) }
+        }
+        var books: [BookReadingSummary] = []
+        for item in disk.roots {
+            guard !Task.isCancelled else { break }
+            var book = StatisticsHistory.metadata(for: item)
+            let isManga = item.book == nil ? item.contentType == .mokuro : ContentType.detect(bookDir: item.root) == .mokuro
+            book.contentType = isManga ? .mokuro : .epub
+            let reading = Statistics.merged(load([Statistics].self, root: item.root, name: FileNames.statistics) ?? [])
+            let text = isManga ? MangaTextStatistic.merged(load([MangaTextStatistic].self, root: item.root, name: FileNames.mangaStatistics) ?? []) : []
+            let finished: Bool
+            if item.book == nil { finished = (load(StatisticsHistoryInfo.self, root: item.root, name: "history.json")?.progress ?? 0) >= 0.999 }
+            else if let bookmark = load(Bookmark.self, root: item.root, name: FileNames.bookmark) {
+                if let total = load(FinishInfo.self, root: item.root, name: FileNames.bookinfo)?.characterCount, total > 0 {
+                    finished = Double(bookmark.characterCount) / Double(total) >= 0.999
+                } else { finished = isManga && bookmark.progress >= 0.999 }
+            } else { finished = false }
+            let summary = BookReadingSummary(book: book, reading: reading, mangaText: text, finished: finished, resetHour: resetHour, calendar: calendar)
+            if summary.seconds > 0 || summary.characters > 0 || summary.pages > 0 { books.append(summary) }
+        }
+        books.sort { $0.seconds == $1.seconds ? $0.id.uuidString < $1.id.uuidString : $0.seconds > $1.seconds }
+        var snapshot = Self(books: books)
+        snapshot.needsAbsorb = disk.needsAbsorb
+        snapshot.maintenance = disk.roots.filter { !manager.fileExists(atPath: $0.root.appendingPathComponent(ReadingStatisticsStore.migration).path) }.map(\.root)
+        return snapshot
+    }
+}
+
 @Observable @MainActor final class StatisticsOverview {
-    var books: [BookReadingSummary] = []
-    var days: [DailyReading] { StatisticsMath.combine(books.flatMap(\.days)) }
-    var devices: [DeviceReadingSummary] { StatisticsMath.combineDevices(books.flatMap(\.devices)) }
+    var books: [BookReadingSummary] = [] { didSet { snapshot = nil } }
+    private var snapshot: StatisticsOverviewSnapshot?
+    private var scheduled: Task<Void, Never>?
+    private var reloadGeneration = 0
+    private let loadSnapshot: @Sendable (URL, Int, Calendar) async -> StatisticsOverviewSnapshot
+    private(set) var loaded = false
+    init(loadSnapshot: @escaping @Sendable (URL, Int, Calendar) async -> StatisticsOverviewSnapshot = {
+        await StatisticsOverviewSnapshot.read(directory: $0, resetHour: $1, calendar: $2)
+    }) { self.loadSnapshot = loadSnapshot }
+    var days: [DailyReading] { snapshot?.days ?? StatisticsMath.combine(books.flatMap(\.days)) }
+    var devices: [DeviceReadingSummary] { snapshot?.devices ?? StatisticsMath.combineDevices(books.flatMap(\.devices)) }
     var streakHistory: (days: [DailyReading], estimated: Bool) {
-        let histories = books.map { ReadingDay.streakHistory($0.reading, resetHour: $0.resetHour) }
+        if let snapshot { return snapshot.streakHistory }
+        let histories = books.map(\.streakHistory)
         return (StatisticsMath.combine(histories.flatMap(\.days)), histories.contains { $0.estimated })
     }
-    func reload(resetHour: Int = ReadingDay.resetHour) {
-        guard let roots = try? StatisticsHistory.roots(onError: { _, _ in }) else { return }
-        books = roots.compactMap { item in
-            let book = StatisticsHistory.metadata(for: item), url = item.root
-            let reading = ReadingStatisticsStore.reading(root: url)
-            let isManga = ReadingStatisticsStore.contentType(root: url) == .mokuro
-            let text = isManga ? ReadingStatisticsStore.text(root: url) : []
-            var resolved = book; resolved.contentType = isManga ? .mokuro : .epub
-            let finished = item.book == nil ? (StatisticsHistory.info(url)?.progress ?? 0) >= 0.999 : StatisticsMath.isFinished(bookmark: BookStorage.loadBookmark(root: url), info: BookStorage.loadBookInfo(root: url), isManga: isManga)
-            let summary = BookReadingSummary(book: resolved, reading: reading, mangaText: text, finished: finished, resetHour: resetHour)
-            return summary.seconds > 0 || summary.characters > 0 || summary.pages > 0 ? summary : nil
-        }.sorted { $0.seconds == $1.seconds ? $0.id.uuidString < $1.id.uuidString : $0.seconds > $1.seconds }
+    /// Coalesce a shard's per-book notifications while retaining each reader's root notification.
+    func scheduleReload(resetHour: Int = ReadingDay.resetHour) {
+        scheduled?.cancel()
+        reloadGeneration += 1 // Invalidate an already-running snapshot immediately.
+        scheduled = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            guard let self else { return }
+            await self.reload(resetHour: resetHour)
+        }
+    }
+    func reload(resetHour: Int = ReadingDay.resetHour, directory: URL? = nil) async {
+        reloadGeneration += 1
+        let generation = reloadGeneration, calendar = StatisticsZone.calendar
+        guard let directory = try? directory ?? BookStorage.getBooksDirectory() else { return }
+        var result = await loadSnapshot(directory, resetHour, calendar)
+        guard !Task.isCancelled, generation == reloadGeneration else { return }
+        // Preserve one-time legacy migration/retained-history absorption. Normal reloads never
+        // read/decode history on main; these paths run only for books not yet migrated.
+        if result.needsAbsorb || !result.maintenance.isEmpty {
+            if result.needsAbsorb { _ = try? StatisticsHistory.roots(directory: directory, onError: { _, _ in }) }
+            for root in result.maintenance where FileManager.default.fileExists(atPath: root.path) { try? ReadingStatisticsStore.migrate(root: root) }
+            result = await loadSnapshot(directory, resetHour, calendar)
+            guard !Task.isCancelled, generation == reloadGeneration else { return }
+        }
+        books = result.books; snapshot = result; loaded = true
     }
 }

@@ -2,7 +2,7 @@
 // The small storage/transport contracts below replace UIKit/app wiring; position logic is
 // compiled unchanged from Features/ReadingPosition. No simulator or server is required.
 import Foundation
-struct Bookmark: Codable { let chapterIndex: Int; let progress: Double; let characterCount: Int; var lastModified: Date? }
+struct Bookmark: Codable, Equatable, Sendable { let chapterIndex: Int; let progress: Double; let characterCount: Int; var lastModified: Date? }
 struct ReadingDevice { var id: String; var name: String; @MainActor static var current: Self { .init(id: "ios-device", name: "iPhone") } }
 struct BookMetadata { var folder: String?; var id: String }
 func syncId(for book: BookMetadata) -> String? { book.id }

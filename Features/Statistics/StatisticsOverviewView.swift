@@ -6,7 +6,6 @@ struct StatisticsOverviewView: View {
     @State private var model = StatisticsOverview()
     @State private var usage = UsageStatisticsModel()
     @State private var selectedTab = 0
-    @State private var loaded = false
     @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
@@ -44,8 +43,7 @@ struct StatisticsOverviewView: View {
     }
     private func refresh() {
         readingDate = ReadingDay.date(at: .now, resetHour: resetHour)
-        model.reload(resetHour: resetHour)
-        loaded = true
+        model.scheduleReload(resetHour: resetHour)
     }
     @ViewBuilder private var overviewSections: some View {
         @Bindable var config = userConfig
@@ -59,7 +57,7 @@ struct StatisticsOverviewView: View {
         UsageTodaySection(reading: today, usage: usage.today)
         StreakSections(history: model.streakHistory, readingDate: readingDate, resetHour: resetHour, zoneID: zoneID)
         if model.books.isEmpty {
-            if loaded {
+            if model.loaded {
                 Section {
                     ContentUnavailableView("No Reading Yet", systemImage: "books.vertical",
                                            description: Text("No reading time recorded yet. Your history, charts and books appear here once you read."))
@@ -298,11 +296,11 @@ struct BookStatisticsDetailView: View {
         .environment(\.timeZone, StatisticsZone.calendar.timeZone)
         .navigationTitle(item?.book.title ?? "Book")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { model.reload(resetHour: resetHour) }
-        .onChange(of: resetHour) { _, _ in model.reload(resetHour: resetHour) }
-        .onChange(of: zoneID) { _, _ in model.reload(resetHour: resetHour) }
-        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in model.reload(resetHour: resetHour) }
-        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.reload(resetHour: resetHour) }
+        .onAppear { model.scheduleReload(resetHour: resetHour) }
+        .onChange(of: resetHour) { _, _ in model.scheduleReload(resetHour: resetHour) }
+        .onChange(of: zoneID) { _, _ in model.scheduleReload(resetHour: resetHour) }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in model.scheduleReload(resetHour: resetHour) }
+        .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.scheduleReload(resetHour: resetHour) }
     }
 }
 

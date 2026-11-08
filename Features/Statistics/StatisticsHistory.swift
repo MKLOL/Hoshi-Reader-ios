@@ -107,7 +107,7 @@ nonisolated struct StatisticsRoot: Sendable {
         } else if book.resolvedContentType == .mokuro { value.progress = bookmark?.progress }
         try BookStorage.save(value, inside: kept, as: "history.json")
     }
-    static func metadata(for root: StatisticsRoot) -> BookMetadata {
+    nonisolated static func metadata(for root: StatisticsRoot) -> BookMetadata {
         if let book = root.book { return book }
         // Deterministic detail-page identity survives reloads and app restarts.
         let bytes = Array(SHA256.hash(data: Data(root.syncId.utf8)).prefix(16))

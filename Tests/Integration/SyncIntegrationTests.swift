@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Hoshi_Reader
 
@@ -472,6 +473,19 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         // Publish the library, then confirm a pass finds nothing left to do: the steady state.
         await syncNow(downloadManga: false)
         await syncNow(downloadManga: false)
+        // Three devices with three years of monthly shards exercise the listing work done on
+        // EVERY poll, even when none of the shard bodies changed. Accept them before measuring
+        // idle polls so this also distinguishes listing cost from first-time HTTP downloads.
+        let remote = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        for deviceIndex in 0..<3 {
+            for index in 0..<36 {
+                let month = String(format: "%04d-%02d", 2023 + index / 12, 1 + index % 12)
+                let shard = HttpStatisticsShard(deviceId: "scroll-device-\(deviceIndex)", month: month, books: [:])
+                _ = try await remote.put(key: "\(HttpStatisticsLane.prefix)\(shard.deviceId)/\(month).json",
+                    contentType: "application/json", body: JSONEncoder().encode(shard))
+            }
+        }
+        await HttpStatisticsLane.shared.refresh(flush: false)
         // The shelf draws and makes covers for the 80 books the first pass imported; that one-time
         // work after an import is not what this test measures.
         let settling = await mainThreadStalls { try? await Task.sleep(for: .seconds(3)) }
@@ -516,13 +530,109 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
             XCTAssertLessThan(stall.wall, 0.1, "\(name) held the main thread for \(Int(stall.wall * 1000)) ms")
         }
 
+        // Render the production shelf and actually animate its UIKit scroll view while the real
+        // five-second timer runs. An idle heartbeat alone cannot catch redraw or layout stalls.
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let config = UserConfig()
+        config.enableSync = false // TTU is unrelated to the configured HTTP transport under test.
+        let host = UIHostingController(rootView: AnyView(BookshelfView(pendingImportURL: .constant(nil),
+            pendingRemoteImportURL: .constant(nil), pendingLookup: .constant(nil),
+            pendingTab: .constant(nil), pendingNewsURL: .constant(nil)).environment(config)))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            HttpSyncManager.shared.suspendPolling()
+            host.rootView = AnyView(EmptyView())
+            window.isHidden = true
+            previousWindow?.makeKeyAndVisible()
+        }
+        try await Task.sleep(for: .seconds(3))
+        try await clearServerRequests()
+        HttpSyncManager.shared.resumePolling()
+        let shelfFrames = try await animateActualScroll(in: host.view, seconds: 16)
+        HttpSyncManager.shared.suspendPolling()
+        let scrollingRequests = try await serverRequests()
+        let scrollingPolls = scrollingRequests.filter { $0.method == "GET" && $0.path.hasPrefix("/v1/kv?") }.count
+        XCTAssertGreaterThanOrEqual(scrollingPolls, 3, "real polls must overlap rendered shelf scrolling")
+        XCTAssertFalse(scrollingRequests.contains { $0.method != "GET" }, "idle scrolling polls must not upload")
+        print("rendered shelf scrolling: \(scrollingPolls) real polls, \(shelfFrames.frames) display callbacks, \(Int(shelfFrames.distance)) points travelled, longest display gap \(Int(shelfFrames.gap * 1000)) ms")
+
+        // A peer may publish a substantial causal journal between polls. Exercise the changed
+        // position lane through that same real timer while the production shelf keeps moving.
+        let positionTime = Date().timeIntervalSinceReferenceDate + 60
+        let seen = Dictionary(uniqueKeysWithValues: (0..<128).map { ("peer-\($0)", Int64(1)) })
+        let events = (1...512).map { sequence in
+            ReadingPositionEvent(id: "scroll-event-\(sequence)", deviceId: "scroll-position", deviceName: "Scroll peer",
+                originId: "scroll-origin", sequence: Int64(sequence), sessionId: "scroll-session", action: "pageTurn",
+                from: nil, position: ReadingPosition(chapterIndex: 1, progress: 0.5, characterCount: sequence),
+                occurredAt: positionTime + Double(sequence) / 1000, compatibilityAt: positionTime + Double(sequence) / 1000,
+                basedOn: sequence == 1 ? nil : "scroll-event-\(sequence - 1)", seen: seen, missingTimestamp: false, bookId: "large_library_7")
+        }
+        let journal = ReadingPositionJournal(bookId: "large_library_7", deviceId: "scroll-position", events: events, heads: [try XCTUnwrap(events.last)])
+        let positionBody = try JSONEncoder().encode(journal)
+        XCTAssertLessThan(positionBody.count, 2 * 1024 * 1024)
+        let positionKey = ReadingPositionProtocol.prefix + "large_library_7/scroll-position.json"
+        _ = try await remote.put(key: positionKey, contentType: "application/json", body: positionBody)
+        try await clearServerRequests()
+        HttpSyncManager.shared.resumePolling()
+        let positionFrames = try await animateActualScroll(in: host.view, seconds: 12)
+        HttpSyncManager.shared.suspendPolling()
+        let positionRequests = try await serverRequests()
+        XCTAssertTrue(positionRequests.contains { $0.method == "GET" && $0.path.hasSuffix(positionKey) }, "the foreground poll must fetch the changed position")
+        XCTAssertEqual(BookStorage.loadBookmark(root: books.appendingPathComponent("large_library_7"))?.chapterIndex, 1)
+        XCTAssertEqual(ReadingPositionRepository.shared.snapshot(bookId: "large_library_7").heads["scroll-origin"]?.id, "scroll-event-512")
+        print("rendered shelf scrolling during \(positionBody.count)-byte position import: \(positionFrames.frames) display callbacks, longest display gap \(Int(positionFrames.gap * 1000)) ms")
+
+        // A changed month is a different workload: decode/merge 2,400 remote rows across all
+        // 80 books while the visible Statistics screen is scrolling and receives save notices.
+        host.rootView = AnyView(NavigationStack { StatisticsOverviewView().environment(config) })
+        try await Task.sleep(for: .seconds(4))
+        let statisticsReadyDeadline = ProcessInfo.processInfo.systemUptime + 20
+        while (actualScrollView(in: host.view)?.contentSize.height ?? 0) < 2500,
+              ProcessInfo.processInfo.systemUptime < statisticsReadyDeadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertGreaterThan(try XCTUnwrap(actualScrollView(in: host.view)).contentSize.height, 2500,
+            "the Statistics screen must finish loading the large library before measuring")
+        try await Task.sleep(for: .seconds(1))
+        var changedBooks: [String: HttpStatisticsShardBook] = [:]
+        for index in 0..<80 {
+            let id = "large_library_\(index)", title = "Large Library \(index)"
+            let rows = (1...30).map { day in
+                var row = Statistics.empty(title: title, day: String(format: "2026-10-%02d", day),
+                    device: ReadingDevice(id: "scroll-remote", name: "Scrolling remote"))
+                row.readingTime = 123; row.charactersRead = 900; row.lastStatisticModified = 1_799_000_000_000 + day
+                return row
+            }
+            changedBooks[id] = HttpStatisticsShardBook(title: title, contentType: "mokuro", reading: rows)
+        }
+        let changed = HttpStatisticsShard(deviceId: "scroll-remote", month: "2026-10", books: changedBooks)
+        var incomingCompleted = false
+        let incoming = Task { @MainActor in
+            _ = try await remote.put(key: "\(HttpStatisticsLane.prefix)scroll-remote/2026-10.json",
+                contentType: "application/json", body: JSONEncoder().encode(changed))
+            await HttpStatisticsLane.shared.refresh(flush: false)
+            incomingCompleted = true
+        }
+        let statisticsFrames = try await animateActualScroll(in: host.view, seconds: 12, until: { incomingCompleted })
+        XCTAssertTrue(incomingCompleted, "the changed month must finish during the scrolling measurement")
+        try await incoming.value
+        for index in 0..<80 {
+            let root = books.appendingPathComponent("large_library_\(index)")
+            XCTAssertEqual(ReadingStatisticsStore.reading(root: root).filter { $0.deviceId == "scroll-remote" }.count, 30,
+                "the changed month must really be applied while scrolling")
+        }
+        XCTAssertNil(HttpStatisticsLane.shared.problem)
+        print("rendered Statistics scrolling during complete 2,400-row import: \(Int(statisticsFrames.seconds)) seconds, \(statisticsFrames.frames) display callbacks, \(Int(statisticsFrames.distance)) points travelled, longest display gap \(Int(statisticsFrames.gap * 1000)) ms")
+        host.rootView = AnyView(EmptyView())
+
         // Exercise the reader's real synchronous turn path against the same 80-book map and
         // 30-day history, including statistics, the position journal and the durable outbox.
         let readingBook = try book("large_library_7")
         let reader = MangaReaderViewModel(metadata: readingBook.metadata)
         let controller = MangaWebViewController()
-        let config = UserConfig()
-        config.enableSync = false // TTU is unrelated to the configured HTTP outbox under test.
         HttpSyncActiveBooks.open("large_library_7")
         defer {
             reader.suspendStatistics()
@@ -561,6 +671,39 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
             device: ReadingPositionRepository.shared.device)
         XCTAssertEqual(durable.open(bookId: "large_library_7", root: readingBook.root).initialBookmark?.chapterIndex, 1)
         XCTAssertEqual(BookStorage.loadBookmark(root: readingBook.root)?.chapterIndex, 1, "close and sync cannot roll back the last page")
+    }
+
+    @MainActor private func actualScrollView(in parent: UIView) -> UIScrollView? {
+        if let scroll = parent as? UIScrollView, scroll.bounds.height > 0,
+           scroll.contentSize.height > scroll.bounds.height + 100 { return scroll }
+        for child in parent.subviews { if let found = actualScrollView(in: child) { return found } }
+        return nil
+    }
+
+    @MainActor private func animateActualScroll(in view: UIView, seconds: TimeInterval, until completed: (@MainActor () -> Bool)? = nil) async throws -> (frames: Int, distance: CGFloat, gap: TimeInterval, seconds: TimeInterval) {
+        view.layoutIfNeeded()
+        let scroll = try XCTUnwrap(actualScrollView(in: view), "the real screen must have scrollable content")
+        let probe = RenderedScrollProbe(scroll: scroll)
+        let display = CADisplayLink(target: probe, selector: #selector(RenderedScrollProbe.frame(_:)))
+        display.add(to: .main, forMode: .common)
+        defer { display.invalidate(); scroll.setContentOffset(scroll.contentOffset, animated: false) }
+        let started = ProcessInfo.processInfo.systemUptime
+        let deadline = started + seconds, maximum = started + max(seconds, 60)
+        var down = true
+        while (ProcessInfo.processInfo.systemUptime < deadline || completed?() == false),
+              ProcessInfo.processInfo.systemUptime < maximum {
+            let top = -scroll.adjustedContentInset.top
+            let bottom = max(top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            // Repeated native animations produce real content movement and layout, with the
+            // common-mode display link sampling the screen throughout each five-second poll.
+            scroll.setContentOffset(CGPoint(x: 0, y: down ? min(bottom, top + 1600) : top), animated: true)
+            down.toggle()
+            try await Task.sleep(for: .milliseconds(650))
+        }
+        XCTAssertGreaterThan(probe.frames, Int(seconds * 20), "display callbacks must run throughout the measurement")
+        XCTAssertGreaterThan(probe.distance, 3000, "the production scroll view must actually move")
+        XCTAssertLessThan(probe.longestGap, 0.1, "rendering froze for \(Int(probe.longestGap * 1000)) ms while scrolling")
+        return (probe.frames, probe.distance, probe.longestGap, ProcessInfo.processInfo.systemUptime - started)
     }
 
     /// The longest main-thread CPU time between two heartbeats while `work` runs: work that ran
@@ -743,4 +886,20 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
     var reads = 0
     func currentBlob() -> HttpSyncAiChatSettingsBlob? { reads += 1; return nil }
     func applyFromSync(model: String, promptText: String, imagePromptText: String, remoteLastEditedAt: String) -> Bool { false }
+}
+
+@MainActor private final class RenderedScrollProbe: NSObject {
+    let scroll: UIScrollView
+    var frames = 0
+    var distance: CGFloat = 0
+    var longestGap: TimeInterval = 0
+    private var previousTime: TimeInterval?
+    private var previousOffset: CGFloat
+    init(scroll: UIScrollView) { self.scroll = scroll; previousOffset = scroll.contentOffset.y }
+    @objc func frame(_ display: CADisplayLink) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let previousTime { longestGap = max(longestGap, now - previousTime) }
+        distance += abs(scroll.contentOffset.y - previousOffset)
+        previousTime = now; previousOffset = scroll.contentOffset.y; frames += 1
+    }
 }

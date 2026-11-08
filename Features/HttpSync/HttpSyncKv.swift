@@ -211,11 +211,11 @@ nonisolated final class HttpSyncWriteTrackingTransport: HttpSyncKvTransport, @un
             for mutation in mutations {
                 switch mutation {
                 case let .put(key, etag):
-                    guard !key.hasPrefix(httpSyncMapPrefix) else { continue }
+                    guard httpNeedsFullReconcile(key) else { continue }
                     guard let etag, !etag.isEmpty else { return nil }
                     expected[key] = etag
                 case let .delete(key):
-                    guard !key.hasPrefix(httpSyncMapPrefix) else { continue }
+                    guard httpNeedsFullReconcile(key) else { continue }
                     expected.removeValue(forKey: key)
                 }
             }

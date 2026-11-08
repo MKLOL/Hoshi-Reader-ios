@@ -2,13 +2,13 @@ import Foundation
 import CryptoKit
 import UIKit
 
-nonisolated struct HttpStatisticsShard: Codable {
+nonisolated struct HttpStatisticsShard: Codable, Sendable {
     var version = 1
     var deviceId: String
     var month: String
     var books: [String: HttpStatisticsShardBook]
 }
-nonisolated struct HttpStatisticsShardBook: Codable {
+nonisolated struct HttpStatisticsShardBook: Codable, Sendable {
     var title: String?
     var contentType: String?
     var reading: [Statistics] = []
@@ -20,6 +20,81 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
     var dayResetHour: Int
     var updatedAt: Int64
     var timeZone: String? = nil
+}
+
+/// A background merge is only committed while the exact files it read still exist. Reader
+/// saves, imports and deletion all run on the main actor, alongside the final validation/write.
+nonisolated struct HttpStatisticsPreparedBook: Sendable {
+    nonisolated struct Stamp: Equatable, Sendable {
+        let modified: Date?
+        let size: UInt64?
+        let number: UInt64?
+        static func read(_ url: URL) -> Self? {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            return Self(modified: attributes[.modificationDate] as? Date, size: attributes[.size] as? UInt64,
+                        number: attributes[.systemFileNumber] as? UInt64)
+        }
+    }
+    let root: URL
+    let identity: Stamp?
+    let stamps: [String: Stamp]
+    let stable: Bool
+    let reading: Data?
+    let text: Data?
+    private static let files = [FileNames.metadata, "history.json", FileNames.statistics,
+                                FileNames.mangaStatistics, ReadingStatisticsStore.migration]
+    private static func stamps(_ root: URL) -> [String: Stamp] {
+        Dictionary(uniqueKeysWithValues: files.compactMap { name in
+            Stamp.read(root.appendingPathComponent(name)).map { (name, $0) }
+        })
+    }
+    @concurrent static func prepare(root: URL, reading: [Statistics], text: [MangaTextStatistic]) async throws -> Self {
+        try Task.checkCancellation()
+        let identity = Stamp.read(root), before = stamps(root), decoder = JSONDecoder()
+        func rows<T: Decodable>(_ name: String) throws -> [T] {
+            guard before[name] != nil else { return [] }
+            return try decoder.decode([T].self, from: Data(contentsOf: root.appendingPathComponent(name)))
+        }
+        let old = Statistics.merged(try rows(FileNames.statistics)), oldText = MangaTextStatistic.merged(try rows(FileNames.mangaStatistics))
+        let merged = Statistics.merged(old + reading), mergedText = MangaTextStatistic.merged(oldText + text)
+        let encoder = JSONEncoder(); encoder.outputFormatting = .prettyPrinted
+        let readingBytes = merged == old ? nil : try encoder.encode(merged)
+        let textBytes = mergedText == oldText ? nil : try encoder.encode(mergedText)
+        try Task.checkCancellation()
+        return Self(root: root, identity: identity, stamps: before,
+                    stable: identity != nil && Stamp.read(root) == identity && stamps(root) == before,
+                    reading: readingBytes, text: textBytes)
+    }
+    /// False means that preparation must be repeated, never that stale bytes were written.
+    @MainActor func commit(stillCurrent: @MainActor () -> Bool = { true }) throws -> Bool {
+        try Task.checkCancellation()
+        guard stillCurrent() else { throw CancellationError() }
+        guard stable, identity != nil, Self.Stamp.read(root) == identity, Self.stamps(root) == stamps else { return false }
+        if let reading { try reading.write(to: root.appendingPathComponent(FileNames.statistics), options: .atomic) }
+        if let text { try text.write(to: root.appendingPathComponent(FileNames.mangaStatistics), options: .atomic) }
+        if reading != nil || text != nil { NotificationCenter.default.post(name: .readingStatisticsChanged, object: root) }
+        return true
+    }
+    var changed: Bool { reading != nil || text != nil }
+}
+
+nonisolated enum HttpStatisticsDecode {
+    private struct Version: Decodable { let version: Int }
+    @concurrent static func shard(_ body: Data, device: String, month: String) async throws -> HttpStatisticsShard {
+        try Task.checkCancellation()
+        let decoder = JSONDecoder(), version = try decoder.decode(Version.self, from: body).version
+        guard version <= 1 else { throw HttpSyncError("Statistics need a newer app", skip: true) }
+        guard version == 1 else { throw HttpSyncError("Unsupported statistics version") }
+        var shard = try decoder.decode(HttpStatisticsShard.self, from: body)
+        guard shard.deviceId == device, shard.month == month else { throw HttpSyncError("Statistics belong to another device or month") }
+        shard.books = shard.books.filter { StatisticsHistory.validID($0.key) }.mapValues { book in
+            var book = book
+            book.reading = Statistics.merged(book.reading.filter { $0.deviceId == device && $0.dateKey.hasPrefix(month + "-") && ReadingDay.parse($0.dateKey) != nil })
+            book.mangaText = MangaTextStatistic.merged(book.mangaText.filter { $0.deviceId == device && $0.dateKey.hasPrefix(month + "-") && ReadingDay.parse($0.dateKey) != nil })
+            return book
+        }
+        return shard
+    }
 }
 
 @MainActor enum StatisticsPreferencesStore {
@@ -233,7 +308,13 @@ nonisolated struct HttpStatisticsDisk: Sendable {
         if parts[1] == "settings.json" { return (parts[0], "settings") }
         guard parts[1].hasSuffix(".json") else { return nil }
         let month = String(parts[1].dropLast(5))
-        guard month.count == 7, ReadingDay.parse(month + "-01") != nil else { return nil }
+        // This fixed wire grammar needs no calendar or ICU formatter. It is evaluated for
+        // every device-month key before the five-second poll's unchanged-listing skip.
+        let bytes = Array(month.utf8)
+        guard bytes.count == 7, bytes[4] == 45,
+              [0, 1, 2, 3, 5, 6].allSatisfy({ (48...57).contains(bytes[$0]) }),
+              bytes[0...3].contains(where: { $0 != 48 }),
+              (1...12).contains(Int(bytes[5] - 48) * 10 + Int(bytes[6] - 48)) else { return nil }
         return (parts[0], month)
     }
     func schedule(flush: Bool = false) {
@@ -364,7 +445,12 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                 if let message { errors.append(message) }
             }
             func rootFor(_ id: String, title: String?, type: String?) throws -> URL {
-                if let existing = roots[id], existing.book != nil { return existing.root }
+                if let existing = roots[id], let book = existing.book,
+                   let current = BookStorage.loadMetadata(root: existing.root), current.id == book.id,
+                   syncId(for: current) == id { return existing.root }
+                // An installed book may have been removed/replaced while decoding or merging.
+                // Keep remote evidence in retained history; never recreate its payload folder.
+                if roots[id]?.book != nil { roots.removeValue(forKey: id) }
                 let contentType = type.flatMap { ContentType(rawValue: $0.lowercased()) }
                 let root = try StatisticsHistory.historyRoot(id, title: title, type: contentType, directory: booksDirectory)
                 let info = StatisticsHistory.info(root)
@@ -382,26 +468,33 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                         throw HttpSyncError("Statistics disappeared", skip: true)
                     }
                     try checkCurrent()
-                    let version = try JSONDecoder().decode(Version.self, from: fetched.body).version
-                    guard version <= 1 else { throw HttpSyncError("Statistics need a newer app", skip: true) }
-                    guard version == 1 else { throw HttpSyncError("Unsupported statistics version") }
                     if parsed.month == "settings" {
+                        let version = try JSONDecoder().decode(Version.self, from: fetched.body).version
+                        guard version <= 1 else { throw HttpSyncError("Statistics need a newer app", skip: true) }
+                        guard version == 1 else { throw HttpSyncError("Unsupported statistics version") }
                         let value = try JSONDecoder().decode(HttpStatisticsPreferences.self, from: fetched.body)
                         index.preferences[meta.key] = value
                     } else {
-                        let shard = try JSONDecoder().decode(HttpStatisticsShard.self, from: fetched.body)
-                        guard shard.deviceId == parsed.device, shard.month == parsed.month else { throw HttpSyncError("Statistics belong to another device or month") }
-                        for (id, value) in shard.books.sorted(by: { $0.key < $1.key }) where StatisticsHistory.validID(id) {
-                            let reading = value.reading.filter { $0.deviceId == parsed.device && $0.dateKey.hasPrefix(parsed.month + "-") && ReadingDay.parse($0.dateKey) != nil }
-                            let text = value.mangaText.filter { $0.deviceId == parsed.device && $0.dateKey.hasPrefix(parsed.month + "-") && ReadingDay.parse($0.dateKey) != nil }
+                        let shard = try await HttpStatisticsDecode.shard(fetched.body, device: parsed.device, month: parsed.month)
+                        try checkCurrent()
+                        for (id, value) in shard.books.sorted(by: { $0.key < $1.key }) {
+                            let reading = value.reading, text = value.mangaText
                             guard !reading.isEmpty || !text.isEmpty else { continue }
-                            let root = try rootFor(id, title: value.title ?? reading.first?.title, type: value.contentType ?? (text.isEmpty ? nil : "mokuro"))
-                            try ReadingStatisticsStore.migrate(root: root)
-                            let existing = try ReadingStatisticsStore.strictReading(root: root)
-                            let merged = Statistics.merged(existing + reading)
-                            if merged != existing { try ReadingStatisticsStore.save(merged, root: root, scheduleSync: false); touched.insert(id) }
-                            let oldText = try ReadingStatisticsStore.strictText(root: root), newText = MangaTextStatistic.merged(oldText + text)
-                            if newText != oldText { try ReadingStatisticsStore.saveText(newText, root: root, scheduleSync: false); touched.insert(id) }
+                            var committed = false
+                            for _ in 0..<8 {
+                                try checkCurrent()
+                                let root = try rootFor(id, title: value.title ?? reading.first?.title, type: value.contentType ?? (text.isEmpty ? nil : "mokuro"))
+                                try ReadingStatisticsStore.migrate(root: root)
+                                let prepared: HttpStatisticsPreparedBook
+                                do { prepared = try await HttpStatisticsPreparedBook.prepare(root: root, reading: reading, text: text) }
+                                catch where !FileManager.default.fileExists(atPath: root.path) { continue }
+                                try checkCurrent()
+                                if try prepared.commit(stillCurrent: stillCurrent) {
+                                    if prepared.changed { touched.insert(id) }
+                                    committed = true; break
+                                }
+                            }
+                            guard committed else { throw HttpSyncError("Reading history changed during sync; it will be retried.") }
                         }
                         try await HttpStatisticsDisk.cache(fetched.body, key: meta.key, scope: scope, booksDirectory: booksDirectory)
                         try checkCurrent()

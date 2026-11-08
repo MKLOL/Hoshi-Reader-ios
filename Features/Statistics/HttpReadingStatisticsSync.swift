@@ -15,7 +15,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
 /// Serializes each book's read/merge/write exchange across manual sync and reader pushes.
 @MainActor final class HttpReadingStatisticsSync {
     static let shared = HttpReadingStatisticsSync()
-    static let stateFile = ".http_sync_statistics_state.json"
+    nonisolated static let stateFile = ".http_sync_statistics_state.json"
     private struct Stamp: Codable {
         var localHash: String
         var remoteSize: Int

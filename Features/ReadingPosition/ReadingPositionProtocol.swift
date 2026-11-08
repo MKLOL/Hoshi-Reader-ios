@@ -51,7 +51,7 @@ nonisolated struct ReadingPositionJournal: Codable, Sendable {
     var heads: [ReadingPositionEvent]
 }
 
-nonisolated struct ReadingPositionState: Codable, Sendable {
+nonisolated struct ReadingPositionState: Codable, Equatable, Sendable {
     var bookId: String
     var heads: [String: ReadingPositionEvent] = [:]
     var events: [ReadingPositionEvent] = []
@@ -68,9 +68,23 @@ nonisolated struct ReadingPositionState: Codable, Sendable {
         return result
     }
     var winner: ReadingPositionEvent? {
-        heads.values.filter { candidate in
-            !heads.values.contains { $0.id != candidate.id && $0.observes(candidate) }
-        }.max(by: ReadingPositionEvent.ordered)
+        // Small histories need only a few dictionary lookups. Large, well-formed histories
+        // index which origin sequences other heads observed instead of comparing every pair.
+        guard heads.count > 8, heads.allSatisfy({ $0.key == $0.value.originId }),
+              Set(heads.values.map(\.id)).count == heads.count else {
+            return heads.values.filter { candidate in
+                !heads.values.contains { $0.id != candidate.id && $0.observes(candidate) }
+            }.max(by: ReadingPositionEvent.ordered)
+        }
+        var observed: [String: Int64] = [:]
+        for head in heads.values {
+            // A head's own frontier must not make it observe itself.
+            for (origin, sequence) in head.seen where origin != head.originId {
+                observed[origin] = max(observed[origin] ?? 0, sequence)
+            }
+        }
+        return heads.values.filter { (observed[$0.originId] ?? 0) < $0.sequence }
+            .max(by: ReadingPositionEvent.ordered)
     }
     func merging(_ incoming: [ReadingPositionEvent], ownPending: Set<String> = []) throws -> Self {
         guard incoming.allSatisfy(\.isValid) else { throw ReadingPositionProtocolError.invalidEvent }
@@ -99,6 +113,31 @@ nonisolated enum ReadingPositionProtocolError: Error { case invalidEvent, invali
 
 nonisolated enum ReadingPositionProtocol {
     static let prefix = "sync/maps/positions/v1/"
+    /// The wire permits 256 origins per event. Reserve the local origin and the displayed
+    /// winner, then retain the most recent known heads with a stable origin tie-break.
+    static func boundedFrontier(_ source: [String: Int64], ownOrigin: String, winnerOrigin: String?,
+                                heads: [String: ReadingPositionEvent]) -> [String: Int64] {
+        // Preserve existing wire values when the next own-origin update already has space.
+        if source.count < 256 { return source }
+        var frontier = source
+        frontier[ownOrigin] = frontier[ownOrigin] ?? 0
+        guard frontier.count > 256 else { return frontier }
+        let origins = frontier.keys.sorted { lhs, rhs in
+            if lhs == rhs { return false }
+            if lhs == ownOrigin || rhs == ownOrigin { return lhs == ownOrigin }
+            if lhs == winnerOrigin || rhs == winnerOrigin { return lhs == winnerOrigin }
+            switch (heads[lhs], heads[rhs]) {
+            case let (left?, right?):
+                if ReadingPositionEvent.ordered(left, right) { return false }
+                if ReadingPositionEvent.ordered(right, left) { return true }
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): break
+            }
+            return lhs < rhs
+        }
+        return Dictionary(uniqueKeysWithValues: origins.prefix(256).map { ($0, frontier[$0]!) })
+    }
     static func wireMillis(_ seconds: Double) -> Int64 { Int64(((seconds + 978_307_200) * 1000).rounded(.towardZero)) }
     static func nextTimestamp(action: Double, previous: Double) -> Double {
         let previousMillis = wireMillis(previous)
