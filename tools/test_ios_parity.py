@@ -37,6 +37,14 @@ def simulator_type(runtimes):
     raise RuntimeError("Install an iOS simulator runtime in Xcode before running the regression gate.")
 
 
+def boot_simulator(device):
+    """Wait for a newly created device's services before Xcode launches the test host."""
+    subprocess.run(["xcrun", "simctl", "boot", device], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    subprocess.run(["xcrun", "simctl", "bootstatus", device, "-b"], check=True,
+                   stdout=subprocess.DEVNULL)
+
+
 @contextmanager
 def sync_server():
     """The real local sync server holding the Android corpus, for UI scenarios that sync."""
@@ -65,6 +73,7 @@ def main():
         "-parallel-testing-enabled NO -collect-test-diagnostics never"
     )
     try:
+        boot_simulator(device)
         for suite in ("tools/sync-test-server", "Tests/Regression"):
             tests = subprocess.run(
                 [sys.executable, "-m", "unittest", "discover", "-s", suite, "-v"],

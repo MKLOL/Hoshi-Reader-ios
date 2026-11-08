@@ -17,6 +17,9 @@ class ReleaseGateTests(unittest.TestCase):
         self.dependencies = patch.object(gate, "require_dependencies")
         self.dependencies.start()
         self.addCleanup(self.dependencies.stop)
+        self.boot = patch.object(gate, "boot_simulator")
+        self.boot.start()
+        self.addCleanup(self.boot.stop)
 
     def test_missing_dependency_fails_before_creating_a_simulator(self):
         self.dependencies.stop()
@@ -65,6 +68,16 @@ class ReleaseGateTests(unittest.TestCase):
                 gate.main()
         self.assertEqual(run.call_args_list[-1].args[0], ["xcrun", "simctl", "delete", "owned-device"])
 
+    def test_boot_failure_still_removes_only_owned_device(self):
+        import json
+        with patch.object(gate.subprocess, "check_output", side_effect=[json.dumps({"runtimes": [self.runtime()]}), "owned-device"]), \
+             patch.object(gate, "boot_simulator", side_effect=RuntimeError("boot failed")), \
+             patch.object(gate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            with self.assertRaisesRegex(RuntimeError, "boot failed"):
+                gate.main()
+        self.assertEqual(run.call_args_list[0].args[0], ["xcrun", "simctl", "shutdown", "owned-device"])
+        self.assertEqual(run.call_args_list[1].args[0], ["xcrun", "simctl", "delete", "owned-device"])
+
     def test_ui_gate_must_execute_its_named_case_and_pass(self):
         import json
         playback_only = "Test Case '-[HoshiReaderUITests.PodcastTranscriptUITests testTimestampPlaybackWordLookupEnglishAndFollowing]' passed\n** TEST SUCCEEDED **"
@@ -106,3 +119,20 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testUltraThinActionButtonsStayVisibleAndTappable", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testSelectionRectStaysNearZoomedMangaTap", calls[4])
                 self.assertEqual(calls[-1], ["xcrun", "simctl", "delete", "owned-device"])
+
+
+class SimulatorReadinessTests(unittest.TestCase):
+    def test_boot_waits_for_services_before_returning(self):
+        with patch.object(gate.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            gate.boot_simulator("owned-device")
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            ["xcrun", "simctl", "boot", "owned-device"],
+            ["xcrun", "simctl", "bootstatus", "owned-device", "-b"],
+        ])
+        self.assertTrue(all(call.kwargs["check"] for call in run.call_args_list))
+
+    def test_readiness_failure_is_not_ignored(self):
+        error = subprocess.CalledProcessError(1, ["xcrun", "simctl", "bootstatus"])
+        with patch.object(gate.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0), error]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                gate.boot_simulator("owned-device")
