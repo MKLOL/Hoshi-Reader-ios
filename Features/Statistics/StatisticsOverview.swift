@@ -260,10 +260,29 @@ nonisolated enum StatisticsMath {
         }
         return (current, longest)
     }
+    /// Clock-like, for playback positions; reading totals use `readingTime`.
     static func duration(_ seconds: Double) -> String {
         let value = StatisticsNumbers.integer(seconds)
         if value >= 3600 { return "\(value / 3600)h \(value % 3600 / 60)m" }
         return "\(value / 60)m \(value % 60)s"
+    }
+    /// Hours and minutes, with seconds only under a minute: "0m", "45s", "32m", "6h", "2h 14m".
+    static func readingTime(_ seconds: Double, locale: Locale = .current) -> String {
+        let value = StatisticsNumbers.integer(seconds)
+        let style = Duration.UnitsFormatStyle(allowedUnits: value == 0 || value >= 60 ? [.hours, .minutes] : [.seconds], width: .narrow).locale(locale)
+        return Duration.seconds(value < 60 ? value : value / 60 * 60).formatted(style)
+    }
+    /// The smallest round axis top whose half is a round gridline too: 134 → 150, 21,000 → 30,000.
+    static func axisTop(_ largest: Double) -> Double {
+        guard largest.isFinite, largest > 0 else { return 1 }
+        let half = largest / 2, magnitude = pow(10, floor(log10(half)))
+        let step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7.5, 8, 10].map { $0 * magnitude }.first { $0 >= half * (1 - 1e-9) } ?? half
+        return step * 2
+    }
+    /// Android's four heatmap levels: 0 for nothing read, then each quarter of the busiest day.
+    static func heatmapLevel(_ seconds: Double, maximum: Double) -> Int {
+        guard seconds > 0, maximum > 0 else { return 0 }
+        return min(4, max(1, Int(ceil(seconds / maximum * 4))))
     }
 }
 

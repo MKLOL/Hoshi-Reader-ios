@@ -111,6 +111,14 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         XCTAssertEqual(total.charactersRead, .max)
         XCTAssertTrue(total.readingTime.isFinite)
     }
+    func testReadingTimesAxisTopsAndHeatmapLevels() {
+        let en = Locale(identifier: "en_US")
+        XCTAssertEqual([0, 27, 59, 60, 1920, 1947, 21600, 8079].map { StatisticsMath.readingTime($0, locale: en) },
+                       ["0m", "27s", "59s", "1m", "32m", "32m", "6h", "2h 14m"])
+        XCTAssertFalse(StatisticsMath.readingTime(.infinity, locale: en).isEmpty)
+        XCTAssertEqual([0, 2, 7, 59, 134, 21_000, 0.37].map(StatisticsMath.axisTop), [1, 2, 8, 60, 150, 30_000, 0.4])
+        XCTAssertEqual([0, 1, 25, 26, 50, 75, 76, 100].map { StatisticsMath.heatmapLevel($0, maximum: 100) }, [0, 1, 1, 2, 2, 3, 4, 4])
+    }
     @MainActor func testCompletionUsesWholeBookCountInsteadOfChapterProgress() {
         let info = BookInfo(characterCount: 10000, chapterInfo: [:])
         XCTAssertFalse(StatisticsMath.isFinished(bookmark: Bookmark(chapterIndex: 0, progress: 1, characterCount: 1000), info: info, isManga: false))
