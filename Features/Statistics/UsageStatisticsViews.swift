@@ -7,10 +7,11 @@ struct UsageTodaySection: View {
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    private var isEmpty: Bool {
-        reading.seconds == 0 && usage.spans.isEmpty && usage.lookups == 0 && usage.pages == 0
-            && usage.revealed == 0 && usage.translated == 0 && usage.screenshots == 0
+    /// Whether the usage log saw today; as on Android, reading time alone shows no counts of zero.
+    private var hasUsage: Bool {
+        !usage.spans.isEmpty || usage.lookups + usage.pages + usage.sessions + usage.revealed + usage.translated + usage.screenshots > 0
     }
+    private var isEmpty: Bool { reading.seconds == 0 && !hasUsage }
     private var tiles: [(String, Int)] {
         var tiles = [("Words looked up", usage.lookups), ("Pages turned", usage.pages), ("Reading sessions", usage.sessions)]
         // Manga counters only matter once manga were read today.
@@ -40,7 +41,7 @@ struct UsageTodaySection: View {
             }
             .padding(.vertical, 4)
             .accessibilityElement(children: .combine)
-            if !isEmpty {
+            if hasUsage {
                 // One count per line at accessibility sizes, so labels are never cut mid-word.
                 let tile = typeSize.isAccessibilitySize ? AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8)) : AnyLayout(VStackLayout(alignment: .leading, spacing: 2))
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .topLeading), count: typeSize.isAccessibilitySize ? 1 : 3),
@@ -90,7 +91,7 @@ struct UsageTodaySection: View {
         } header: {
             Text("Today")
         } footer: {
-            if !isEmpty { Text("Lookups, bubbles and the timeline include your other devices once they sync over HTTP.") }
+            if hasUsage { Text("Lookups, bubbles and the timeline include your other devices once they sync over HTTP.") }
         }
     }
 }
