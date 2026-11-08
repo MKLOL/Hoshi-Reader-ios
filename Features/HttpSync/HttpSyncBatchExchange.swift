@@ -12,6 +12,39 @@ import UIKit
 nonisolated let httpSyncMapPrefix = "sync/maps/"
 nonisolated let httpSyncBooksMapKey = "sync/maps/books.json"
 // Read-only migration key used by early development builds.
+/// The library's sync-relevant files, read off the main thread. The five-second foreground poll
+/// needs every book's metadata, bookmark, payload hash and dirty marker; reading those there
+/// made scrolling stall every poll in large libraries.
+nonisolated struct HttpSyncLocalLibrary: Sendable {
+    struct Book: Sendable {
+        let metadata: BookMetadata
+        let root: URL?
+        let bookmark: Bookmark?
+        let payloadSha: String?
+        let payloadDirty: Bool
+    }
+    let books: [Book]
+    var metadata: [BookMetadata] { books.map(\.metadata) }
+
+    @concurrent static func scan(booksDirectory: URL) async -> HttpSyncLocalLibrary {
+        let decoder = JSONDecoder(), codec = HttpSyncPayloadCodec()
+        let folders = (try? FileManager.default.contentsOfDirectory(
+            at: booksDirectory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        var books: [Book] = []
+        for folder in folders where (try? folder.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+            guard let data = try? Data(contentsOf: folder.appendingPathComponent(FileNames.metadata)),
+                  let metadata = try? decoder.decode(BookMetadata.self, from: data) else { continue }
+            let root = metadata.folder.map { booksDirectory.appendingPathComponent($0) }
+            let bookmark = root.flatMap { try? Data(contentsOf: $0.appendingPathComponent(FileNames.bookmark)) }
+                .flatMap { try? decoder.decode(Bookmark.self, from: $0) }
+            books.append(Book(metadata: metadata, root: root, bookmark: bookmark,
+                              payloadSha: root.flatMap { codec.cachedPayloadSha(bookRoot: $0) },
+                              payloadDirty: root.map { codec.hasPayloadContentDirty(bookRoot: $0) } ?? false))
+        }
+        return HttpSyncLocalLibrary(books: books)
+    }
+}
+
 nonisolated func httpNeedsFullReconcile(_ key: String) -> Bool {
     !key.hasPrefix("app/reader_settings/") && !key.hasPrefix("sync/maps/") && !(key.hasPrefix("books/") && ["/statistics", "/manga_statistics", "/bookmark"].contains { key.hasSuffix($0) })
 }
@@ -257,8 +290,10 @@ final class HttpSyncBatchState {
         let listedLegacyFingerprint = legacyKeyEtags
         let legacyChangedBeforeWrites = before.initialized &&
             before.legacyEtags.filter { httpNeedsFullReconcile($0.key) } != listedLegacyFingerprint
-        let localBooks = (try? BookStorage.loadAllBooks()) ?? []
-        let local = readLocalBookmarks(books: localBooks)
+        guard let booksDirectory = try? BookStorage.getBooksDirectory() else { throw HttpSyncError("The library folder is unavailable.") }
+        let library = await HttpSyncLocalLibrary.scan(booksDirectory: booksDirectory)
+        let localBooks = library.metadata
+        let local = localBookmarkEntries(library.books.map { ($0.metadata, $0.bookmark) })
         let downloaded = try applyRemoteWinners(remote: remote, local: local, books: localBooks)
         let deviceKey = bookmarkMapKey(deviceId())
         let serverOwned = shards[deviceKey] ?? [:]
@@ -303,12 +338,15 @@ final class HttpSyncBatchState {
         ))
 
         let ids = Set(localBooks.compactMap { syncId(for: $0) })
-        let hashes = cachedLocalBookHashes(books: localBooks)
+        var hashes: [String: String] = [:]
+        for book in library.books { if let id = syncId(for: book.metadata), let sha = book.payloadSha { hashes[id] = sha } }
         let missingHash = ids.subtracting(hashes.keys).contains { !HttpSyncActiveBooks.contains($0) }
         let knownIds = ids.union(HttpSyncCloudBooks.shared.records.map(\.syncId).filter { remoteBooks[$0] != nil })
         let mismatch = knownIds != Set(remoteBooks.keys) || missingHash || hashes.contains { id, sha in
             !HttpSyncActiveBooks.contains(id) && remoteBooks[id] != sha
-        } || hasDirtyLocalPayload(books: localBooks)
+        } || library.books.contains { book in
+            book.payloadDirty && syncId(for: book.metadata).map { !HttpSyncActiveBooks.contains($0) } == true
+        }
         return HttpSyncMapChanges(
             needsBootstrap: !before.initialized,
             booksChanged: mismatch,
@@ -418,13 +456,18 @@ final class HttpSyncBatchState {
 
     private func readLocalBookmarks(books localBooks: [BookMetadata]) -> [String: HttpSyncBookmarkMapEntry] {
         guard let booksDir = try? BookStorage.getBooksDirectory() else { return [:] }
+        return localBookmarkEntries(localBooks.map { book in
+            (book, book.folder.flatMap { BookStorage.loadBookmark(root: booksDir.appendingPathComponent($0)) })
+        })
+    }
+
+    private func localBookmarkEntries(_ books: [(BookMetadata, Bookmark?)]) -> [String: HttpSyncBookmarkMapEntry] {
+        let revisions = HttpSyncRevisionStore.load()
         var result: [String: HttpSyncBookmarkMapEntry] = [:]
-        for book in localBooks {
-            guard let id = syncId(for: book), let folder = book.folder else { continue }
-            let root = booksDir.appendingPathComponent(folder)
-            guard let bookmark = BookStorage.loadBookmark(root: root) else { continue }
+        for (book, bookmark) in books {
+            guard let id = syncId(for: book), book.folder != nil, let bookmark else { continue }
             var blob = bookmark.toBlob()
-            blob.rev = HttpSyncRevisionStore.current(SyncKeys.bookmark(id)).localRev
+            blob.rev = revisions[SyncKeys.bookmark(id)]?.localRev ?? 0
             guard let body = try? encoder.encode(blob) else { continue }
             result[id] = HttpSyncBookmarkMapEntry(
                 etag: sha256Etag(body), lastModified: blob.lastModified, value: blob
@@ -513,16 +556,6 @@ final class HttpSyncBatchState {
             result[id] = hash
         }
         return result
-    }
-
-    private func hasDirtyLocalPayload(books localBooks: [BookMetadata]) -> Bool {
-        guard let booksDir = try? BookStorage.getBooksDirectory() else { return false }
-        let codec = HttpSyncPayloadCodec()
-        return localBooks.contains { book in
-            guard let id = syncId(for: book), let folder = book.folder,
-                  !HttpSyncActiveBooks.contains(id) else { return false }
-            return codec.hasPayloadContentDirty(bookRoot: booksDir.appendingPathComponent(folder))
-        }
     }
 
     private func loadState() -> HttpSyncCachedMapState {

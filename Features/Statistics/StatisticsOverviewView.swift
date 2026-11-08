@@ -8,6 +8,8 @@ struct StatisticsOverviewView: View {
     @State private var usage = UsageStatisticsModel()
     @State private var selectedTab = 0
     @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
+    /// The goal while the slider moves; saving (and syncing) happens when it is released.
+    @State private var draftGoal: Double?
     @AppStorage(ReadingDay.goalKey) private var goal = 10
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
     @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
@@ -57,11 +59,42 @@ struct StatisticsOverviewView: View {
             Section("Reading streak") {
                 let history = model.streakHistory
                 let streak = StatisticsMath.streak(history.days, goalMinutes: goal, resetHour: resetHour)
-                LabeledContent("Current", value: streak.current == 1 ? "1 day" : "\(streak.current) days")
-                LabeledContent("Longest", value: streak.longest == 1 ? "1 day" : "\(streak.longest) days")
-                LabeledContent("Daily goal", value: goal == 1 ? "1 minute" : "\(min(120, max(1, goal))) minutes")
-                Slider(value: Binding(get: { Double(min(120, max(1, goal))) }, set: { StatisticsPreferencesStore.choose(goal: Int($0)) }), in: 1...120, step: 1)
-                    .accessibilityLabel("Daily goal")
+                let goalMinutes = min(120, max(1, goal))
+                // The streak's day, like Android: it includes the credit for records without hours.
+                let todaySeconds = history.days.first { $0.date == readingDate }?.seconds ?? 0
+                let reached = todaySeconds >= Double(goalMinutes) * 60
+                let onGoal = history.days.filter { $0.date <= readingDate && $0.seconds >= Double(goalMinutes) * 60 }.count
+                HStack(spacing: 14) {
+                    Image(systemName: streak.current > 0 ? "flame.fill" : "flame")
+                        .font(.system(size: 34))
+                        .foregroundStyle(streak.current == 0 ? Color.secondary : reached ? Color.orange : Color.orange.opacity(0.55))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(streak.current == 1 ? "1 day streak" : "\(streak.current) day streak").font(.title2.bold())
+                        Text("Longest \(streak.longest == 1 ? "1 day" : "\(streak.longest) days") · \(onGoal) \(onGoal == 1 ? "day" : "days") on goal")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: min(todaySeconds / (Double(goalMinutes) * 60), 1)).tint(reached ? .orange : .accentColor)
+                    Text(reached ? "Today's goal reached"
+                         : streak.current > 0 ? "\(StatisticsMath.duration(Double(goalMinutes) * 60 - todaySeconds)) more today keeps your streak"
+                         : todaySeconds > 0 ? "\(StatisticsMath.duration(todaySeconds)) of \(goalMinutes)m today"
+                         : "Read \(goalMinutes)m today to start a streak")
+                        .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                }
+                .padding(.vertical, 2)
+            }
+            Section {
+                let shownGoal = Int(draftGoal ?? Double(min(120, max(1, goal))))
+                LabeledContent("Daily goal", value: shownGoal == 1 ? "1 minute" : "\(shownGoal) minutes")
+                // Rounded here rather than with `step:`, which draws 119 tick marks under the track.
+                Slider(value: Binding(get: { draftGoal ?? Double(min(120, max(1, goal))) }, set: { draftGoal = $0.rounded() }), in: 1...120) {
+                    Text("Daily goal")
+                } minimumValueLabel: { Text("1") } maximumValueLabel: { Text("120") } onEditingChanged: { editing in
+                    if !editing, let draftGoal { StatisticsPreferencesStore.choose(goal: Int(draftGoal)); self.draftGoal = nil }
+                }
+                .accessibilityLabel("Daily goal")
                 Picker("Day resets at", selection: Binding(get: { resetHour }, set: { StatisticsPreferencesStore.choose(reset: $0) })) {
                     ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
                 }.accessibilityIdentifier("statistics-day-reset")
@@ -74,13 +107,10 @@ struct StatisticsOverviewView: View {
                 Text("Every device counts reading days in this time zone.").font(.caption).foregroundStyle(.secondary)
                 Text("All statistics days run from the selected hour until that hour the next morning.")
                     .font(.caption).foregroundStyle(.secondary)
-                if history.estimated {
+                if model.streakHistory.estimated {
                     Text("Earlier history has no exact time. Your streak receives credit for either possible reading day; reading totals stay unchanged.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                // The streak's day, like Android: it includes the credit for records without hours.
-                let goalSeconds = history.days.first { $0.date == readingDate }?.seconds ?? 0
-                ProgressView(value: min(goalSeconds / (Double(min(120, max(1, goal))) * 60), 1))
             }
             Section("All time") {
                 LabeledContent("Reading time", value: StatisticsMath.duration(model.books.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }))

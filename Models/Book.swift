@@ -21,7 +21,7 @@ enum SortOption: String, CaseIterable, Identifiable {
     }
 }
 
-struct BookMetadata: Codable, Identifiable, Hashable {
+nonisolated struct BookMetadata: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     let title: String?
     var cover: String?
@@ -53,7 +53,7 @@ struct BookMetadata: Codable, Identifiable, Hashable {
     var resolvedContentType: ContentType { contentType ?? .epub }
 }
 
-struct Bookmark: Codable {
+nonisolated struct Bookmark: Codable, Sendable {
     let chapterIndex: Int
     let progress: Double
     let characterCount: Int

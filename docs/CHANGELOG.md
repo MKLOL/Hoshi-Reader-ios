@@ -24,6 +24,7 @@
 
 ### Changed
 
+- Statistics is redesigned: Today leads with your reading time, shows activity as tiles (manga counts only when you read manga), a labelled timeline of today's sessions and words you looked up more than once. The streak shows a flame, today's progress toward the goal and what is left to keep it; the goal is saved when you let go of the slider. Trend charts show units, a legend and the selected day's values.
 - Manga Statistics shows saved All Time totals first. Time to finish uses the median time of completed pages, so a page left open does not skew it; the pace is kept after closing the book and syncs across devices. Jumps, backward turns and time in the background add no samples.
 - Reading options are grouped under **App & reading**, **Manga**, **EPUB** and **Popup Cards**.
 - Closing a translation popup or leaving its reader keeps the request running and saves its reply to history. The history button shows running or unseen replies, and failed requests offer Retry. iOS background execution remains subject to the system's time allowance.
@@ -32,6 +33,7 @@
 
 ### Fixed
 
+- Scrolling no longer stutters every few seconds while HTTP sync is set up. The foreground sync check reads the library off the main thread and skips books and statistics that have not changed.
 - Covers whose image is not book-shaped, such as a two-page spread, fill their place on the shelf instead of being stretched.
 - Manga reading time no longer counts while the app is in the background after a slow book load. Reading days whose midnight is skipped or repeated by daylight saving time keep their reading and streak, and the goal bar matches the streak.
 - The first tap outside a dictionary popup closes it before another word or reader control acts.

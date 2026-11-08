@@ -35,14 +35,29 @@ enum HttpSyncRevisionStore {
         (try? BookStorage.getBooksDirectory())?.appendingPathComponent(filename)
     }
 
+    /// Sync reads one record per book on every foreground poll; decoding the whole file for each
+    /// made a large library stall scrolling. The decoded file is kept until it changes on disk.
+    private static var cached: (url: URL, stamp: Date, size: Int, records: [String: HttpSyncRevisionRecord])?
+
+    private static func fileStamp(_ url: URL) -> (Date, Int)? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path(percentEncoded: false)),
+              let date = attributes[.modificationDate] as? Date, let size = (attributes[.size] as? NSNumber)?.intValue else { return nil }
+        return (date, size)
+    }
+
     static func load() -> [String: HttpSyncRevisionRecord] {
-        guard let url = fileURL(), let data = try? Data(contentsOf: url) else { return [:] }
-        return (try? JSONDecoder().decode([String: HttpSyncRevisionRecord].self, from: data)) ?? [:]
+        guard let url = fileURL(), let (stamp, size) = fileStamp(url) else { return [:] }
+        if let cached, cached.url == url, cached.stamp == stamp, cached.size == size { return cached.records }
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        let records = (try? JSONDecoder().decode([String: HttpSyncRevisionRecord].self, from: data)) ?? [:]
+        cached = (url, stamp, size, records)
+        return records
     }
 
     private static func save(_ state: [String: HttpSyncRevisionRecord]) {
         guard let url = fileURL(), let data = try? JSONEncoder().encode(state) else { return }
         try? data.write(to: url, options: .atomic)
+        if let (stamp, size) = fileStamp(url) { cached = (url, stamp, size, state) } else { cached = nil }
     }
 
     /// The record for `key` (zeros when never seen).

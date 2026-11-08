@@ -10,7 +10,7 @@ import Foundation
 
 /// Whether a book directory holds a reflowable EPUB or a mokuro manga volume. Serialized as
 /// `"epub"` / `"mokuro"` to match the Android sync wire format.
-enum ContentType: String, Codable, Hashable {
+nonisolated enum ContentType: String, Codable, Hashable, Sendable {
     case epub
     case mokuro
 }

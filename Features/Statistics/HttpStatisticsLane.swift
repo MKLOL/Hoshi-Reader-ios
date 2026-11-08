@@ -132,8 +132,19 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
         defer { if lease != .invalid { UIApplication.shared.endBackgroundTask(lease) } }
         await work.value
     }
+    /// The statistics keys and scope of the last poll's pass. Other devices' statistics only
+    /// change with their keys, so an unchanged listing skips the pass (which reads every book's
+    /// history); a pass still runs once a minute for backed-off keys. Local reading is pushed by
+    /// `schedule`, not here.
+    private var polledStatistics: (scope: String, etags: [String: String?], at: Date)?
+
     func poll(transport: any HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String) {
         guard polling == nil else { return }
+        var etags: [String: String?] = [:]
+        for (key, meta) in listing where Self.parse(key) != nil { etags[key] = meta.etag }
+        if let previous = polledStatistics, previous.scope == scope, previous.etags == etags,
+           clock().timeIntervalSince(previous.at) < 60 { return }
+        polledStatistics = (scope, etags, clock())
         polling = Task { @MainActor [weak self] in
             guard let self else { return }
             _ = await self.run(transport: transport, listing: listing, scope: scope)

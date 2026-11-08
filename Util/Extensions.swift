@@ -33,7 +33,7 @@ extension String {
 }
 
 extension BookMetadata {
-    var coverURL: URL? {
+    @MainActor var coverURL: URL? {
         guard let coverPath = self.cover,
               let appDir = try? BookStorage.getAppDirectory() else {
             return nil

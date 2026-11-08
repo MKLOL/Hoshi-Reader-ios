@@ -397,6 +397,53 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertEqual(try book(second).metadata.title, "Integration Manga Two")
     }
 
+    /// The five-second foreground poll runs while someone scrolls the shelf. With a large, already
+    /// synchronized library it must never hold the main thread long enough to drop frames; a
+    /// main-actor heartbeat measures the longest stall across several real polls.
+    @MainActor func testForegroundPollNeverStallsTheMainThreadWithALargeLibrary() async throws {
+        try await prepare()
+        await syncNow()
+        let manga = try book(Self.mangaSyncId)
+        let books = try BookStorage.getBooksDirectory()
+        for index in 0..<80 {
+            let id = "large_library_\(index)"
+            let folder = books.appendingPathComponent(id, isDirectory: true)
+            try FileManager.default.copyItem(at: manga.root, to: folder)
+            let metadata = BookMetadata(id: UUID(), title: "Large Library \(index)", cover: nil, folder: id, lastAccess: Date(),
+                                        contentType: .mokuro, importedAt: manga.metadata.importedAt, syncId: id)
+            try BookStorage.save(metadata, inside: folder, as: FileNames.metadata)
+        }
+        // Publish the library, then confirm a pass finds nothing left to do: the steady state.
+        await syncNow(downloadManga: false)
+        await syncNow(downloadManga: false)
+
+        var longest: TimeInterval = 0, beats = 0
+        var last = ProcessInfo.processInfo.systemUptime
+        let heartbeat = Task { @MainActor in
+            while !Task.isCancelled {
+                let now = ProcessInfo.processInfo.systemUptime
+                longest = max(longest, now - last); last = now; beats += 1
+                try? await Task.sleep(for: .milliseconds(4))
+            }
+        }
+        try await clearServerRequests()
+        HttpSyncManager.shared.resumePolling()
+        // The first poll after launch observes every bookmark once; later ones skip unchanged books.
+        try await Task.sleep(for: .seconds(3))
+        let first = longest
+        longest = 0
+        try await Task.sleep(for: .seconds(11))
+        HttpSyncManager.shared.suspendPolling()
+        heartbeat.cancel()
+
+        let listings = try await serverRequests().filter { $0.method == "GET" && $0.path.hasPrefix("/v1/kv?") }.count
+        XCTAssertGreaterThanOrEqual(listings, 3, "the poll ran repeatedly")
+        XCTAssertGreaterThan(beats, 500)
+        print("foreground poll: first \(Int(first * 1000)) ms, then longest main-thread stall \(Int(longest * 1000)) ms over \(listings) polls, \(beats) beats")
+        XCTAssertLessThan(first, 0.1, "the first poll stalled the main thread for \(Int(first * 1000)) ms")
+        XCTAssertLessThan(longest, 0.03, "a poll stalled the main thread for \(Int(longest * 1000)) ms")
+    }
+
     /// Publishes the fixture's manga again under another sync ID, as a second device would.
     @MainActor private func publishCopyOfFixtureManga(as syncId: String, title: String) async throws {
         let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)

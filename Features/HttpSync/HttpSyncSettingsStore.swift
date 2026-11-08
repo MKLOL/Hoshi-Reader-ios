@@ -77,17 +77,24 @@ final class HttpSyncSettingsStore {
         }
     }
 
+    /// The Keychain value, read once. Sync compares the account dozens of times per five-second
+    /// poll, and each Keychain read blocks the main thread; only this store writes the token.
+    @ObservationIgnored private var cachedToken: String?
+
     /// Bearer token sent in the `Authorization` header. Stored in the Keychain, NOT UserDefaults.
-    /// Reading hits the Keychain each access (cheap; tokens are short and infrequently read).
     var token: String {
         get {
             _ = tokenRevision
-            return Keychain.get(SecretKeys.httpSyncToken) ?? ""
+            if let cachedToken { return cachedToken }
+            let stored = Keychain.get(SecretKeys.httpSyncToken) ?? ""
+            cachedToken = stored
+            return stored
         }
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let changed = token != trimmed
             if Keychain.set(trimmed.isEmpty ? nil : trimmed, for: SecretKeys.httpSyncToken) {
+                cachedToken = trimmed
                 tokenRevision &+= 1
                 if changed { lastSyncedAt = nil }
             }

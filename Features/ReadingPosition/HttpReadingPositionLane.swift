@@ -18,6 +18,9 @@ final class HttpReadingPositionLane {
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var currentScope: String?
+    /// Each book's bookmark file as last observed. Only a bookmark changed since then can hold a
+    /// local move to record, so the five-second poll does not read every book's files.
+    private var observedBookmarks: [String: Date] = [:]
     init(store: ReadingPositionRepository) { self.store = store }
 
     func run(transport: HttpSyncKvTransport, listing: [String: HttpSyncKvKeyMeta], scope: String,
@@ -27,10 +30,12 @@ final class HttpReadingPositionLane {
         guard stillCurrent(), !Task.isCancelled else { return Outcome() }
         var roots: [String: URL] = [:]
         if let directory = try? BookStorage.getBooksDirectory() {
-            for book in (try? BookStorage.loadAllBooks()) ?? [] {
-                guard let id = syncId(for: book), let folder = book.folder else { continue }
-                roots[id] = directory.appendingPathComponent(folder)
+            // Read off the main thread: this runs on every five-second foreground poll.
+            for book in await HttpSyncLocalLibrary.scan(booksDirectory: directory).books {
+                guard let id = syncId(for: book.metadata), let root = book.root else { continue }
+                roots[id] = root
             }
+            guard stillCurrent(), !Task.isCancelled else { return Outcome() }
         }
         return await exchange(transport: transport, listing: listing, roots: roots, scope: scope, stillCurrent: stillCurrent)
     }
@@ -44,7 +49,7 @@ final class HttpReadingPositionLane {
         var index: Index
         if let stored, let decoded = try? JSONDecoder().decode(Scoped.self, from: stored), decoded.scope == scope { index = decoded.index }
         else { index = Index() }
-        if currentScope != scope { failures = [:]; currentScope = scope }
+        if currentScope != scope { failures = [:]; observedBookmarks = [:]; currentScope = scope }
         var outcome = Outcome(), reads = 0
         defer {
             // A later cancellation still notifies for durable commits already applied. One
@@ -53,11 +58,16 @@ final class HttpReadingPositionLane {
                 NotificationCenter.default.post(name: .httpSyncBookmarkApplied, object: nil, userInfo: ["syncId": book])
             }
         }
+        func modified(_ root: URL) -> Date? {
+            (try? FileManager.default.attributesOfItem(atPath: root.appendingPathComponent(FileNames.bookmark).path(percentEncoded: false)))?[.modificationDate] as? Date
+        }
         for (bookId, root) in roots {
+            if let stamp = modified(root), observedBookmarks[bookId] == stamp { continue }
             let before = BookStorage.loadBookmark(root: root).map(ReadingPosition.init)
             store.observe(bookId: bookId, root: root)
             let after = BookStorage.loadBookmark(root: root).map(ReadingPosition.init)
             if let after, before == nil || !after.samePlace(as: before!) { outcome.moved.insert(bookId) }
+            observedBookmarks[bookId] = modified(root)
         }
         let device = store.device.id
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]

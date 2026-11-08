@@ -149,8 +149,29 @@ struct BookStorage {
         return try? JSONDecoder().decode(T.self, from: data)
     }
     
+    /// Sync reads every book's metadata and bookmark on each five-second poll, and decoding them
+    /// all again stalled scrolling in large libraries. A decoded file is kept until its
+    /// modification date or size changes, which every write does.
+    private static var decodedFiles: [String: (stamp: Date, size: Int, value: Any)] = [:]
+
+    private static func decodeRemembered<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
+        let path = url.path(percentEncoded: false)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let stamp = attributes[.modificationDate] as? Date,
+              let size = (attributes[.size] as? NSNumber)?.intValue else {
+            decodedFiles[path] = nil
+            return nil
+        }
+        if let remembered = decodedFiles[path], remembered.stamp == stamp, remembered.size == size,
+           let value = remembered.value as? T { return value }
+        let value = try JSONDecoder().decode(T.self, from: Data(contentsOf: url))
+        if decodedFiles.count >= 4_096 { decodedFiles.removeAll(keepingCapacity: true) }
+        decodedFiles[path] = (stamp, size, value)
+        return value
+    }
+
     static func loadBookmark(root: URL) -> Bookmark? {
-        load(Bookmark.self, from: root.appendingPathComponent(FileNames.bookmark))
+        (try? decodeRemembered(Bookmark.self, from: root.appendingPathComponent(FileNames.bookmark))) ?? nil
     }
     
     static func loadBookInfo(root: URL) -> BookInfo? {
@@ -158,7 +179,7 @@ struct BookStorage {
     }
     
     static func loadMetadata(root: URL) -> BookMetadata? {
-        load(BookMetadata.self, from: root.appendingPathComponent(FileNames.metadata))
+        (try? decodeRemembered(BookMetadata.self, from: root.appendingPathComponent(FileNames.metadata))) ?? nil
     }
     
     static func loadStatistics(root: URL) -> [Statistics]? {
@@ -207,11 +228,7 @@ struct BookStorage {
                 continue
             }
             
-            let metadataURL = url.appendingPathComponent(FileNames.metadata)
-            
-            if FileManager.default.fileExists(atPath: metadataURL.path(percentEncoded: false)) {
-                let data = try Data(contentsOf: metadataURL)
-                let book = try JSONDecoder().decode(BookMetadata.self, from: data)
+            if let book = try decodeRemembered(BookMetadata.self, from: url.appendingPathComponent(FileNames.metadata)) {
                 books.append(book)
             }
         }

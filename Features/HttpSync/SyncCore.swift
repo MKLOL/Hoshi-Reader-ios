@@ -13,6 +13,7 @@
 
 import CryptoKit
 import Foundation
+import os
 
 // MARK: - Sync id derivation
 
@@ -164,8 +165,18 @@ nonisolated func rfc3339ToAppleSeconds(_ rfc3339: String) -> Double {
     return date.timeIntervalSinceReferenceDate
 }
 
+/// Bookmark maps compare the same few thousand timestamps on every five-second poll, and each
+/// ICU parse costs tens of microseconds on the main thread, so parsed values are remembered.
+nonisolated private let rfc3339ParseCache = OSAllocatedUnfairLock(initialState: [String: Date?]())
+
 nonisolated func parseRfc3339(_ s: String) -> Date? {
-    rfc3339FractionalFormatter.date(from: s) ?? rfc3339SecondsFormatter.date(from: s)
+    if let remembered = rfc3339ParseCache.withLock({ $0[s] }) { return remembered }
+    let parsed = rfc3339FractionalFormatter.date(from: s) ?? rfc3339SecondsFormatter.date(from: s)
+    rfc3339ParseCache.withLock { cache in
+        if cache.count >= 50_000 { cache.removeAll(keepingCapacity: true) }
+        cache[s] = parsed
+    }
+    return parsed
 }
 
 /// RFC 3339 string for "now".

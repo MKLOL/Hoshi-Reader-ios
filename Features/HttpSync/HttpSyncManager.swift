@@ -335,8 +335,9 @@ final class HttpSyncManager {
     /// hide a downloaded manga. A stop or failed map exchange leaves it for the next pass to show.
     /// Returns nil when the account changed and the pass must end.
     private func revealReadyDownloads(transport: HttpSyncKvTransport, config: HttpSyncConfig) async -> (moved: Int, errors: [String])? {
+        guard settings.currentConfig() == config else { return nil }
         let ready = HttpSyncCloudBooks.shared.readySyncIds
-        guard !ready.isEmpty, settings.currentConfig() == config else { return (0, []) }
+        guard !ready.isEmpty else { return (0, []) }
         do {
             let afterImport = try await batchState.syncMaps(transport: transport)
             let positions = await HttpReadingPositionLane.shared.run(
@@ -446,7 +447,7 @@ final class HttpSyncManager {
         let catalogue = HttpSyncCloudBooks.shared
         let generation = catalogue.generation
         let requested = Dictionary(uniqueKeysWithValues: catalogue.records.compactMap { record in
-            record.downloadRequestedAt.map { (record.syncId, $0) }
+            record.awaitingBookmarkMap ? nil : record.downloadRequestedAt.map { (record.syncId, $0) }
         })
         Task {
             await self.syncNow()

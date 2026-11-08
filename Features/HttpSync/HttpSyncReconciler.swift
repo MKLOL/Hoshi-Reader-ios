@@ -720,7 +720,7 @@ struct HttpSyncReconciler {
             }
         }
         if cloudBooks.hasReadyDownloads {
-            guard let errors = await onCloudBooksInstalled() else { flushAppliedKeys(); return cursor }
+            guard let errors = await onCloudBooksInstalled() else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             for message in errors where !result.errors.contains(message) { result.errors.append(message) }
         }
 
@@ -730,13 +730,22 @@ struct HttpSyncReconciler {
         var attemptedCloudIds: Set<String> = []
         func nextTappedManga() -> String? {
             cloudBooks.records
-                .filter { $0.downloadRequestedAt != nil && !$0.awaitingBookmarkMap && cloudManifests[$0.syncId] != nil && !attemptedCloudIds.contains($0.syncId) }
+                .filter { $0.downloadRequestedAt != nil && !$0.awaitingBookmarkMap && cloudManifests[$0.syncId] != nil
+                    && failedCloudIds[$0.syncId] == nil && !attemptedCloudIds.contains($0.syncId) }
                 .min { ($0.downloadRequestedAt ?? "", $0.syncId) < ($1.downloadRequestedAt ?? "", $1.syncId) }?.syncId
         }
         while let id = nextTappedManga() {
             guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             attemptedCloudIds.insert(id)
             let meta = cloudManifests[id]!
+            await onProgress(HttpSyncProgress(
+                message: "Downloading manga",
+                detail: cloudBooks.record(syncId: id)?.title ?? id,
+                completed: attemptedCloudIds.count - 1,
+                total: attemptedCloudIds.count + max(0, cloudBooks.requestedSyncIds.count - cloudBooks.readySyncIds.count - 1)
+            ))
+            // A copy left by a stopped pass may be from an older archive; never unpack over it.
+            try? FileManager.default.removeItem(at: cloudBooks.stagingRoot(syncId: id))
             cloudBooks.beginDownload(syncId: id)
             let root: URL
             do {
@@ -791,10 +800,14 @@ struct HttpSyncReconciler {
                 result.errors.append("Installing \(id): \(errorText(error))")
                 continue
             }
-            guard let errors = await onCloudBooksInstalled() else { flushAppliedKeys(); return cursor }
+            guard let errors = await onCloudBooksInstalled() else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
             for message in errors where !result.errors.contains(message) { result.errors.append(message) }
         }
 
+        // A manga tapped during this pass whose deletion state could not be read waits for a retry.
+        for (id, message) in failedCloudIds where cloudBooks.requestedSyncIds.contains(id) && !cloudBooks.readySyncIds.contains(id) {
+            cloudBooks.failDownload(syncId: id, message: message)
+        }
         await cloudBooks.fetchMissingCovers(transport: transport)
 
         // Plain loop, not `.filter{}.count`: a @MainActor closure into a stdlib generic carries a

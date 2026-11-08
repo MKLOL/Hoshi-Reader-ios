@@ -33,7 +33,8 @@ final class CloudMangaDownloadUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 2), "a tap shows progress at once: \(app.debugDescription)")
         XCTAssertTrue(["Waiting…", "Downloading…"].contains { status.label.hasPrefix($0) }, status.label)
         let downloading = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in status.label.hasPrefix("Downloading…") }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [downloading], timeout: 4), .completed, status.label)
+        // The tap may wait for the launch sync to finish before its transfer starts.
+        XCTAssertEqual(XCTWaiter.wait(for: [downloading], timeout: 30), .completed, status.label)
         XCTAssertFalse(cover.isEnabled, "a downloading manga cannot be tapped again")
         XCTAssertTrue(app.buttons["Cancel"].exists)
         capture(app, "cloud-downloading")

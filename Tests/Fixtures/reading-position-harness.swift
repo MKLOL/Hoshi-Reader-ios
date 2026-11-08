@@ -23,6 +23,11 @@ protocol HttpSyncKvTransport: Sendable {
  func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse
 }
 enum HttpSyncActiveBooks { static func contains(_ id: String) -> Bool { false } }
+struct HttpSyncLocalLibrary {
+ struct Book { let metadata: BookMetadata; let root: URL? }
+ let books: [Book]
+ static func scan(booksDirectory: URL) async -> HttpSyncLocalLibrary { .init(books: []) }
+}
 extension Notification.Name { static let httpSyncBookmarkApplied = Notification.Name("bookmark-applied") }
 
 import Foundation
