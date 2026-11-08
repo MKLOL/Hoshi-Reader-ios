@@ -331,6 +331,95 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertFalse(requests.contains { $0.path.hasSuffix(".zip") }, "showing it transfers no archive")
     }
 
+    /// Two tapped manga, as on a device: one sync works through the queue in tap order, each
+    /// manga moving onto the shelf as soon as its own download finishes while the next still
+    /// waits, without listing the library again per manga. Neither is ever missing from both Not
+    /// downloaded and the shelf; the shelf model reloads only when the app announces a library
+    /// change, exactly as `BookshelfView` does.
+    @MainActor func testOneSyncDownloadsTappedMangaInTapOrderShowingEachAsItFinishes() async throws {
+        try await prepare()
+        let second = "integration_manga_two"
+        try await publishCopyOfFixtureManga(as: second, title: "Integration Manga Two")
+        try await publishCopyOfFixtureManga(as: "integration_manga_three", title: "Integration Manga Three")
+        await syncNow(downloadManga: false)
+        let catalogue = HttpSyncCloudBooks.shared
+        // Tapped in reverse sync-ID order: the queue must follow the taps, not the listing.
+        let ids = [second, Self.mangaSyncId]
+        for id in ids { XCTAssertEqual(catalogue.downloadState(syncId: id), .available, id) }
+        // What one sync costs the rest of the library: a single tapped manga.
+        let novelMetadata = "/v1/kv/books/\(Self.novelSyncId)/metadata"
+        XCTAssertTrue(catalogue.requestDownload(syncId: "integration_manga_three"))
+        try await clearServerRequests()
+        await HttpSyncManager.shared.syncNow()
+        XCTAssertNil(catalogue.record(syncId: "integration_manga_three"), "a single tap downloads and shows its manga")
+        let oneSyncReads = try await serverRequests().filter { $0.method == "GET" && $0.path == novelMetadata }.count
+        XCTAssertGreaterThan(oneSyncReads, 0)
+
+        let shelf = BookshelfViewModel()
+        shelf.loadBooks()
+        func shelved(_ id: String) -> Bool { shelf.books.contains { $0.syncId == id } }
+        var timeline: [[String: String]] = []
+        func snapshot() -> [String: String] {
+            Dictionary(uniqueKeysWithValues: ids.map { id in (id, shelved(id) ? "shelf" : "\(catalogue.downloadState(syncId: id))") })
+        }
+        let observer = NotificationCenter.default.addObserver(forName: .hoshiLibraryChanged, object: nil, queue: nil) { _ in
+            MainActor.assumeIsolated { shelf.loadBooks(); timeline.append(snapshot()) }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        var missing: [String] = [], samples = 0
+        let sampler = Task { @MainActor in
+            while !Task.isCancelled {
+                samples += 1
+                for id in ids where catalogue.record(syncId: id) == nil && !shelved(id) { missing.append(id) }
+                try? await Task.sleep(for: .milliseconds(2))
+            }
+        }
+
+        for id in ids {
+            XCTAssertTrue(catalogue.requestDownload(syncId: id))
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(ids.allSatisfy { catalogue.downloadState(syncId: $0) == .queued }, "both show progress at once")
+        try await clearServerRequests()
+        await HttpSyncManager.shared.syncNow()
+        sampler.cancel()
+
+        XCTAssertTrue(ids.allSatisfy(shelved), "one sync downloads the whole queue: \(timeline)")
+        XCTAssertTrue(ids.allSatisfy { catalogue.record(syncId: $0) == nil })
+        XCTAssertEqual(missing, [], "a manga vanished between Not downloaded and the shelf")
+        XCTAssertGreaterThan(samples, 3)
+        let firstShown = try XCTUnwrap(timeline.first { $0.values.contains("shelf") }, "\(timeline)")
+        XCTAssertEqual(firstShown, [second: "shelf", Self.mangaSyncId: "queued"], "the first tap appears while the next waits: \(timeline)")
+        let queueReads = try await serverRequests().filter { $0.method == "GET" && $0.path == novelMetadata }.count
+        XCTAssertEqual(queueReads, oneSyncReads, "a queue of two costs the library one sync, not one per manga")
+        XCTAssertEqual(HttpSyncManager.shared.lastErrors, [])
+        XCTAssertEqual(BookStorage.loadBookmark(root: try book(Self.mangaSyncId).root)?.chapterIndex, 2, "opens at Android's page")
+        XCTAssertEqual(try book(second).metadata.title, "Integration Manga Two")
+    }
+
+    /// Publishes the fixture's manga again under another sync ID, as a second device would.
+    @MainActor private func publishCopyOfFixtureManga(as syncId: String, title: String) async throws {
+        let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        for name in ["payload.zip", "payload.manifest", "bookmark", "metadata"] {
+            let response = try await client.get(key: "books/\(Self.mangaSyncId)/\(name)")
+            let fetched = try XCTUnwrap(response)
+            var body = fetched.body
+            if name == "metadata" {
+                var metadata = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+                metadata["title"] = title
+                body = try JSONSerialization.data(withJSONObject: metadata)
+            }
+            let type = name.hasSuffix(".zip") ? "application/zip" : "application/json; charset=utf-8"
+            _ = try await client.put(key: "books/\(syncId)/\(name)", contentType: type, body: body)
+        }
+        let mapKey = httpSyncBooksMapKey
+        let mapResponse = try await client.get(key: mapKey)
+        let fetchedMap = try XCTUnwrap(mapResponse)
+        var map = try JSONDecoder().decode([String: String].self, from: fetchedMap.body)
+        map[syncId] = map[Self.mangaSyncId]
+        _ = try await client.put(key: mapKey, contentType: "application/json; charset=utf-8", body: JSONEncoder().encode(map))
+    }
+
     private struct LocalBook {
         let metadata: BookMetadata
         let root: URL

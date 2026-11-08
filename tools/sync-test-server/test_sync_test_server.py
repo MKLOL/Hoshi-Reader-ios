@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -138,11 +139,23 @@ class SyncTestServerContract(unittest.TestCase):
         self.assertEqual([4, 6], [r["size"] for r in downloads])
         self.assertEqual([None, "bytes=4-"], [r["range"] for r in downloads])
 
+    def test_first_byte_delay_holds_one_download_open(self):
+        path = "/v1/kv/books/slow/payload.zip"
+        call(self.base, "PUT", path, b"0123456789")
+        self.assertEqual(200, call_json(self.base, "POST", "/_test/download_next", {"pathPrefix": path, "firstByteDelay": 0.5})[0])
+        started = time.monotonic()
+        self.assertEqual(b"0123456789", call(self.base, "GET", path)[2])
+        self.assertGreaterEqual(time.monotonic() - started, 0.5)
+        started = time.monotonic()
+        call(self.base, "GET", path)
+        self.assertLess(time.monotonic() - started, 0.5, "only the next download is delayed")
+
     def test_download_faults_are_validated_finite_and_resettable(self):
         path = "/v1/kv/books/range/payload.zip"
         call(self.base, "PUT", path, b"0123456789")
         for bad in ({"disconnectAfter": -1}, {"disconnectAfter": True}, {"count": 0},
-                    {"ignoreRange": "yes"}, {"chunkDelay": -1}, {"chunkDelay": True}, {"chunkDelay": float("nan")}, {"etag": "bad\r\nheader"}, {"contentRange": 3}):
+                    {"ignoreRange": "yes"}, {"chunkDelay": -1}, {"chunkDelay": True}, {"chunkDelay": float("nan")}, {"etag": "bad\r\nheader"}, {"contentRange": 3},
+                    {"firstByteDelay": -1}, {"firstByteDelay": 11}, {"firstByteDelay": "1"}):
             self.assertEqual(400, call_json(self.base, "POST", "/_test/download_next",
                                           {"pathPrefix": path, **bad})[0])
         call_json(self.base, "POST", "/_test/download_next", {"pathPrefix": path, "ignoreRange": True})

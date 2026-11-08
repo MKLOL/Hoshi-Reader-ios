@@ -29,6 +29,9 @@ outside the client under test:
     POST   /_test/requests/clear               clear the request log
     POST   /_test/fail_next                    {"pathPrefix", "status", "method"?, "count"?, "body"?}:
                                                fail the next `count` matching API requests
+    POST   /_test/download_next                {"pathPrefix", "count"?, "disconnectAfter"?, "chunkDelay"?,
+                                               "firstByteDelay"?, "ignoreRange"?, "etag"?, "contentRange"?}:
+                                               shape the next `count` matching downloads
     HEAD   /v1/kv/{key}                        headers only, like GET
 
 Run:  sync_test_server.py --port 0 --token secret [--state snapshot.json]
@@ -325,8 +328,11 @@ class Handler(BaseHTTPRequestHandler):
         self._consumed = self._declared_length()
 
     def _send(self, status: int, body: bytes = b"", content_type: str = JSON_CONTENT_TYPE,
-              headers: dict | None = None, disconnect_after: int | None = None, chunk_delay: float = 0) -> None:
+              headers: dict | None = None, disconnect_after: int | None = None, chunk_delay: float = 0,
+              first_byte_delay: float = 0) -> None:
         self._drain_body()
+        if first_byte_delay:
+            time.sleep(first_byte_delay)  # a slow server: nothing arrives for this long
         if disconnect_after is not None:
             self.close_connection = True
         self.send_response(status)
@@ -502,12 +508,14 @@ class Handler(BaseHTTPRequestHandler):
             cutoff = request.get("disconnectAfter")
             ignore_range = request.get("ignoreRange", False)
             delay = request.get("chunkDelay", 0)
+            first_byte = request.get("firstByteDelay", 0)
             overrides = [request.get("etag"), request.get("contentRange")]
             if (
                 not isinstance(prefix, str) or not prefix.startswith("/v1/kv/")
                 or type(count) is not int or count < 1
                 or (cutoff is not None and (type(cutoff) is not int or cutoff < 0))
                 or type(delay) not in (int, float) or not 0 <= delay <= 1
+                or type(first_byte) not in (int, float) or not 0 <= first_byte <= 10
                 or type(ignore_range) is not bool
                 or any(value is not None and (not isinstance(value, str) or "\r" in value or "\n" in value)
                        for value in overrides)
@@ -594,7 +602,8 @@ class Handler(BaseHTTPRequestHandler):
         if "contentRange" in fault:
             headers["Content-Range"] = fault["contentRange"]
         self._send(status, body, content_type=entry["contentType"], headers=headers,
-                   disconnect_after=fault.get("disconnectAfter"), chunk_delay=fault.get("chunkDelay", 0))
+                   disconnect_after=fault.get("disconnectAfter"), chunk_delay=fault.get("chunkDelay", 0),
+                   first_byte_delay=fault.get("firstByteDelay", 0))
 
     def _list(self, query: dict) -> None:
         prefix = query.get("prefix", [""])[0]

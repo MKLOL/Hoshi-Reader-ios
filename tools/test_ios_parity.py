@@ -2,6 +2,7 @@
 """Run the real-server iOS regression gate on a newly created disposable simulator."""
 import json
 import importlib.util
+from contextlib import contextmanager
 import os
 import shlex
 import shutil
@@ -36,6 +37,19 @@ def simulator_type(runtimes):
     raise RuntimeError("Install an iOS simulator runtime in Xcode before running the regression gate.")
 
 
+@contextmanager
+def sync_server():
+    """The real local sync server holding the Android corpus, for UI scenarios that sync."""
+    sys.path.insert(0, str(ROOT / "Tests/Regression"))
+    import test_sync_integration as integration
+    server = integration.ServerProcess()
+    try:
+        server.call("POST", "/_test/load", integration.CORPUS.read_bytes())
+        yield server.base, integration.TOKEN
+    finally:
+        server.stop()
+
+
 def main():
     require_dependencies()
     listing = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "runtimes", "-j"], text=True))
@@ -64,13 +78,21 @@ def main():
             "-derivedDataPath", env.get("HOSHI_DERIVED_DATA", str(ROOT / "build/DD-sim")),
             "-only-testing:HoshiReaderUITests/PodcastTranscriptUITests",
             "-only-testing:HoshiReaderUITests/StatisticsSyncUITests",
+            "-only-testing:HoshiReaderUITests/CloudMangaDownloadUITests",
         ] + shlex.split(env["HOSHI_XCODEBUILD_ARGS"])
         log = ROOT / "build/ios-parity-ui.log"
         log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open("w") as output:
-            ui = subprocess.run(command, cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT, check=False, timeout=900)
+        # The hosted sync scenarios leave books in the app's container on this owned simulator; the
+        # UI scenarios start from a fresh install, as a reader's first sync would.
+        # Uninstalling needs a booted device; booting one that already runs fails harmlessly.
+        subprocess.run(["xcrun", "simctl", "boot", device], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(["xcrun", "simctl", "uninstall", device, "com.dragosristache.hoshireader"], check=True)
+        with sync_server() as (base, token), log.open("w") as output:
+            # xcodebuild hands TEST_RUNNER_ variables to the UI test runner without the prefix.
+            ui_env = dict(env, TEST_RUNNER_HOSHI_KV_BASE_URL=base, TEST_RUNNER_HOSHI_KV_TOKEN=token)
+            ui = subprocess.run(command, cwd=ROOT, env=ui_env, stdout=output, stderr=subprocess.STDOUT, check=False, timeout=900)
         output = log.read_text()
-        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"))
+        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"), ("CloudMangaDownloadUITests", "testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage"))
         passed = all(any(suite in line and method in line and "passed" in line
                          for line in output.splitlines()) for suite, method in required)
         if ui.returncode or "** TEST SUCCEEDED **" not in output or not passed:

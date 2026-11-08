@@ -21,6 +21,17 @@ nonisolated struct HttpSyncCloudBookRecord: Codable, Identifiable, Equatable, Se
     var id: String { syncId }
 }
 
+/// What a Not downloaded cell shows: waiting its turn, transferring, or installing.
+nonisolated enum HttpSyncCloudDownloadState: Equatable, Sendable {
+    case available, queued, downloading(Double), finishing, failed(String)
+    var isActive: Bool {
+        switch self {
+        case .queued, .downloading, .finishing: return true
+        case .available, .failed: return false
+        }
+    }
+}
+
 /// A server catalogue, never a source of local book-map entries or library backups. A durable
 /// request survives process death; a failed request waits for an explicit retry. Incoming bytes
 /// are staged here until all of the book's reading sidecars have been applied.
@@ -74,6 +85,17 @@ final class HttpSyncCloudBooks {
 
     func record(syncId: String) -> HttpSyncCloudBookRecord? { records.first { $0.syncId == syncId } }
 
+    func downloadState(syncId: String) -> HttpSyncCloudDownloadState {
+        guard let record = record(syncId: syncId) else { return .available }
+        if record.awaitingBookmarkMap { return .finishing }
+        if record.downloadRequestedAt != nil {
+            if transferringSyncId == syncId { return .downloading(downloads[syncId] ?? 0) }
+            // A transferred archive is unpacked and installed later in the same pass.
+            return downloads[syncId] == nil ? .queued : .finishing
+        }
+        return record.downloadError.map { .failed($0) } ?? .available
+    }
+
     @discardableResult func requestDownload(syncId: String) -> Bool {
         guard let index = records.firstIndex(where: { $0.syncId == syncId }) else { return false }
         let previous = records[index]
@@ -87,6 +109,7 @@ final class HttpSyncCloudBooks {
         guard let index = records.firstIndex(where: { $0.syncId == syncId }) else { return }
         records[index].downloadRequestedAt = nil
         downloads.removeValue(forKey: syncId)
+        endTransfer(syncId: syncId)
         save()
     }
 
@@ -112,6 +135,7 @@ final class HttpSyncCloudBooks {
         records[index].downloadError = message
         records[index].downloadRequestedAt = nil
         downloads.removeValue(forKey: syncId)
+        endTransfer(syncId: syncId)
         save()
     }
 
@@ -125,7 +149,12 @@ final class HttpSyncCloudBooks {
     /// Shows installed manga, called by the manager only after a bookmark-map exchange that
     /// started once they were installed. A manga installed later waits for the next exchange.
     func reveal(_ syncIds: Set<String>) {
-        for record in records where record.awaitingBookmarkMap && syncIds.contains(record.syncId) { remove(syncId: record.syncId) }
+        let shown = records.filter { $0.awaitingBookmarkMap && syncIds.contains($0.syncId) }
+        guard !shown.isEmpty else { return }
+        for record in shown { remove(syncId: record.syncId) }
+        // In the same main-actor turn the shelf reloads, so the manga moves from Not downloaded
+        // onto its shelf without vanishing from both while the rest of the pass runs.
+        NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil)
     }
 
     @discardableResult func recordListed(syncId: String, manifest: HttpSyncPayloadManifest, shelfName: String?, title: String? = nil) -> Bool {

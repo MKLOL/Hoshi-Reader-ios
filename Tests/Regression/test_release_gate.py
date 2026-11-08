@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -68,8 +69,9 @@ class ReleaseGateTests(unittest.TestCase):
         import json
         playback_only = "Test Case '-[HoshiReaderUITests.PodcastTranscriptUITests testTimestampPlaybackWordLookupEnglishAndFollowing]' passed\n** TEST SUCCEEDED **"
         podcasts_only = playback_only + "\nTest Case '-[HoshiReaderUITests.PodcastTranscriptUITests testReaderAppearanceIsAvailableInsideTranscript]' passed"
-        success = podcasts_only + "\nTest Case '-[HoshiReaderUITests.StatisticsSyncUITests testSyncedActivityStreakControlsRetainedHistoryAndTrends]' passed"
-        for log, status, expected in [(success, 0, 0), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
+        statistics = podcasts_only + "\nTest Case '-[HoshiReaderUITests.StatisticsSyncUITests testSyncedActivityStreakControlsRetainedHistoryAndTrends]' passed"
+        success = statistics + "\nTest Case '-[HoshiReaderUITests.CloudMangaDownloadUITests testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage]' passed"
+        for log, status, expected in [(success, 0, 0), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
             with self.subTest(status=status, log=log), tempfile.TemporaryDirectory() as directory:
                 calls = []
                 def run(command, **kwargs):
@@ -78,12 +80,25 @@ class ReleaseGateTests(unittest.TestCase):
                         kwargs["stdout"].write(log)
                         return subprocess.CompletedProcess(command, status)
                     return subprocess.CompletedProcess(command, 0)
+                servers = []
+                @contextlib.contextmanager
+                def server():
+                    servers.append("started")
+                    yield "http://127.0.0.1:9", "fixture-token"
+                    servers.append("stopped")
                 with patch.object(gate, "ROOT", Path(directory)), \
+                     patch.object(gate, "sync_server", server), \
                      patch.object(gate.subprocess, "check_output", side_effect=[json.dumps({"runtimes": [self.runtime()]}), "owned-device"]), \
-                     patch.object(gate.subprocess, "run", side_effect=run):
+                     patch.object(gate.subprocess, "run", side_effect=lambda command, **kwargs: (envs.append(kwargs.get("env")), run(command, **kwargs))[1]):
+                    envs = []
                     self.assertEqual(gate.main(), expected)
+                self.assertEqual(servers, ["started", "stopped"], "the UI scenarios run against a live sync server")
+                self.assertEqual(calls[2], ["xcrun", "simctl", "boot", "owned-device"])
+                self.assertEqual(calls[3], ["xcrun", "simctl", "uninstall", "owned-device", "com.dragosristache.hoshireader"])
+                self.assertEqual(envs[4]["TEST_RUNNER_HOSHI_KV_BASE_URL"], "http://127.0.0.1:9")
                 self.assertIn("tools/sync-test-server", calls[0])
                 self.assertIn("Tests/Regression", calls[1])
-                self.assertIn("-only-testing:HoshiReaderUITests/PodcastTranscriptUITests", calls[2])
-                self.assertIn("-only-testing:HoshiReaderUITests/StatisticsSyncUITests", calls[2])
+                self.assertIn("-only-testing:HoshiReaderUITests/PodcastTranscriptUITests", calls[4])
+                self.assertIn("-only-testing:HoshiReaderUITests/StatisticsSyncUITests", calls[4])
+                self.assertIn("-only-testing:HoshiReaderUITests/CloudMangaDownloadUITests", calls[4])
                 self.assertEqual(calls[-1], ["xcrun", "simctl", "delete", "owned-device"])

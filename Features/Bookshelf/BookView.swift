@@ -67,10 +67,13 @@ struct BookCover: View {
     private var cover: some View {
         VStack(spacing: progress == nil ? 0 : 3) {
             CoverImage(url: book.coverURL, maxPixelSize: 768) { image in
-                image
-                    .resizable()
+                // Fill the book shape instead of stretching an image of another shape, centred
+                // as on Android; taps stay inside the shape, not on the cropped overflow.
+                Color.clear
                     .aspectRatio(coverAspectRatio, contentMode: .fit)
+                    .overlay { image.resizable().scaledToFill() }
                     .clipShape(RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous))
             } placeholder: {
                 RoundedRectangle(cornerRadius: innerCornerRadius, style: .continuous)
                     .fill(Color.gray.opacity(0.3))

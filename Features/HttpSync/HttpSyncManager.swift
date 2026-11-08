@@ -160,6 +160,7 @@ final class HttpSyncManager {
             return
         }
         var cursor = settings.lastSyncedAt
+        let queuedBefore = HttpSyncCloudBooks.shared.requestedSyncIds
 
         log.info("syncNow starting (cursor=\(cursor ?? "nil", privacy: .public))")
         isSyncing = true
@@ -186,6 +187,9 @@ final class HttpSyncManager {
             }
             // The shelf shortcut stays on Books while sync imports/removes titles and positions.
             NotificationCenter.default.post(name: .hoshiLibraryChanged, object: nil)
+            // A tap after this pass's queue phase (or on a manga it did not list) gets its own pass.
+            let queue = HttpSyncCloudBooks.shared.requestedSyncIds
+            if !Task.isCancelled, !queue.isEmpty, queue != queuedBefore, settings.currentConfig() == config { runCloudDownloads() }
         }
 
         // Network IO runs off-thread inside URLSession's async methods; the heavy file work (zip,
@@ -272,9 +276,16 @@ final class HttpSyncManager {
             return
         }
         let reconciler = HttpSyncReconciler(transport: transport, exchangeLegacyBookmarks: mapChanges.needsBootstrap)
-        var result = await reconciler.syncOnce(sinceCursor: cursor) { [weak self] update in
+        var revealedPositions = 0
+        var result = await reconciler.syncOnce(sinceCursor: cursor, onProgress: { [weak self] update in
             await MainActor.run { self?.progress = update; self?.transferProgress = nil }
-        }
+        }, onCloudBooksInstalled: { [weak self] in
+            // Each downloaded manga appears as soon as its own maps were exchanged.
+            guard let self, let revealed = await self.revealReadyDownloads(transport: transport, config: config) else { return nil }
+            revealedPositions += revealed.moved
+            return revealed.errors
+        })
+        result.downloadedBookmarks += revealedPositions
         result.uploadedAppSettings = appSettingsOutcome.uploaded
         result.downloadedAppSettings = appSettingsOutcome.downloaded
         result.uploadedBookmarks += mapChanges.uploadedBookmarks
@@ -439,9 +450,13 @@ final class HttpSyncManager {
         })
         Task {
             await self.syncNow()
-            guard !self.isSyncing, catalogue.generation == generation, let message = self.lastError else { return }
-            // An installed manga waiting to be shown is past failing; the next exchange shows it.
+            // A pass downloads, installs or fails every tapped manga it reaches. Only one that
+            // stopped before any (offline, an unreadable listing) leaves them waiting with nothing
+            // to show, so they get its error; installed manga waiting to be shown are progress.
+            guard !self.isSyncing, catalogue.generation == generation, let message = self.lastError,
+                  catalogue.requestedSyncIds.subtracting(catalogue.readySyncIds) == Set(requested.keys) else { return }
             for (id, stamp) in requested {
+                // An installed manga waiting to be shown is past failing; the next exchange shows it.
                 guard let record = catalogue.record(syncId: id), record.downloadRequestedAt == stamp, !record.awaitingBookmarkMap else { continue }
                 catalogue.failDownload(syncId: id, message: message)
             }

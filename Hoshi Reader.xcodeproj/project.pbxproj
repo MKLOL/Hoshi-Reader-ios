@@ -48,6 +48,7 @@
 		FACE0000000000000000000C /* PodcastTranscriptAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010C /* PodcastTranscriptAppearanceTests.swift */; };
 		FACE0000000000000000000D /* SentenceTextViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010D /* SentenceTextViewTests.swift */; };
 		FACE0000000000000000000E /* StatisticsSyncUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FACE0000000000000000010E /* StatisticsSyncUITests.swift */; };
+		3B33989DCC07AAFB7EE38493 /* CloudMangaDownloadUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2AF5ED25EC2EA0F07E55F9EC /* CloudMangaDownloadUITests.swift */; };
 		FC56FA32FDAE97DE72C0E276 /* CloudMangaParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23DA282F95004DD15997F902 /* CloudMangaParityTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -129,6 +130,7 @@
 		FACE0000000000000000010C /* PodcastTranscriptAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PodcastTranscriptAppearanceTests.swift; sourceTree = "<group>"; };
 		FACE0000000000000000010D /* SentenceTextViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceTextViewTests.swift; sourceTree = "<group>"; };
 		FACE0000000000000000010E /* StatisticsSyncUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatisticsSyncUITests.swift; sourceTree = "<group>"; };
+		2AF5ED25EC2EA0F07E55F9EC /* CloudMangaDownloadUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudMangaDownloadUITests.swift; sourceTree = "<group>"; };
 		FB85D2068BD83A02D2382159 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 /* End PBXFileReference section */
 
@@ -323,6 +325,7 @@
 			children = (
 				FACE00000000000000000109 /* PodcastTranscriptUITests.swift */,
 				FACE0000000000000000010E /* StatisticsSyncUITests.swift */,
+				2AF5ED25EC2EA0F07E55F9EC /* CloudMangaDownloadUITests.swift */,
 				D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */,
 				3F44EE274C884DCEA4A90C99 /* NewsTabUITests.swift */,
 			);
@@ -559,6 +562,7 @@
 			files = (
 				FACE00000000000000000009 /* PodcastTranscriptUITests.swift in Sources */,
 				FACE0000000000000000000E /* StatisticsSyncUITests.swift in Sources */,
+				3B33989DCC07AAFB7EE38493 /* CloudMangaDownloadUITests.swift in Sources */,
 				5784FD089920275CA0864F51 /* ZoomPopupUITests.swift in Sources */,
 				FA9B860BD4DC4F74B1B753D9 /* NewsTabUITests.swift in Sources */,
 			);

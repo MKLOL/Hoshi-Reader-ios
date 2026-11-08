@@ -94,6 +94,47 @@ nonisolated final class CloudMangaParityTests: XCTestCase {
         XCTAssertTrue(HttpSyncCloudBooks(directory: directory).hiddenInstalledSyncIds.isEmpty, "only the scoped catalogue knows it")
     }
 
+    @MainActor func testEachCellShowsWaitingDownloadingAndFinishingInTurn() {
+        let store = makeStore()
+        for id in ["first", "second"] {
+            store.recordListed(syncId: id, manifest: manifest, shelfName: nil)
+            XCTAssertEqual(store.downloadState(syncId: id), .available)
+            XCTAssertTrue(store.requestDownload(syncId: id))
+            XCTAssertEqual(store.downloadState(syncId: id), .queued, "a tap shows progress at once")
+        }
+        store.beginDownload(syncId: "first")
+        XCTAssertEqual(store.downloadState(syncId: "first"), .downloading(0))
+        XCTAssertEqual(store.downloadState(syncId: "second"), .queued, "only one manga transfers at a time")
+        store.updateTransfer(HttpSyncTransferSample(key: "books/first/payload.zip", uploading: false, completed: 25, total: 100))
+        XCTAssertEqual(store.downloadState(syncId: "first"), .downloading(0.25))
+        XCTAssertEqual(CloudBookshelfView.caption(.downloading(0.25)), "Downloading… 25%")
+        store.endTransfer(syncId: "first")
+        XCTAssertEqual(store.downloadState(syncId: "first"), .finishing, "an unpacking archive is not still downloading")
+        store.markAwaitingBookmarkMap(syncId: "first")
+        XCTAssertEqual(store.downloadState(syncId: "first"), .finishing)
+        store.failDownload(syncId: "second", message: "payload second: offline")
+        XCTAssertEqual(store.downloadState(syncId: "second"), .failed("payload second: offline"))
+        XCTAssertFalse(store.downloadState(syncId: "second").isActive)
+    }
+
+    @MainActor func testRevealReloadsTheShelfInTheSameTurnItLeavesNotDownloaded() {
+        let store = makeStore()
+        store.recordListed(syncId: "cloud", manifest: manifest, shelfName: nil)
+        XCTAssertTrue(store.requestDownload(syncId: "cloud"))
+        store.markAwaitingBookmarkMap(syncId: "cloud")
+        var recordWhenShelfReloaded: HttpSyncCloudBookRecord?? = .none
+        let observer = NotificationCenter.default.addObserver(forName: .hoshiLibraryChanged, object: nil, queue: nil) { _ in
+            MainActor.assumeIsolated { recordWhenShelfReloaded = .some(store.record(syncId: "cloud")) }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        store.reveal(["cloud"])
+        // Delivered before reveal returns: no frame can show the manga in neither place.
+        XCTAssertEqual(recordWhenShelfReloaded, .some(nil), "the shelf reloads once the record is gone, in the same call")
+        recordWhenShelfReloaded = .none
+        store.reveal(["cloud"])
+        XCTAssertEqual(recordWhenShelfReloaded, .none, "nothing shown, no reload")
+    }
+
     @MainActor func testOnlyTheArchiveInTransferCountsAsTransferring() {
         let store = makeStore()
         store.recordListed(syncId: "cloud", manifest: manifest, shelfName: nil)

@@ -245,7 +245,8 @@ class BookshelfViewModel {
 
             if let total = bookInfo?.characterCount, total > 0,
                let current = bookmark?.characterCount {
-                bookProgress[book.id] = Double(current) / Double(total)
+                // A position past the end (a stale bookmark or another device's count) reads as finished.
+                bookProgress[book.id] = min(1, max(0, Double(current) / Double(total)))
                 // For mokuro books characterCount is a page count (bookmark = page + 1), so surface
                 // a human page label instead of the EPUB percentage.
                 if book.resolvedContentType == .mokuro {

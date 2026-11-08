@@ -5,7 +5,7 @@
 ### Added
 
 - First-launch setup can save a shared sync token and install the recommended JMdict and Jiten dictionaries. Missing setup is offered again after a restore.
-- Manga available on your sync server appear under **Not downloaded**. Tap a cover to download with progress, cancellation and retry; interrupted downloads resume, and the reading position arrives before the manga opens. Chats, translations or statistics that cannot be read never block the download; they follow with a later sync.
+- Manga available on your sync server appear under **Not downloaded**. Tap covers to download them one after another: each shows Waiting, a filling ring and Finishing, then moves onto its shelf as soon as its own download is done. Downloads can be cancelled individually and retried; interrupted downloads resume, and the reading position arrives before the manga opens. Chats, translations or statistics that cannot be read never block the download; they follow with a later sync.
 - Manga OCR bubbles show offline furigana by default. Long text scrolls inside its bubble, and nearby pages prepare three ahead and two behind for faster turns.
 - Sentence reading offers stacked and side-by-side Japanese/English panes. Sentence turns update the regular bookmark and reading statistics, and **Finish book** records completion.
 - Manga, EPUB, shared appearance, Popup Cards and Sasayaki reading preferences sync across devices, including resets to defaults. Custom font files still need importing on each device.
@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- Covers whose image is not book-shaped, such as a two-page spread, fill their place on the shelf instead of being stretched.
 - Manga reading time no longer counts while the app is in the background after a slow book load. Reading days whose midnight is skipped or repeated by daylight saving time keep their reading and streak, and the goal bar matches the streak.
 - The first tap outside a dictionary popup closes it before another word or reader control acts.
 - Audiobooks keep playing through chapter restoration, and a playing audiobook keeps its page when another device's position arrives or the app returns to the foreground; Anki audio preparation runs off the main thread.

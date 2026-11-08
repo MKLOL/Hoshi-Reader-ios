@@ -151,7 +151,10 @@ struct HttpSyncReconciler {
     /// `onProgress` callback. Defaults to a no-op so tests and the push hooks are unaffected.
     func syncOnce(
         sinceCursor: String?,
-        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void = { _ in }
+        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void = { _ in },
+        // Shows installed manga once their maps were exchanged; returns that exchange's errors,
+        // or nil when the account changed and the pass must end.
+        onCloudBooksInstalled: @escaping () async -> [String]? = { [] }
     ) async -> HttpSyncResult {
         var result = HttpSyncResult()
         guard !Task.isCancelled else { return result }
@@ -160,7 +163,8 @@ struct HttpSyncReconciler {
             message: "Preparing sync",
             detail: "Connecting to the HTTP sync server."
         ))
-        let inbound = await pullChangedKeys(sinceCursor: sinceCursor, into: &result, onProgress: onProgress)
+        let inbound = await pullChangedKeys(sinceCursor: sinceCursor, into: &result, onProgress: onProgress,
+                                            onCloudBooksInstalled: onCloudBooksInstalled)
         // A partial/failed listing is not a safe snapshot of the server. Do not push local state
         // against it: that could overwrite remote changes the failed listing never revealed.
         guard !Task.isCancelled else { return result }
@@ -306,7 +310,8 @@ struct HttpSyncReconciler {
     private func pullChangedKeys(
         sinceCursor: String?,
         into result: inout HttpSyncResult,
-        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void
+        onProgress: @escaping @Sendable (HttpSyncProgress) async -> Void,
+        onCloudBooksInstalled: () async -> [String]?
     ) async -> InboundCursor {
         var cursor = InboundCursor()
         var appliedKeys = HttpSyncAppliedKeyStore.load()
@@ -351,6 +356,8 @@ struct HttpSyncReconciler {
         // reported like any book's and retried against the installed copy, so they never block it.
         var failedCloudIds: [String: String] = [:]
         var stagedCloudIds: Set<String> = []
+        // Manifests of manga only on the server; tapped ones download in pass 7.
+        var cloudManifests: [String: HttpSyncKvKeyMeta] = [:]
         var rootsBySyncId: [String: URL] = [:]
         var importedAtBySyncId: [String: String?] = [:]
         for book in localBooks {
@@ -556,14 +563,17 @@ struct HttpSyncReconciler {
                     if cloudBooks.recordListed(syncId: parsed.syncId, manifest: manifest, shelfName: remoteShelfBySyncId[parsed.syncId], title: remoteTitleBySyncId[parsed.syncId]) {
                         result.listedCloudBooks += 1
                     }
-                    if !requestedCloudIds.contains(parsed.syncId) {
+                    if rootsBySyncId[parsed.syncId] == nil {
+                        // Tapped manga download after the rest of the sync, one at a time (pass 7).
+                        cloudManifests[parsed.syncId] = meta
+                        if !requestedCloudIds.contains(parsed.syncId) { markHandled(meta) }
+                        continue
+                    }
+                    // A manga staged by an earlier pass is only installed below.
+                    if !requestedCloudIds.contains(parsed.syncId) || !cloudBooks.requestedSyncIds.contains(parsed.syncId) {
                         markHandled(meta)
                         continue
                     }
-                    // A stop or explicit cancellation during an awaited manifest fetch withdraws
-                    // this request before the large archive transfer starts.
-                    guard cloudBooks.requestedSyncIds.contains(parsed.syncId) else { markHandled(meta); continue }
-                    cloudBooks.beginDownload(syncId: parsed.syncId)
                 } catch {
                     guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     result.errors.append("payload \(parsed.syncId): \(errorText(error))")
@@ -671,25 +681,8 @@ struct HttpSyncReconciler {
                 continue
             }
             do {
-                switch parsed.kind {
-                case .bookmark:
-                    if try await applyBookmarkFromRemote(root: root, meta: meta) { result.downloadedBookmarks += 1 }
-                case .chat:
-                    if try await applyChatEntryFromRemote(root: root, meta: meta) { result.downloadedChatEntries += 1 }
-                case .pretranslations:
-                    if try await applyPretranslationsFromRemote(root: root, meta: meta) { result.downloadedPretranslations += 1 }
-                case .sentences:
-                    if try await applySentenceTranslationsFromRemote(
-                        root: root,
-                        syncId: parsed.syncId,
-                        meta: meta
-                    ) { result.downloadedPretranslations += 1 }
-                default: break
-                }
-                markHandled(
-                    meta,
-                    localArtifact: localArtifactAfterApplying(root: root, kind: parsed.kind)
-                )
+                try await applyReadingItem(parsed, meta: meta, root: root, result: &result)
+                markHandled(meta, localArtifact: localArtifactAfterApplying(root: root, kind: parsed.kind))
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("\(parsed.syncId): \(errorText(error))")
@@ -718,17 +711,7 @@ struct HttpSyncReconciler {
             }
             guard let root = rootsBySyncId[id], cloudBooks.requestedSyncIds.contains(id) else { continue }
             do {
-                if stagedCloudIds.contains(id) {
-                    let books = try BookStorage.getBooksDirectory()
-                    let installed = uniqueDirectory(base: books.appendingPathComponent(id, isDirectory: true))
-                    guard let old = BookStorage.loadMetadata(root: root) else { throw HttpSyncError("Downloaded manga metadata is missing.") }
-                    let cover = old.cover.map { "Books/\(installed.lastPathComponent)/\(($0 as NSString).lastPathComponent)" }
-                    let metadata = BookMetadata(id: old.id, title: old.title, cover: cover, folder: installed.lastPathComponent,
-                        lastAccess: old.lastAccess, contentType: .mokuro, importedAt: old.importedAt, syncId: id)
-                    try BookStorage.save(metadata, inside: root, as: FileNames.metadata)
-                    try FileManager.default.moveItem(at: root, to: installed)
-                    rootsBySyncId[id] = installed
-                }
+                if stagedCloudIds.contains(id) { rootsBySyncId[id] = try installStagedCloudBook(syncId: id, root: root) }
                 cloudBooks.markAwaitingBookmarkMap(syncId: id)
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
@@ -736,6 +719,82 @@ struct HttpSyncReconciler {
                 result.errors.append("Installing \(id): \(errorText(error))")
             }
         }
+        if cloudBooks.hasReadyDownloads {
+            guard let errors = await onCloudBooksInstalled() else { flushAppliedKeys(); return cursor }
+            for message in errors where !result.errors.contains(message) { result.errors.append(message) }
+        }
+
+        // Pass 7: tapped manga, one at a time in tap order. Each downloads, gets its own reading
+        // data, is installed and appears on its shelf before the next download starts, so a long
+        // queue never holds back a finished manga. Taps made meanwhile join this queue.
+        var attemptedCloudIds: Set<String> = []
+        func nextTappedManga() -> String? {
+            cloudBooks.records
+                .filter { $0.downloadRequestedAt != nil && !$0.awaitingBookmarkMap && cloudManifests[$0.syncId] != nil && !attemptedCloudIds.contains($0.syncId) }
+                .min { ($0.downloadRequestedAt ?? "", $0.syncId) < ($1.downloadRequestedAt ?? "", $1.syncId) }?.syncId
+        }
+        while let id = nextTappedManga() {
+            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            attemptedCloudIds.insert(id)
+            let meta = cloudManifests[id]!
+            cloudBooks.beginDownload(syncId: id)
+            let root: URL
+            do {
+                let imported = try await importRemoteOnlyBook(syncId: id, format: .mokuro, stagingRoot: cloudBooks.stagingRoot(syncId: id))
+                cloudBooks.endTransfer(syncId: id)
+                guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                guard let imported else { markUnhandled(meta); continue }
+                root = imported
+                result.downloadedPayloads += 1
+                markHandled(meta)
+            } catch {
+                cloudBooks.endTransfer(syncId: id)
+                guard cloudBooks.generation == cloudGeneration, !Task.isCancelled else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+                result.errors.append("payload \(id): \(errorText(error))")
+                cloudBooks.failDownload(syncId: id, message: errorText(error))
+                // A `skip` error (e.g. can't ever fit this book) is not retried by the next sync.
+                if (error as? HttpSyncError)?.skip == true { markHandled(meta) } else { markUnhandled(meta) }
+                continue
+            }
+            // Its shelf, translations, chats and statistics, as the passes above apply them to
+            // installed books. Their errors are reported and retried later, never failing the manga.
+            let staged = BookStorage.loadMetadata(root: root)?.id
+            var placement = HttpSyncShelfStateStore.load()
+            for (parsed, placementMeta) in placementMetadataKeys where parsed.syncId == id {
+                do {
+                    _ = try await applyShelfPlacementFromRemote(syncId: id, bookId: staged, meta: placementMeta,
+                                                                snapshot: ShelfSnapshot.load(), shelfState: &placement)
+                    markHandled(placementMeta)
+                } catch { result.errors.append("metadata \(id): \(errorText(error))") }
+            }
+            HttpSyncShelfStateStore.save(placement)
+            for (parsed, itemMeta) in bookmarksAndChats where parsed.syncId == id {
+                do {
+                    try await applyReadingItem(parsed, meta: itemMeta, root: root, result: &result)
+                    markHandled(itemMeta, localArtifact: localArtifactAfterApplying(root: root, kind: parsed.kind))
+                } catch { result.errors.append("\(id): \(errorText(error))") }
+            }
+            do {
+                try await HttpReadingStatisticsSync.shared.exchange(root: root, syncId: id, transport: transport, listing: statisticsMetas)
+                for key in ["books/\(id)/statistics", "books/\(id)/manga_statistics"] {
+                    if let statisticsMeta = statisticsMetas[key] { markHandled(statisticsMeta) }
+                }
+            } catch { result.errors.append("Statistics \(id): \(errorText(error))") }
+            guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
+            // Cancelled while it downloaded: the staged copy is kept for a later tap.
+            guard cloudBooks.requestedSyncIds.contains(id) else { continue }
+            do {
+                rootsBySyncId[id] = try installStagedCloudBook(syncId: id, root: root)
+                cloudBooks.markAwaitingBookmarkMap(syncId: id)
+            } catch {
+                cloudBooks.failDownload(syncId: id, message: errorText(error))
+                result.errors.append("Installing \(id): \(errorText(error))")
+                continue
+            }
+            guard let errors = await onCloudBooksInstalled() else { flushAppliedKeys(); return cursor }
+            for message in errors where !result.errors.contains(message) { result.errors.append(message) }
+        }
+
         await cloudBooks.fetchMissingCovers(transport: transport)
 
         // Plain loop, not `.filter{}.count`: a @MainActor closure into a stdlib generic carries a
@@ -747,6 +806,34 @@ struct HttpSyncReconciler {
         result.remoteOnlyBooks = remoteOnly
         flushAppliedKeys()
         return cursor
+    }
+
+    /// Applies one remote bookmark, chat, offline translation set or sentence translation set.
+    private func applyReadingItem(_ parsed: ParsedBookKey, meta: HttpSyncKvKeyMeta, root: URL, result: inout HttpSyncResult) async throws {
+        switch parsed.kind {
+        case .bookmark:
+            if try await applyBookmarkFromRemote(root: root, meta: meta) { result.downloadedBookmarks += 1 }
+        case .chat:
+            if try await applyChatEntryFromRemote(root: root, meta: meta) { result.downloadedChatEntries += 1 }
+        case .pretranslations:
+            if try await applyPretranslationsFromRemote(root: root, meta: meta) { result.downloadedPretranslations += 1 }
+        case .sentences:
+            if try await applySentenceTranslationsFromRemote(root: root, syncId: parsed.syncId, meta: meta) { result.downloadedPretranslations += 1 }
+        default: break
+        }
+    }
+
+    /// Moves a downloaded manga from the catalogue's staging area into the library.
+    private func installStagedCloudBook(syncId id: String, root: URL) throws -> URL {
+        let books = try BookStorage.getBooksDirectory()
+        let installed = uniqueDirectory(base: books.appendingPathComponent(id, isDirectory: true))
+        guard let old = BookStorage.loadMetadata(root: root) else { throw HttpSyncError("Downloaded manga metadata is missing.") }
+        let cover = old.cover.map { "Books/\(installed.lastPathComponent)/\(($0 as NSString).lastPathComponent)" }
+        let metadata = BookMetadata(id: old.id, title: old.title, cover: cover, folder: installed.lastPathComponent,
+            lastAccess: old.lastAccess, contentType: .mokuro, importedAt: old.importedAt, syncId: id)
+        try BookStorage.save(metadata, inside: root, as: FileNames.metadata)
+        try FileManager.default.moveItem(at: root, to: installed)
+        return installed
     }
 
     private func localBookId(_ books: [LocalBook], _ syncId: String) -> UUID? {

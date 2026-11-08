@@ -42,6 +42,14 @@ struct HoshiReaderApp: App {
             UserDefaults.standard.set(3, forKey: ReadingDay.resetKey)
             UserDefaults.standard.set(10, forKey: ReadingDay.goalKey)
         }
+        // Other UI scenarios run without sync, whatever an earlier scenario configured.
+        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_PODCAST"] == "1" { HttpSyncSettingsStore.shared.token = "" }
+        // CloudMangaDownloadUITests: the gate's local sync server, as a pasted shared token would.
+        if let url = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_SYNC_URL"],
+           let token = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_SYNC_TOKEN"] {
+            HttpSyncSettingsStore.shared.baseURL = url
+            HttpSyncSettingsStore.shared.token = token
+        }
         OfflineLlmLaunchSelfTest.startIfRequested()
         #endif
     }

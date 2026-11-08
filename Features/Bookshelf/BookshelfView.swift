@@ -82,7 +82,8 @@ struct BookshelfView: View {
                         viewModel.loadBooks()
                     }
                     .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in
-                        viewModel.loadBooks()
+                        // A downloaded manga moves from Not downloaded onto its shelf.
+                        withAnimation(.snappy) { viewModel.loadBooks() }
                     }
                     .fileImporter(
                         isPresented: $viewModel.isImporting,
