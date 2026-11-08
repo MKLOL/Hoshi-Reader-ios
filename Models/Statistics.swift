@@ -37,12 +37,17 @@ nonisolated struct Statistics: Codable, Equatable, Sendable {
     var readingTimeByHour: [String: Double] = [:]
     var timeZone: String? = nil
     var importedBaseline: ImportedReadingBaseline? = nil
+    /// Completed manga pages by active seconds, cumulative for this day and device. Android
+    /// writes it as a JSON object with decimal string keys; a histogram keeps the median
+    /// reproducible across openings and devices without a record per page turn.
+    var mangaPageSeconds: [Int: Int] = [:]
 }
 
 nonisolated extension Statistics {
     private enum CodingKeys: String, CodingKey {
         case title, dateKey, charactersRead, readingTime, minReadingSpeed, altMinReadingSpeed
         case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour, timeZone, importedBaseline
+        case mangaPageSeconds
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -63,6 +68,8 @@ nonisolated extension Statistics {
         importedBaseline = try values.decodeIfPresent(ImportedReadingBaseline.self, forKey: .importedBaseline)
         timeZone = try values.decodeIfPresent(String.self, forKey: .timeZone)
         readingTimeByHour = try values.decodeIfPresent([String: Double].self, forKey: .readingTimeByHour) ?? [:]
+        let pages = try values.decodeIfPresent([String: Int].self, forKey: .mangaPageSeconds) ?? [:]
+        mangaPageSeconds = Statistics.sumPageSeconds(pages.compactMap { key, count in Int(key).map { [$0: count] } })
     }
     func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
@@ -80,5 +87,8 @@ nonisolated extension Statistics {
         try values.encodeIfPresent(timeZone, forKey: .timeZone)
         try values.encodeIfPresent(importedBaseline, forKey: .importedBaseline)
         if !readingTimeByHour.isEmpty { try values.encode(readingTimeByHour, forKey: .readingTimeByHour) }
+        if !mangaPageSeconds.isEmpty {
+            try values.encode(Dictionary(uniqueKeysWithValues: mangaPageSeconds.map { (String($0.key), $0.value) }), forKey: .mangaPageSeconds)
+        }
     }
 }

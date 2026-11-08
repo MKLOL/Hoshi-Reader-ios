@@ -658,6 +658,9 @@ def serve(host: str, port: int, token: str, max_body: int, state_path: str | Non
     handler = type("BoundHandler", (Handler,), {"store": store, "token": token, "max_body": max_body})
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
+    # Handler threads are daemons serving clients (such as the simulator's background transfer
+    # daemon) that need not finish their connections; shutdown must not wait for them.
+    server.block_on_close = False
 
     def shutdown(*_args) -> None:
         if state_path:

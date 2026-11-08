@@ -62,7 +62,14 @@ window.hoshiReader = {
     },
     
     getRect(target) {
-        const rect = target.getClientRects()[0];
+        let rect = target.getClientRects()[0];
+        if (!rect && target.nodeType === Node.ELEMENT_NODE && target.firstChild) {
+            // A sentence-break host (display: contents), such as a fragment target, has no
+            // box of its own; its text does.
+            const contents = document.createRange();
+            contents.selectNodeContents(target);
+            rect = contents.getClientRects()[0];
+        }
         return rect || target.getBoundingClientRect();
     },
     

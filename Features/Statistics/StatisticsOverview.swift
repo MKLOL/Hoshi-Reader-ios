@@ -12,7 +12,12 @@ nonisolated enum ReadingDay {
     static func date(at instant: Date, resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> Date {
         let day = calendar.startOfDay(for: instant)
         return calendar.component(.hour, from: instant) < min(23, max(0, resetHour))
-            ? calendar.date(byAdding: .day, value: -1, to: day)! : day
+            ? shift(day, by: -1, calendar: calendar) : day
+    }
+    /// The day [days] away, at its first instant. Adding days to a skipped or repeated
+    /// midnight lands on another instant of the target day; this always returns its start.
+    static func shift(_ day: Date, by days: Int, calendar: Calendar = StatisticsZone.calendar) -> Date {
+        calendar.startOfDay(for: calendar.date(byAdding: .day, value: days, to: day.addingTimeInterval(12 * 3600))!)
     }
     static func boundary(on day: Date, resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> Date {
         calendar.date(bySettingHour: min(23, max(0, resetHour)), minute: 0, second: 0, of: calendar.startOfDay(for: day))!
@@ -27,11 +32,17 @@ nonisolated enum ReadingDay {
         return formatter.string(from: date)
     }
     static func parse(_ key: String, calendar: Calendar = StatisticsZone.calendar) -> Date? {
+        // Validate the text in UTC: a zone whose DST change skips midnight has no 00:00 that day,
+        // but the day still begins at its first valid instant.
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
         let formatter = DateFormatter()
-        formatter.calendar = gregorian(calendar); formatter.timeZone = calendar.timeZone
+        formatter.calendar = utc; formatter.timeZone = utc.timeZone
         formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"; formatter.isLenient = false
-        guard let date = formatter.date(from: key), self.key(date, calendar: calendar) == key else { return nil }
-        return date
+        guard let parsed = formatter.date(from: key), formatter.string(from: parsed) == key else { return nil }
+        var components = utc.dateComponents([.year, .month, .day], from: parsed)
+        components.calendar = gregorian(calendar); components.timeZone = calendar.timeZone
+        guard let date = gregorian(calendar).date(from: components) else { return nil }
+        return gregorian(calendar).startOfDay(for: date)
     }
     /// Hour keys deliberately have no zone: both clients interpret the reader's recorded local date/hour.
     static func hour(_ key: String, calendar: Calendar = StatisticsZone.calendar) -> (date: Date, hour: Int)? {
@@ -52,7 +63,7 @@ nonisolated enum ReadingDay {
     }
 
     static func hourDay(_ hour: (date: Date, hour: Int), reset: Int, calendar: Calendar) -> Date {
-        hour.hour < reset ? calendar.date(byAdding: .day, value: -1, to: hour.date)! : hour.date
+        hour.hour < reset ? shift(hour.date, by: -1, calendar: calendar) : hour.date
     }
     static func hours(from start: Date, to end: Date, calendar: Calendar = .current) -> [String: Double] {
         guard end > start else { return [:] }
@@ -80,7 +91,7 @@ nonisolated enum ReadingDay {
         var seconds: [Date: Double] = [:], shares: [String: [Date: Double]] = [:], dateShares: [String: [Date: Double]] = [:]
         for row in rows {
             guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
-            let previous = calendar.date(byAdding: .day, value: -1, to: date)!
+            let previous = shift(date, by: -1, calendar: calendar)
             let recorded = row.recordedZone(target: calendar.timeZone)
             let convert = recorded != nil && recorded != calendar.timeZone
             let hours = reset == 0 && !convert ? [] : row.readingTimeByHour.compactMap { key, value -> (Date, Double)? in
@@ -145,7 +156,7 @@ nonisolated enum ReadingDay {
             let unknown = max(0, row.readingTime - known)
             if unknown > 0.001 {
                 credit(date, unknown)
-                if reset > 0 { credit(calendar.date(byAdding: .day, value: -1, to: date)!, unknown); estimated = true }
+                if reset > 0 { credit(shift(date, by: -1, calendar: calendar), unknown); estimated = true }
             }
         }
         return (result.keys.sorted().map { DailyReading(date: $0, seconds: result[$0]!) }, estimated)
@@ -239,12 +250,12 @@ nonisolated enum StatisticsMath {
     static func streak(_ days: [DailyReading], goalMinutes: Int, now: Date = .now, resetHour: Int = 0, calendar: Calendar = StatisticsZone.calendar) -> (current: Int, longest: Int) {
         let today = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         let eligible = Set(days.filter { $0.date <= today && $0.seconds >= Double(min(120, max(1, goalMinutes))) * 60 }.map(\.date))
-        var cursor = eligible.contains(today) ? today : calendar.date(byAdding: .day, value: -1, to: today)!
+        var cursor = eligible.contains(today) ? today : ReadingDay.shift(today, by: -1, calendar: calendar)
         var current = 0
-        while eligible.contains(cursor) { current += 1; cursor = calendar.date(byAdding: .day, value: -1, to: cursor)! }
+        while eligible.contains(cursor) { current += 1; cursor = ReadingDay.shift(cursor, by: -1, calendar: calendar) }
         var longest = 0; var run = 0; var previous: Date?
         for date in eligible.sorted() {
-            run = previous.flatMap { calendar.date(byAdding: .day, value: 1, to: $0) } == date ? run + 1 : 1
+            run = previous.map { ReadingDay.shift($0, by: 1, calendar: calendar) } == date ? run + 1 : 1
             longest = max(longest, run); previous = date
         }
         return (current, longest)

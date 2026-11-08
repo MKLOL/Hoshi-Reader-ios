@@ -258,6 +258,10 @@ final class HttpSyncManager {
             result.uploadedAppSettings = appSettingsOutcome.uploaded
             result.downloadedAppSettings = appSettingsOutcome.downloaded
             result.errors = statisticsErrors + positions.errors + readerPreferencesOutcome.errors + (appSettingsOutcome.error.map { [$0] } ?? [])
+            // A manga installed by a stopped or failed pass is still waiting to be shown.
+            guard let revealed = await revealReadyDownloads(transport: transport, config: config) else { return }
+            result.downloadedBookmarks += revealed.moved
+            for message in revealed.errors where !result.errors.contains(message) { result.errors.append(message) }
             lastErrors = result.errors
             lastError = result.errors.first
             lastStatus = result.summary() + Self.readerPreferencesSummary(readerPreferencesOutcome)
@@ -294,22 +298,9 @@ final class HttpSyncManager {
             catch { result.errors.append(error.localizedDescription) }
         }
 
-        if HttpSyncCloudBooks.shared.records.contains(where: \.awaitingBookmarkMap), settings.currentConfig() == config {
-            do {
-                let afterImport = try await batchState.syncMaps(transport: transport)
-                let importedPositions = await HttpReadingPositionLane.shared.run(
-                    transport: transport, listing: afterImport.statisticsMetadata, scope: statisticsScope(config)
-                ) { self.settings.currentConfig() == config }
-                result.downloadedBookmarks += importedPositions.moved.count
-                for message in importedPositions.errors where !result.errors.contains(message) { result.errors.append(message) }
-                try Task.checkCancellation()
-                guard settings.currentConfig() == config else { return }
-                HttpSyncCloudBooks.shared.finishDownloads(success: importedPositions.errors.isEmpty)
-            } catch {
-                HttpSyncCloudBooks.shared.finishDownloads(success: false)
-                result.errors.append("Could not finish syncing the downloaded manga's reading position.")
-            }
-        }
+        guard let revealed = await revealReadyDownloads(transport: transport, config: config) else { return }
+        result.downloadedBookmarks += revealed.moved
+        for message in revealed.errors where !result.errors.contains(message) { result.errors.append(message) }
         if let newCursor = result.newLastSyncedAt {
             settings.recordCursor(newCursor, for: config)
         }
@@ -325,6 +316,29 @@ final class HttpSyncManager {
             lastError = result.errors.first
             log.error("syncNow finished with \(result.errors.count) error(s): \(result.summary(), privacy: .public)")
             for err in result.errors { log.error("syncNow error: \(err, privacy: .public)") }
+        }
+    }
+
+    /// Shows installed cloud manga once the bookmark maps and position histories have seen them.
+    /// As on Android, another book's errors (and position histories, which keep syncing) never
+    /// hide a downloaded manga. A stop or failed map exchange leaves it for the next pass to show.
+    /// Returns nil when the account changed and the pass must end.
+    private func revealReadyDownloads(transport: HttpSyncKvTransport, config: HttpSyncConfig) async -> (moved: Int, errors: [String])? {
+        let ready = HttpSyncCloudBooks.shared.readySyncIds
+        guard !ready.isEmpty, settings.currentConfig() == config else { return (0, []) }
+        do {
+            let afterImport = try await batchState.syncMaps(transport: transport)
+            let positions = await HttpReadingPositionLane.shared.run(
+                transport: transport, listing: afterImport.statisticsMetadata, scope: statisticsScope(config)
+            ) { self.settings.currentConfig() == config }
+            try Task.checkCancellation()
+            guard settings.currentConfig() == config else { return nil }
+            HttpSyncCloudBooks.shared.reveal(ready)
+            return (positions.moved.count, positions.errors)
+        } catch is CancellationError {
+            return (0, [])
+        } catch {
+            return (0, ["Could not finish syncing the downloaded manga's reading position."])
         }
     }
 
@@ -408,7 +422,7 @@ final class HttpSyncManager {
     func resumePolling() {
         foreground = true
         HttpSyncCloudBooks.shared.activateScope(config: settings.currentConfig())
-        if settings.isConfigured, HttpSyncCloudBooks.shared.hasRequestedDownloads { runCloudDownloads() }
+        if settings.isConfigured, HttpSyncCloudBooks.shared.hasRequestedDownloads || HttpSyncCloudBooks.shared.hasReadyDownloads { runCloudDownloads() }
         syncInBackground()
     }
 
@@ -426,15 +440,24 @@ final class HttpSyncManager {
         Task {
             await self.syncNow()
             guard !self.isSyncing, catalogue.generation == generation, let message = self.lastError else { return }
-            for (id, stamp) in requested where catalogue.record(syncId: id)?.downloadRequestedAt == stamp {
+            // An installed manga waiting to be shown is past failing; the next exchange shows it.
+            for (id, stamp) in requested {
+                guard let record = catalogue.record(syncId: id), record.downloadRequestedAt == stamp, !record.awaitingBookmarkMap else { continue }
                 catalogue.failDownload(syncId: id, message: message)
             }
         }
     }
 
+    /// A manga still waiting for its turn is skipped by the running pass; only one whose archive
+    /// is transferring stops the pass. Other tapped manga keep their requests and continue.
     func cancelCloudBookDownload(syncId: String) {
-        HttpSyncCloudBooks.shared.cancelRequest(syncId: syncId)
-        cancelSync()
+        let catalogue = HttpSyncCloudBooks.shared
+        let transferring = isSyncing && catalogue.transferringSyncId == syncId
+        catalogue.cancelRequest(syncId: syncId)
+        guard transferring else { return }
+        cancellationGeneration &+= 1
+        reconcileTask?.cancel()
+        if catalogue.hasRequestedDownloads { runCloudDownloads() }
     }
 
     func suspendPolling() {
@@ -528,11 +551,14 @@ final class HttpSyncManager {
         do {
             let config = settings.currentConfig()
             HttpSyncCloudBooks.shared.activateScope(config: config)
+            let ready = HttpSyncCloudBooks.shared.readySyncIds
             let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
             let changes = try await batchState.syncMaps(transport: transport)
             _ = await HttpReadingPositionLane.shared.run(
                 transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)
             ) { self.settings.currentConfig() == config }
+            // A manga left waiting by a stopped or failed pass is shown once its maps were exchanged.
+            if !ready.isEmpty, settings.currentConfig() == config { HttpSyncCloudBooks.shared.reveal(ready) }
             HttpStatisticsLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config))
             HttpReaderPreferencesLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
             notePushOutcome(success: true)

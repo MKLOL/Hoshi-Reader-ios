@@ -31,6 +31,11 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
             deviceId = UUID().uuidString.lowercased()
             defaults.set(deviceId, forKey: "readerPreferencesDeviceId")
         }
+        #if DEBUG
+        // UI tests choose preferences with launch arguments; an earlier launch's journal must not
+        // override them.
+        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1" { defaults.removeObject(forKey: journalKey) }
+        #endif
         if let data = defaults.data(forKey: journalKey) {
             do {
                 records = try JSONDecoder().decode([String: ReaderPreferenceRecord].self, from: data)
@@ -38,6 +43,15 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
             } catch { readError = error }
         }
     }
+
+    #if DEBUG
+    /// Forgets every recorded preference, as on a new installation, so the next attached
+    /// configuration starts from its stored values. Tests use it to start from known defaults.
+    func reset() {
+        config = nil; records = [:]; lastValues = [:]; readError = nil
+        defaults.removeObject(forKey: journalKey)
+    }
+    #endif
 
     func attach(_ config: UserConfig) {
         self.config = config

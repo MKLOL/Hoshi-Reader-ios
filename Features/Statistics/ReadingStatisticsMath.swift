@@ -62,42 +62,69 @@ nonisolated extension Statistics {
         var result: [String: Statistics] = [:]
         for incoming in entries where incoming.readingTime.isFinite && incoming.readingTime >= 0 && incoming.charactersRead >= 0 {
             let entry = incoming.withImportedResidual()
-            if let old = result[entry.key] {
-                if let merged = old.mergingImportedBaseline(entry) { result[entry.key] = merged; continue }
-                if old.lastStatisticModified == entry.lastStatisticModified, let candidate = entry.importedBaseline {
-                    if old.importedBaseline == nil { result[entry.key] = entry; continue }
-                    let prior = old.importedBaseline!
-                    if candidate.sourceModified != prior.sourceModified {
-                        if candidate.sourceModified > prior.sourceModified { result[entry.key] = entry }
-                        continue
-                    }
-                    if candidate.readingTime != prior.readingTime {
-                        if candidate.readingTime > prior.readingTime { result[entry.key] = entry }
-                        continue
-                    }
-                    if candidate.charactersRead != prior.charactersRead {
-                        if candidate.charactersRead > prior.charactersRead { result[entry.key] = entry }
-                        continue
-                    }
-                } else if old.lastStatisticModified == entry.lastStatisticModified, old.importedBaseline != nil { continue }
-                if old.lastStatisticModified > entry.lastStatisticModified { continue }
-                if old.lastStatisticModified == entry.lastStatisticModified {
-                    // Old clients strip unknown fields. Otherwise-identical rows keep the richer
-                    // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
-                    if old.tieBreak == entry.tieBreak {
-                        if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone != nil && entry.timeZone == nil { continue }
-                        if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone == nil && entry.timeZone != nil { result[entry.key] = entry; continue }
-                        let oldHours = old.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
-                        let newHours = entry.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
-                        let oldKeys = old.readingTimeByHour.keys.sorted().map { "\($0)=\(old.readingTimeByHour[$0]!)" }.joined(separator: ",")
-                        let newKeys = entry.readingTimeByHour.keys.sorted().map { "\($0)=\(entry.readingTimeByHour[$0]!)" }.joined(separator: ",")
-                        if oldHours > newHours || (oldHours == newHours && !oldKeys.utf16.lexicographicallyPrecedes(newKeys.utf16)) { continue }
-                    } else if !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16) { continue }
-                }
-            }
-            result[entry.key] = entry
+            guard let old = result[entry.key] else { result[entry.key] = entry; continue }
+            var winner = preferred(old, entry)
+            // Samples are append-only per origin, independently of the scalar timestamp. A
+            // same-day restore or older client can send a newer row missing earlier samples.
+            // Maxima retain that evidence; summing snapshots would count every retry twice.
+            winner.mangaPageSeconds = old.mangaPageSeconds.merging(entry.mangaPageSeconds, uniquingKeysWith: max)
+            result[entry.key] = winner
         }
         return result.values.sorted { $0.key < $1.key }
+    }
+    private static func preferred(_ old: Statistics, _ entry: Statistics) -> Statistics {
+        if let merged = old.mergingImportedBaseline(entry) { return merged }
+        if old.lastStatisticModified == entry.lastStatisticModified, let candidate = entry.importedBaseline {
+            guard let prior = old.importedBaseline else { return entry }
+            if candidate.sourceModified != prior.sourceModified { return candidate.sourceModified > prior.sourceModified ? entry : old }
+            if candidate.readingTime != prior.readingTime { return candidate.readingTime > prior.readingTime ? entry : old }
+            if candidate.charactersRead != prior.charactersRead { return candidate.charactersRead > prior.charactersRead ? entry : old }
+        } else if old.lastStatisticModified == entry.lastStatisticModified, old.importedBaseline != nil { return old }
+        if old.lastStatisticModified > entry.lastStatisticModified { return old }
+        if old.lastStatisticModified == entry.lastStatisticModified {
+            // Old clients strip unknown fields. Otherwise-identical rows keep the richer
+            // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
+            if old.tieBreak == entry.tieBreak {
+                if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone != nil && entry.timeZone == nil { return old }
+                if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone == nil && entry.timeZone != nil { return entry }
+                // Android orders equal stamps by the full row text, where the zone follows the hours.
+                if old.readingTimeByHour == entry.readingTimeByHour, let oldZone = old.timeZone, let newZone = entry.timeZone, oldZone != newZone {
+                    return (newZone + ",").utf16.lexicographicallyPrecedes((oldZone + ",").utf16) ? old : entry
+                }
+                let oldHours = old.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
+                let newHours = entry.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
+                let oldKeys = old.readingTimeByHour.keys.sorted().map { "\($0)=\(old.readingTimeByHour[$0]!)" }.joined(separator: ",")
+                let newKeys = entry.readingTimeByHour.keys.sorted().map { "\($0)=\(entry.readingTimeByHour[$0]!)" }.joined(separator: ",")
+                if oldHours > newHours || (oldHours == newHours && !oldKeys.utf16.lexicographicallyPrecedes(newKeys.utf16)) { return old }
+            } else if !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16) { return old }
+        }
+        return entry
+    }
+    /// Adds disjoint page samples (different days/devices, or one newly completed page).
+    static func sumPageSeconds(_ histograms: [[Int: Int]]) -> [Int: Int] {
+        var result: [Int: Int] = [:]
+        for histogram in histograms {
+            for (seconds, count) in histogram where seconds > 0 && count > 0 {
+                result[seconds] = StatisticsNumbers.adding(result[seconds] ?? 0, count)
+            }
+        }
+        return result
+    }
+    /// Weighted median of completed page durations, averaging both middle pages for even counts.
+    var medianPageSeconds: Double? {
+        let samples = mangaPageSeconds.filter { $0.key > 0 && $0.value > 0 }.sorted { $0.key < $1.key }
+        let count = samples.reduce(0) { StatisticsNumbers.adding($0, $1.value) }
+        guard count > 0 else { return nil }
+        let lower = (count - 1) / 2, upper = count / 2
+        var seen = 0
+        var lowerSeconds = 0
+        for (seconds, occurrences) in samples {
+            let next = StatisticsNumbers.adding(seen, occurrences)
+            if seen <= lower && next > lower { lowerSeconds = seconds }
+            if next > upper { return (Double(lowerSeconds) + Double(seconds)) / 2 }
+            seen = next
+        }
+        return nil
     }
     static func total(_ entries: [Statistics], title: String = "", day: String = "") -> Statistics {
         var total = empty(title: title, day: day)

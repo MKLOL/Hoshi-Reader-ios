@@ -34,15 +34,18 @@ nonisolated final class CloudMangaParityTests: XCTestCase {
         let store = makeStore()
         store.recordListed(syncId: "cloud", manifest: manifest, shelfName: nil)
         XCTAssertTrue(store.requestDownload(syncId: "cloud"))
-        store.markAwaitingBookmarkMap(syncId: "cloud")
+        store.failDownload(syncId: "cloud", message: "payload cloud: unreachable")
         XCTAssertEqual(store.hiddenInstalledSyncIds, ["cloud"])
-        store.finishDownloads(success: false)
-        XCTAssertEqual(store.hiddenInstalledSyncIds, ["cloud"])
-        XCTAssertNotNil(store.record(syncId: "cloud")?.downloadError)
+        XCTAssertEqual(store.record(syncId: "cloud")?.downloadError, "payload cloud: unreachable")
         XCTAssertFalse(store.hasRequestedDownloads)
         XCTAssertTrue(store.requestDownload(syncId: "cloud"))
         XCTAssertNil(store.record(syncId: "cloud")?.downloadError)
-        store.finishDownloads(success: true)
+        store.markAwaitingBookmarkMap(syncId: "cloud")
+        XCTAssertEqual(store.hiddenInstalledSyncIds, ["cloud"])
+        // Only an exchange that started after the install may show it.
+        store.reveal([])
+        XCTAssertEqual(store.readySyncIds, ["cloud"])
+        store.reveal(["cloud"])
         XCTAssertNil(store.record(syncId: "cloud"))
         XCTAssertTrue(store.hiddenInstalledSyncIds.isEmpty)
     }
@@ -75,6 +78,49 @@ nonisolated final class CloudMangaParityTests: XCTestCase {
         XCTAssertGreaterThan(store.generation, originalGeneration)
         store.activateScope(config: first)
         XCTAssertEqual(store.requestedSyncIds, ["cloud"])
+    }
+
+    @MainActor func testCatalogueOpensInItsAccountScopeBeforeAnySync() {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("cloud-manga-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let config = HttpSyncConfig(baseURL: "https://example.com", token: "test-scope")
+        let previous = HttpSyncCloudBooks(directory: directory)
+        previous.activateScope(config: config)
+        previous.recordListed(syncId: "cloud", manifest: manifest, shelfName: nil)
+        XCTAssertTrue(previous.requestDownload(syncId: "cloud"))
+        previous.markAwaitingBookmarkMap(syncId: "cloud")
+        // A cold launch: the shelf loads before any sync or foreground activation.
+        XCTAssertEqual(HttpSyncCloudBooks(directory: directory, scope: config).hiddenInstalledSyncIds, ["cloud"])
+        XCTAssertTrue(HttpSyncCloudBooks(directory: directory).hiddenInstalledSyncIds.isEmpty, "only the scoped catalogue knows it")
+    }
+
+    @MainActor func testOnlyTheArchiveInTransferCountsAsTransferring() {
+        let store = makeStore()
+        store.recordListed(syncId: "cloud", manifest: manifest, shelfName: nil)
+        XCTAssertTrue(store.requestDownload(syncId: "cloud"))
+        store.beginDownload(syncId: "cloud")
+        XCTAssertEqual(store.transferringSyncId, "cloud")
+        store.endTransfer(syncId: "other")
+        XCTAssertEqual(store.transferringSyncId, "cloud")
+        store.endTransfer(syncId: "cloud")
+        XCTAssertNil(store.transferringSyncId, "an unpacked archive waiting for install is no longer transferring")
+        XCTAssertNotNil(store.downloads["cloud"])
+    }
+
+    @MainActor func testCancellingOneWaitingDownloadKeepsTheOthers() {
+        // The host app's foreground poll must not start a pass during this check.
+        HttpSyncManager.shared.suspendPolling()
+        let catalogue = HttpSyncCloudBooks.shared
+        let ids: Set<String> = ["cancel-test-a", "cancel-test-b"]
+        defer { catalogue.retain(syncIds: Set(catalogue.records.map(\.syncId)).subtracting(ids)) }
+        for id in ids {
+            catalogue.recordListed(syncId: id, manifest: manifest, shelfName: nil)
+            XCTAssertTrue(catalogue.requestDownload(syncId: id))
+        }
+        XCTAssertFalse(HttpSyncManager.shared.isSyncing)
+        HttpSyncManager.shared.cancelCloudBookDownload(syncId: "cancel-test-a")
+        XCTAssertNil(catalogue.record(syncId: "cancel-test-a")?.downloadRequestedAt)
+        XCTAssertNotNil(catalogue.record(syncId: "cancel-test-b")?.downloadRequestedAt, "another tapped manga still downloads")
     }
 
     @MainActor func testTransferProgressOnlyBelongsToRequestedMangaDownload() {

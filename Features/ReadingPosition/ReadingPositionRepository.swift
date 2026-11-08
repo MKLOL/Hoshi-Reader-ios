@@ -105,7 +105,8 @@ final class ReadingPositionRepository {
         var state = observing(bookId: bookId, root: root, state: read(bookId))
         let time = bookmark.lastModified?.timeIntervalSinceReferenceDate ?? 0
         let old = state.winner
-        if old == nil || ReadingPositionProtocol.wireMillis(time) > ReadingPositionProtocol.wireMillis(old!.compatibilityAt) ||
+        // A corrupt imported time cannot be ordered (and would trap the millisecond conversion).
+        if abs(time) <= 1e12, old == nil || ReadingPositionProtocol.wireMillis(time) > ReadingPositionProtocol.wireMillis(old!.compatibilityAt) ||
             (ReadingPositionProtocol.wireMillis(time) == ReadingPositionProtocol.wireMillis(old!.compatibilityAt) && !sameBookmark(bookmark, old!.bookmark)) {
             state = importing(bookmark, into: state)
         }
@@ -169,6 +170,19 @@ final class ReadingPositionRepository {
         try? data.write(to: directory.appendingPathComponent("sync-index.json"), options: .atomic)
     }
     func snapshot(bookId: String) -> ReadingPositionState { read(bookId) }
+    #if DEBUG
+    /// Drops every journal and the sync index, as on a new installation, under a new origin so
+    /// no sequence the server already holds is reused. Tests simulate a fresh install with it.
+    func removeAllHistory() {
+        try? FileManager.default.removeItem(at: directory)
+        cached = [:]; ownIndex = nil; sessions = [:]; sequence = 0
+        indexGeneration += 1
+        origin = UUID().uuidString.lowercased()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let identity = ["deviceId": device.id, "origin": origin]
+        if let data = try? encoder.encode(identity) { try? data.write(to: directory.appendingPathComponent("origin.json"), options: .atomic) }
+    }
+    #endif
     private func stateHeads(bookId: String) -> [ReadingPositionEvent] {
         read(bookId).heads.values.filter { $0.deviceId == device.id }.sorted { $0.originId < $1.originId }
     }

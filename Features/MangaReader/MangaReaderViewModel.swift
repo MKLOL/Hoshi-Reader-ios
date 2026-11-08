@@ -124,10 +124,16 @@ final class MangaReaderViewModel {
 
     private func setUpStatistics(title: String, root: URL, userConfig: UserConfig) {
         usage = ReaderUsageSession(book: metadata)
-        usage?.reading(true)
-        statistics = MangaStatisticsTracker(title: title, initialStatistics: ReadingStatisticsStore.reading(root: root), enabled: true, device: .current)
+        statistics = MangaStatisticsTracker(title: title, initialStatistics: ReadingStatisticsStore.reading(root: root), enabled: true,
+                                            device: .current, trackPageDurations: true)
         textStatistics = ReadingStatisticsStore.text(root: root)
-        statistics?.start(currentPage: pagesRead)
+        // A slow load can finish after the app left the foreground; start when it returns.
+        if UIApplication.shared.applicationState == .active {
+            usage?.reading(true)
+            statistics?.start(currentPage: pagesRead)
+        } else {
+            resumeTracking = true
+        }
     }
 
     func toggleStatisticsTracking() {
@@ -299,8 +305,11 @@ final class MangaReaderViewModel {
     func goToPage(_ index: Int, isTurn: Bool = false) {
         guard index != pageIndex, (0..<pageCount).contains(index) else { return }
         usage?.record(.page, source: isTurn ? nil : "jump", page: index + 1, from: pageIndex + 1, to: index + 1)
-        // The view observes pageIndex to drive the directional page-turn slide and re-render.
+        // A spread turn completes every page that was on screen, including an odd page's partner.
+        let shown = twoPageActive ? Self.spreadStart(pageIndex) : pageIndex
+        statistics?.pageChanged(currentPage: pagesRead, completedPages: isTurn ? max(0, index - shown) : 0)
         persistStatistics()
+        // The view observes pageIndex to drive the directional page-turn slide and re-render.
         pageIndex = index
         writeBookmark(page: index, action: isTurn ? "pageTurn" : "jump")
     }
@@ -421,7 +430,10 @@ final class MangaReaderViewModel {
         pendingBookmarkPage = nil
         if let id = syncId(for: metadata) { positionSession = ReadingPositionRepository.shared.open(bookId: id, root: bookRoot) }
         guard let restored = (positionSession?.initialBookmark ?? BookStorage.loadBookmark(root: bookRoot))?.chapterIndex else { return }
-        pageIndex = max(0, min(restored, max(0, book.pages.count - 1)))
+        let index = max(0, min(restored, max(0, book.pages.count - 1)))
+        // Another device's position is not a completed page here.
+        if index != pageIndex { statistics?.pageChanged(currentPage: pagesRead, completedPages: 0) }
+        pageIndex = index
     }
 
     private func writeBookmark(page: Int, action: String = "pageTurn") {

@@ -6,9 +6,9 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 //  Manga reading statistics sheet, presented from the reader's overflow menu. Mirrors Android's
-//  `features/mangareader/MangaStatisticsSheet.kt`: a Session / Today / All Time breakdown of
-//  pages read, pace and reading time, with a start/pause control and a progress bar. "Pages"
-//  are stored in the shared `Statistics.charactersRead` field by `MangaStatisticsTracker`.
+//  `features/mangareader/MangaStatisticsSheet.kt`: saved All Time totals and the median-pace
+//  estimate first, then Session and Today, with a start/pause control and a progress bar.
+//  "Pages" are stored in the shared `Statistics.charactersRead` field by `MangaStatisticsTracker`.
 //
 
 import SwiftUI
@@ -44,6 +44,19 @@ struct MangaStatisticsView: View {
                 }
 
                 if let statistics {
+                    let allTime = statistics.allTime
+                    let median = allTime.medianPageSeconds
+                    statisticsSection(
+                        title: "All Time",
+                        stat: allTime,
+                        characters: model.allTimeCharacters,
+                        pace: ("Median Pace", median.map { "\((3600 / $0).formatted(.number.precision(.fractionLength(1)))) pages / h" } ?? Self.pacePending),
+                        extraRows: [
+                            ("Pages Remaining", remainingPages.formatted()),
+                            ("Time to Finish", Self.secondsRemaining(remainingPages: remainingPages, medianPageSeconds: median)
+                                .map { Duration.seconds($0).formatted() } ?? Self.pacePending),
+                        ]
+                    )
                     statisticsSection(
                         title: "Session",
                         stat: statistics.session,
@@ -52,7 +65,6 @@ struct MangaStatisticsView: View {
                         showToggle: true
                     )
                     statisticsSection(title: "Today", stat: statistics.today, characters: model.todayCharacters)
-                    statisticsSection(title: "All Time", stat: statistics.allTime, characters: model.allTimeCharacters)
                 }
             }
             .id(ReadingDay.key(ReadingDay.date(at: now, resetHour: resetHour)) + zoneID)
@@ -77,21 +89,18 @@ struct MangaStatisticsView: View {
         title: String,
         stat: Statistics,
         characters: Int,
+        pace: (label: String, value: String)? = nil,
+        extraRows: [(String, String)] = [],
         isTracking: Bool = false,
         showToggle: Bool = false
     ) -> some View {
         Section {
             statRow("Characters Read", characters.formatted())
             statRow("Pages Read", "\(stat.charactersRead.formatted())")
-            statRow("Pace", "\(stat.lastReadingSpeed.formatted()) pages / h")
+            let pace = pace ?? ("Average Pace", "\(stat.lastReadingSpeed.formatted()) pages / h")
+            statRow(pace.label, pace.value)
             statRow("Reading Time", Duration.seconds(stat.readingTime).formatted())
-            if showToggle {
-                statRow("Pages Remaining", "\(remainingPages.formatted())")
-                statRow(
-                    "Time to Finish",
-                    Duration.seconds(secondsRemaining(speed: stat.lastReadingSpeed)).formatted()
-                )
-            }
+            ForEach(extraRows, id: \.0) { statRow($0.0, $0.1) }
         } header: {
             HStack {
                 Text(title)
@@ -115,13 +124,19 @@ struct MangaStatisticsView: View {
         }
     }
 
-    /// Pages left to the end of the volume from the current page (never negative).
+    /// Pages left to the end of the volume after the last page on screen (never negative).
     private var remainingPages: Int {
-        max(model.pageCount - (model.pageIndex + 1), 0)
+        let lastShown = model.twoPageActive
+            ? min(MangaReaderViewModel.spreadStart(model.pageIndex) + 1, model.pageCount - 1) : model.pageIndex
+        return max(model.pageCount - (lastShown + 1), 0)
     }
 
-    private func secondsRemaining(speed: Int) -> Double {
-        guard speed > 0 else { return 0 }
-        return Double(remainingPages) / (Double(speed) / 3600.0)
+    nonisolated static let pacePending = "Read a page to estimate"
+
+    /// Remaining pages at the book's median completed-page time; unknown until a page completes.
+    nonisolated static func secondsRemaining(remainingPages: Int, medianPageSeconds: Double?) -> Double? {
+        if remainingPages <= 0 { return 0 }
+        guard let medianPageSeconds, medianPageSeconds.isFinite, medianPageSeconds > 0 else { return nil }
+        return Double(remainingPages) * medianPageSeconds
     }
 }

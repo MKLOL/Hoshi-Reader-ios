@@ -32,6 +32,9 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         baseURL = url
         token = tok
         corpus = try Data(contentsOf: URL(fileURLWithPath: corpusPath))
+        // The host app's five-second foreground poll would add its own listings to the requests
+        // these scenarios count; each scenario drives every sync itself.
+        await MainActor.run { HttpSyncManager.shared.suspendPolling() }
         try await resetServerToCorpus()
         try wipeLocalInstall()
     }
@@ -282,6 +285,52 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         XCTAssertFalse(unchanged.contains { $0.path.hasSuffix(key) })
     }
 
+    @MainActor func testUnreadableReadingDataCannotBlockATappedCloudManga() async throws {
+        try await prepare()
+        let client = HttpSyncKvClient(baseURL: baseURL, bearerToken: token)
+        let chats = try await client.list(prefix: "books/\(Self.mangaSyncId)/chat/", since: nil, cursor: nil, limit: nil)
+        let chatKey = try XCTUnwrap(chats.keys.first?.key)
+        let fetched = try await client.get(key: chatKey)
+        let original = try XCTUnwrap(fetched).body
+        _ = try await client.put(key: chatKey, contentType: "application/json", body: Data("broken chat".utf8))
+        await syncNow(downloadManga: false)
+        let catalogue = HttpSyncCloudBooks.shared
+        XCTAssertTrue(catalogue.requestDownload(syncId: Self.mangaSyncId))
+        await HttpSyncManager.shared.syncNow()
+
+        // As on Android, only the archive itself can fail a download; its chat is reported.
+        XCTAssertTrue(HttpSyncManager.shared.lastErrors.contains { $0.contains(chatKey) }, "\(HttpSyncManager.shared.lastErrors)")
+        XCTAssertNil(catalogue.record(syncId: Self.mangaSyncId), "the installed manga leaves the catalogue")
+        XCTAssertFalse(catalogue.hiddenInstalledSyncIds.contains(Self.mangaSyncId))
+        let manga = try book(Self.mangaSyncId)
+        XCTAssertTrue(exists(manga.root, FileNames.mokuro))
+
+        // The repaired chat then reaches the installed copy.
+        _ = try await client.put(key: chatKey, contentType: "application/json", body: original)
+        await syncNow()
+        XCTAssertEqual(AiChatHistoryStore.shared.load(folder: manga.root.lastPathComponent).entries.map(\.response), ["Hello"])
+    }
+
+    @MainActor func testAnInstalledMangaLeftWaitingIsShownByTheNextOrdinarySync() async throws {
+        try await prepare()
+        await syncNow()
+        let catalogue = HttpSyncCloudBooks.shared
+        XCTAssertNil(catalogue.record(syncId: Self.mangaSyncId))
+        // A pass stopped during "Finishing sync…" leaves the installed manga waiting without a request.
+        catalogue.recordListed(syncId: Self.mangaSyncId, manifest: try fixtureManifest(SyncKeys.payloadManifest(Self.mangaSyncId)), shelfName: nil)
+        catalogue.markAwaitingBookmarkMap(syncId: Self.mangaSyncId)
+        XCTAssertTrue(catalogue.hiddenInstalledSyncIds.contains(Self.mangaSyncId))
+        XCTAssertFalse(catalogue.hasRequestedDownloads)
+
+        try await clearServerRequests()
+        await HttpSyncManager.shared.syncNow()
+        XCTAssertEqual(HttpSyncManager.shared.lastErrors, [])
+        XCTAssertNil(catalogue.record(syncId: Self.mangaSyncId))
+        XCTAssertFalse(catalogue.hiddenInstalledSyncIds.contains(Self.mangaSyncId))
+        let requests = try await serverRequests()
+        XCTAssertFalse(requests.contains { $0.path.hasSuffix(".zip") }, "showing it transfers no archive")
+    }
+
     private struct LocalBook {
         let metadata: BookMetadata
         let root: URL
@@ -309,6 +358,8 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
             try FileManager.default.removeItem(at: books)
         }
         try FileManager.default.createDirectory(at: books, withIntermediateDirectories: true)
+        // Position journals live outside the library; a fresh install has none of them either.
+        ReadingPositionRepository.shared.removeAllHistory()
         let settings = HttpSyncSettingsStore.shared
         settings.baseURL = baseURL
         settings.token = token

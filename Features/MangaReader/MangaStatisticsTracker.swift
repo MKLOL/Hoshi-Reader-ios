@@ -6,6 +6,8 @@ nonisolated struct MangaStatisticsTracker {
     let title: String
     let enabled: Bool
     let device: ReadingDevice?
+    /// Manga records one duration per completed page, independently of periodic time ticks.
+    let trackPageDurations: Bool
     private(set) var allStats: [Statistics]
     private(set) var isTracking = false
     private(set) var session: Statistics
@@ -13,6 +15,7 @@ nonisolated struct MangaStatisticsTracker {
     private var lastTimestamp: Date
     private var lastPageCount = 0
     private var hasUpdated = false
+    private var activePageSeconds = 0.0
 
     var today: Statistics {
         dayTotal(at: .now)
@@ -29,13 +32,19 @@ nonisolated struct MangaStatisticsTracker {
         let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
         return ReadingDay.days(reading: rows, text: text, resetHour: resetHour, calendar: calendar).first { $0.date == day }?.characters ?? 0
     }
-    var allTime: Statistics { Statistics.total(rows, title: title) }
+    var allTime: Statistics {
+        let rows = rows
+        var total = Statistics.total(rows, title: title)
+        total.mangaPageSeconds = Statistics.sumPageSeconds(rows.map(\.mangaPageSeconds))
+        return total
+    }
     private var rows: [Statistics] { Statistics.merged(allStats.filter { $0.key != localToday.key } + [localToday]) }
 
-    init(title: String, initialStatistics: [Statistics], enabled: Bool, now: Date = .now, device: ReadingDevice? = nil) {
+    init(title: String, initialStatistics: [Statistics], enabled: Bool, now: Date = .now, device: ReadingDevice? = nil, trackPageDurations: Bool = false) {
         self.title = title
         self.enabled = enabled
         self.device = device
+        self.trackPageDurations = trackPageDurations
         allStats = Statistics.merged(initialStatistics)
         lastTimestamp = now
         let day = Self.dateKey(for: now)
@@ -67,6 +76,7 @@ nonisolated struct MangaStatisticsTracker {
         let elapsed = now.timeIntervalSince(lastTimestamp)
         if elapsed < 0 { lastTimestamp = now }
         guard elapsed > 0 else { return }
+        if trackPageDurations { activePageSeconds += elapsed }
         let delta = max(-session.charactersRead, currentPage - lastPageCount)
         let stamp = StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000)
         localToday.record(in: .current)
@@ -78,6 +88,21 @@ nonisolated struct MangaStatisticsTracker {
         session.readingTimeByHour = ReadingDay.sumHours([session.readingTimeByHour, hours])
         hasUpdated = true
         resetBaseline(currentPage: currentPage, now: now)
+    }
+    /// Called for every navigation. Only forward turns complete pages; jumps and backtracking
+    /// discard the unfinished sample rather than inventing page durations. Pausing keeps active
+    /// time on the same page but never counts the paused time. A two-page spread turn splits
+    /// its time evenly between the pages it completes.
+    mutating func pageChanged(currentPage: Int, completedPages: Int, now: Date = .now) {
+        update(currentPage: currentPage, now: now)
+        if trackPageDurations, isTracking, completedPages > 0, activePageSeconds > 0 {
+            let seconds = max(1, StatisticsNumbers.integer((activePageSeconds / Double(completedPages)).rounded()))
+            localToday.mangaPageSeconds = Statistics.sumPageSeconds([localToday.mangaPageSeconds, [seconds: completedPages]])
+            localToday.lastStatisticModified = max(StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000),
+                                                   StatisticsNumbers.nextStamp(localToday.lastStatisticModified))
+            hasUpdated = true
+        }
+        activePageSeconds = 0
     }
     mutating func resetBaseline(currentPage: Int, now: Date = .now) {
         lastPageCount = currentPage

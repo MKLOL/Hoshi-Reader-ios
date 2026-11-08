@@ -89,13 +89,20 @@ def expected_corpus_keys(entries: list[dict]) -> set[str]:
 
 class ServerProcess:
     def __init__(self) -> None:
+        # A file, not a pipe: nothing drains stderr during the run, and a full pipe would block
+        # the server's request threads on their error reports.
+        self.log = ROOT / "build" / "sync-test-server.log"
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        self.stderr = self.log.open("w")
         self.process = subprocess.Popen(
             [sys.executable, str(SERVER), "--port", "0", "--token", TOKEN],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=self.stderr, text=True,
         )
         line = self.process.stdout.readline()
         if not line.startswith("SYNC_TEST_SERVER_READY port="):
-            raise RuntimeError(f"server did not start: {line!r} {self.process.stderr.read()}")
+            self.process.kill()
+            self.stderr.close()
+            raise RuntimeError(f"server did not start: {line!r} {self.log.read_text()}")
         self.port = int(line.strip().split("=", 1)[1])
         self.base = f"http://127.0.0.1:{self.port}"
 
@@ -110,7 +117,7 @@ class ServerProcess:
     def stop(self) -> None:
         self.process.terminate()
         self.process.wait(timeout=10)
-        for stream in (self.process.stdout, self.process.stderr):
+        for stream in (self.process.stdout, self.stderr):
             if stream:
                 stream.close()
 

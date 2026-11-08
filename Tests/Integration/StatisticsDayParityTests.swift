@@ -28,6 +28,50 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         XCTAssertEqual(ReadingDay.date(at: date("2026-10-01", 2, 59), resetHour: 3), date("2026-09-30"))
         XCTAssertEqual(ReadingDay.date(at: date("2026-10-01", 3), resetHour: 3), date("2026-10-01"))
     }
+    func testADayWithoutAMidnightStillCounts() throws {
+        var santiago = Calendar(identifier: .gregorian); santiago.timeZone = try XCTUnwrap(TimeZone(identifier: "America/Santiago"))
+        let day = try XCTUnwrap(ReadingDay.parse("2026-09-06", calendar: santiago))
+        XCTAssertEqual(ReadingDay.key(day, calendar: santiago), "2026-09-06")
+        let morning = try XCTUnwrap(santiago.date(bySettingHour: 10, minute: 0, second: 0, of: day))
+        XCTAssertEqual(ReadingDay.date(at: morning, resetHour: 3, calendar: santiago), day)
+        var reading = row("2026-09-06", seconds: 1200, hours: ["2026-09-06T10:00": 1200])
+        reading.timeZone = "America/Santiago"
+        XCTAssertEqual(ReadingDay.days(reading: [reading], resetHour: 3, calendar: santiago).map(\.seconds), [1200])
+        XCTAssertEqual(ReadingDay.streakHistory([reading], resetHour: 3, calendar: santiago).days.map(\.date), [day])
+        XCTAssertNil(ReadingDay.parse("2026-02-30", calendar: santiago))
+    }
+    func testStreaksAndResetHoursCrossDaysWithMissingOrRepeatedMidnights() throws {
+        // Santiago has no 2026-09-06 00:00; Havana repeats 2026-11-01 00:00.
+        for (zone, keys) in [("America/Santiago", ["2026-09-05", "2026-09-06", "2026-09-07"]),
+                             ("America/Havana", ["2026-10-31", "2026-11-01", "2026-11-02"])] {
+            var calendar = Calendar(identifier: .gregorian); calendar.timeZone = try XCTUnwrap(TimeZone(identifier: zone))
+            let days = try keys.map { try XCTUnwrap(ReadingDay.parse($0, calendar: calendar)) }
+            for (earlier, later) in zip(days, days.dropFirst()) {
+                XCTAssertEqual(ReadingDay.shift(earlier, by: 1, calendar: calendar), later, zone)
+                XCTAssertEqual(ReadingDay.shift(later, by: -1, calendar: calendar), earlier, zone)
+                let beforeReset = try XCTUnwrap(calendar.date(byAdding: .hour, value: 1, to: later))
+                XCTAssertEqual(ReadingDay.date(at: beforeReset, resetHour: 3, calendar: calendar), earlier, zone)
+            }
+            let rows = keys.map { key -> Statistics in
+                var reading = row(key, seconds: 1200, hours: [key + "T10:00": 1200])
+                reading.timeZone = zone
+                return reading
+            }
+            let history = ReadingDay.streakHistory(rows, resetHour: 3, calendar: calendar)
+            let noon = try XCTUnwrap(calendar.date(byAdding: .hour, value: 12, to: days[2]))
+            let streak = StatisticsMath.streak(history.days, goalMinutes: 10, now: noon, resetHour: 3, calendar: calendar)
+            XCTAssertEqual(streak.current, 3, zone)
+            XCTAssertEqual(streak.longest, 3, zone)
+        }
+    }
+    func testEqualStampRowsDifferingOnlyInZoneMergeInEitherOrderLikeAndroid() {
+        var tokyo = row("2026-10-01", seconds: 60, hours: ["2026-10-01T10:00": 60])
+        tokyo.timeZone = "Asia/Tokyo"
+        var newYork = tokyo
+        newYork.timeZone = "America/New_York"
+        XCTAssertEqual(Statistics.merged([tokyo, newYork]), [tokyo])
+        XCTAssertEqual(Statistics.merged([newYork, tokyo]), [tokyo])
+    }
     func testLegacyJSONAndAndroidHourEvidenceRoundTripWithoutLosingFields() throws {
         let legacy = Data(#"{"title":"Fixture","dateKey":"2026-10-01","readingTime":600,"charactersRead":10}"#.utf8)
         XCTAssertTrue(try JSONDecoder().decode(Statistics.self, from: legacy).readingTimeByHour.isEmpty)

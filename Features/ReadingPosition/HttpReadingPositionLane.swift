@@ -86,7 +86,12 @@ final class HttpReadingPositionLane {
                     index.unusable[meta.key] = stamp(meta); index.applied[meta.key] = nil; return true
                 }
                 guard stillCurrent(), !Task.isCancelled else { return false }
-                let etag = meta.etag == nil || fetched.etag.isEmpty ? stamp(meta) : fetched.etag
+                // As on Android: the listed ETag when the body is the listed version, or when a proxy
+                // dropped or weakened the header, so the next listing matches; otherwise the header
+                // of a body that changed after the listing.
+                let header = fetched.etag.trimmingCharacters(in: .whitespaces)
+                let listedBody = meta.etag == "sha256:" + ReadingPositionRepository.digest(fetched.body)
+                let etag = meta.etag == nil || listedBody || header.isEmpty || header.hasPrefix("W/") ? stamp(meta) : header
                 do {
                     let journal = try JSONDecoder().decode(ReadingPositionJournal.self, from: fetched.body)
                     guard journal.version == 1, journal.bookId == book, journal.deviceId == writer else {

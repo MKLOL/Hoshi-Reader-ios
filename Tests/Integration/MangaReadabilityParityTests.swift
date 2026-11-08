@@ -18,8 +18,12 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     @MainActor func testSmallTextPreferenceDefaultsOnAndPersistsIndependentlyOfCardSettings() {
         let defaults = UserDefaults.standard, key = "mangaEnlargeSmallText"
         let saved = defaults.object(forKey: key)
-        defer { if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) } }
+        defer {
+            ReaderPreferencesStore.shared.reset()
+            if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
         defaults.removeObject(forKey: key)
+        ReaderPreferencesStore.shared.reset()
         let preferences = UserConfig()
         XCTAssertTrue(preferences.mangaEnlargeSmallText)
         let dictionary = preferences.dictionaryCard, translation = preferences.translationCard
@@ -95,11 +99,13 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         let keys = ["mangaShowFurigana", "disablePageTurnAnimation"]
         let previous = keys.map { defaults.object(forKey: $0) }
         defer {
+            ReaderPreferencesStore.shared.reset()
             for (key, value) in zip(keys, previous) {
                 if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
             }
         }
         keys.forEach { defaults.removeObject(forKey: $0) }
+        ReaderPreferencesStore.shared.reset()
         let settings = UserConfig()
         XCTAssertTrue(settings.mangaShowFurigana)
         XCTAssertFalse(settings.disablePageTurnAnimation)

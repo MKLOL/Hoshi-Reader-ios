@@ -1,3 +1,26 @@
+# November 7 follow-up
+
+Android target: `3e95b0fd` (1.0.1 and the unreleased redraw fix). iOS starting point: `58ddd70`, whose hosted XCTest and UI suites had never executed. Three independent reviewers audited Android parity, statistics/streak behavior and the October 31 port; three more reviewed every change below.
+
+| Android changes | iOS implementation |
+| --- | --- |
+| Median manga pace (`42748e46`) | Completed-page seconds histogram on each day/device row, Android's JSON form, per-bucket maximum when rows merge, weighted median and time to finish; the sheet shows All Time first. Ticks, jumps, backward turns, remote positions and paused time add no samples. A two-page spread turn records one sample per page shown, each half its time. |
+| Hidden statistics redraws (`3e95b0fd`) | No change needed: SwiftUI Observation invalidates only views that read `statistics`, which the reader body does not; the sheet refreshes when it opens. |
+| Audiobook position rule (`0e12d2dc`, `25d44e13`) | Neither another device's position nor the foreground import reloads the EPUB reader while its audiobook plays in the normal reader; sentence mode, whose cues are suspended, follows other devices. An unchanged bookmark no longer reloads the chapter. |
+| Break-host fragment rects (`86806c32`) | `reader.js` `getRect` measures a `display: contents` target's text. |
+| Position ETag acknowledgement (`66504bb9`) | Listed ETag when the body is the listed version or the header is missing or weak, as Android's `acknowledgedEtag`. |
+| Cloud manga downloads (`a4d9f377` follow-ups) | Only manifest, archive, unpack or unreadable deletion state fails a tapped manga, with its actual error; chats, translations, statistics and shelf placement are reported and retried. A waiting manga is shown by the next ordinary sync or map exchange that started after its install. The catalogue opens in the account scope at launch, and Cancel stops only that manga (and the pass only while its archive transfers). |
+
+Additional fixes found in review: sentence-mode ruby groups kept stale TextKit line breaks until the next relayout; a manga finishing its load in the background started counting time; days whose midnight daylight saving time skips or repeats lost their reading or broke the streak (`ReadingDay.shift` now steps every statistics day, checked for all 443 zones over 2026); the goal bar now uses the streak day; equal-stamp rows that differ only in zone merge as on Android in either order; a corrupt imported ッツ timestamp can no longer trap.
+
+Test fixes: position journals and the five-second foreground poll leaked between sync scenarios; reader-preference journal records leaked between tests and reruns (debug-only resets); the WebKit pagination fixture never needed a break under WebKit fonts and its page had no doctype, so the safe area shortened it to 178 points. The fixture now proves breaks are both needed and effective in both orientations.
+
+Validation on November 7, 2026, with `tools/test_ios_parity.py` on a newly created iOS 27 iPhone simulator: 19 KV-server contract tests, 104 host regressions, 237 hosted XCTest cases against the real local sync server (no skips) and the 3 required native UI scenarios (podcast transcript playback and appearance, synced statistics/streak and trends) all passed. The test server no longer waits on its daemon request threads at shutdown, and the runner writes its stderr to `build/sync-test-server.log` instead of an undrained pipe. A Debug build for a physical iPad mini also succeeded. Physical-device background and audio behavior remain manual checks.
+
+Known differences: chapters in quirks mode (no doctype) measure `body.clientHeight` as the viewport in the shared `textlayout.js`; the reader's web view never overlaps a safe area, so pages match today. iOS sentence mode follows the iOS statistics autostart setting, while Android always tracks.
+
+---
+
 # October 31 feature parity update
 
 Android target: `66a3b1db`, including 0.12.5, 0.12.6, 1.0.0 and the unreleased consolidated reader settings/preference sync. iOS starting point: `46def8c`. Four agents implemented and reviewed separate slices in the shared checkout.

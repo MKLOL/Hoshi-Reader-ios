@@ -316,8 +316,15 @@ class ReaderViewModel {
         resetTrackingBaseline()
     }
     
+    /// Audio playing in the normal reader drives this device's position, as on Android. Sentence
+    /// mode suspends its cues, so there the reader follows other devices as usual.
+    var audiobookDrivesPosition: Bool { sasayakiPlayer.isPlaying && !sentenceModeActive }
+
     func syncAfterForeground() async {
+        guard !audiobookDrivesPosition else { return }
         await HttpSyncManager.shared.syncBookmarksBeforeReading(book: book)
+        // Playback can start from the lock screen while the bookmarks are pulled.
+        guard !audiobookDrivesPosition else { return }
         reloadAfterHttpBookmark()
         guard autoSyncEnabled, !isSyncing else { return }
         isSyncing = true
@@ -731,6 +738,8 @@ class ReaderViewModel {
     func reloadAfterHttpBookmark() {
         if let id = syncId(for: book) { positionSession = ReadingPositionRepository.shared.open(bookId: id, root: rootURL) }
         guard let bookmark = positionSession?.initialBookmark ?? BookStorage.loadBookmark(root: rootURL) else { return }
+        // Already showing this place: reloading would only drop the popup and selection.
+        guard bookmark.chapterIndex != index || bookmark.progress != currentProgress else { return }
         index = bookmark.chapterIndex
         currentProgress = bookmark.progress
         sentenceCharacter = nil

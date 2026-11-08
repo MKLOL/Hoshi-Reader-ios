@@ -105,21 +105,33 @@ nonisolated final class SentenceReadingParityTests: XCTestCase {
     }
 
     @MainActor func testWebKitSentencePaginationPreservesTextAndRuby() async throws {
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        // When this is the first test to run, the host app may still be connecting its scene.
+        var connected: UIWindowScene?
+        for _ in 0..<200 {
+            connected = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            if connected != nil { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let scene = try XCTUnwrap(connected)
         let previous = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
         let controller = UIViewController()
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240))
+        // Like the reader, the page owns its whole frame; a safe-area inset would shrink the viewport.
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         controller.view.addSubview(webView)
         window.rootViewController = controller
         window.makeKeyAndVisible()
         defer { window.isHidden = true; previous?.makeKeyAndVisible() }
         let readerURL = try XCTUnwrap(Bundle.main.url(forResource: "reader", withExtension: "js"))
         let reader = try String(contentsOf: readerURL, encoding: .utf8)
-        let paragraphs = (0..<30).map { _ in "<p>私は<ruby>日本語<rt>にほんご</rt></ruby>の本を読みます。次の文章も楽しく読みましょう。</p>" }.joined()
+        // Sentences longer than a line, so that unbroken pages split some of them in either orientation.
+        let paragraphs = (0..<30).map { _ in
+            "<p>私は<ruby>日本語<rt>にほんご</rt></ruby>の本を毎日少しずつ読みます。次の文章もみんなで一緒に楽しく読みましょう。今日はとても良い天気ですね。</p>"
+        }.joined()
         for vertical in [false, true] {
             let html = """
-            <html lang="ja"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+            <!doctype html><html lang="ja"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
             html,body { margin:0; padding:0; width:320px; height:240px; overflow:hidden; writing-mode:\(vertical ? "vertical-rl" : "horizontal-tb"); }
             body { box-sizing:border-box; font:22px serif; line-height:1.5; column-width:\(vertical ? 240 : 320)px; column-gap:0; }
             p { margin:0; } \(ReaderTextStyle.wordLayoutCSS)
@@ -136,20 +148,28 @@ nonisolated final class SentenceReadingParityTests: XCTestCase {
                 window.hoshiTextLayout.prepare(window.hoshiReader,true);
                 const vertical = window.hoshiReader.isVertical();
                 const size = vertical ? 240 : 320;
-                const divided = window.hoshiTextLayout.sentences.filter(sentence => {
+                const dividedSentences = () => window.hoshiTextLayout.sentences.filter(sentence => {
                   const range = document.createRange();
                   range.setStartAfter(sentence.start); range.setEndBefore(sentence.end);
                   const pages = new Set(Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0)
                     .map(r => Math.floor(((vertical ? r.top : r.left) + 0.1) / size)));
                   return pages.size > 1;
                 }).length;
-                return {preserved:window.hoshiTextLayout.textPreserved,divided,
-                  breaks:document.querySelectorAll('.hoshi-sentence-page-break,.hoshi-sentence-block-break').length,
+                const divided = dividedSentences();
+                // The same chapter without its breaks shows that they were needed.
+                const marked = ['hoshi-sentence-page-break', 'hoshi-sentence-block-break', 'hoshi-sentence-break-host']
+                  .flatMap(name => Array.from(document.getElementsByClassName(name)).map(element => [element, name]));
+                const breaks = marked.filter(([, name]) => name !== 'hoshi-sentence-break-host').length;
+                marked.forEach(([element, name]) => element.classList.remove(name));
+                const dividedWithoutBreaks = dividedSentences();
+                marked.forEach(([element, name]) => element.classList.add(name));
+                return {preserved:window.hoshiTextLayout.textPreserved,divided,dividedWithoutBreaks,breaks,
                   ruby:document.querySelectorAll('ruby').length};
                 """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
             let values = try XCTUnwrap(result)
             XCTAssertEqual(values["preserved"] as? Bool, true)
             XCTAssertEqual(values["divided"] as? Int, 0, "\(vertical ? "Vertical" : "Horizontal") sentences should fit on one page")
+            XCTAssertGreaterThan(values["dividedWithoutBreaks"] as? Int ?? 0, 0, "The fixture must need sentence breaks")
             XCTAssertGreaterThan(values["breaks"] as? Int ?? 0, 0)
             XCTAssertEqual(values["ruby"] as? Int, 30)
         }

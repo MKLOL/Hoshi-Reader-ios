@@ -237,6 +237,9 @@ final class CenteringTextView: UITextView, NSLayoutManagerDelegate {
         wrappingGroups = Self.wrappingRanges(text: text, ruby: ruby)
         measuredWidth = -1
         layoutManager.delegate = self
+        // Lines laid out for the new text before these groups existed keep their old breaks
+        // until invalidated; the delegate is only consulted when lines are laid out again.
+        layoutManager.invalidateLayout(forCharacterRange: NSRange(location: 0, length: textStorage.length), actualCharacterRange: nil)
         rubyFont = font
         rubyColor = color
         updateTextInsets()

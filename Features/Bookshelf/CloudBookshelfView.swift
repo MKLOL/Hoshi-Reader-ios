@@ -89,9 +89,9 @@ struct CloudBookshelfView: View {
                 HStack {
                     Text(record.awaitingBookmarkMap ? "Finishing sync…" : "Downloading…")
                     Spacer(minLength: 2)
-                    Button("Cancel") {
-                        cloud.cancelRequest(syncId: record.syncId)
-                        HttpSyncManager.shared.cancelSync()
+                    // A finished download only waits for its reading position; there is nothing to cancel.
+                    if !record.awaitingBookmarkMap {
+                        Button("Cancel") { HttpSyncManager.shared.cancelCloudBookDownload(syncId: record.syncId) }
                     }
                 }.font(.caption)
             } else if let error = record.downloadError {

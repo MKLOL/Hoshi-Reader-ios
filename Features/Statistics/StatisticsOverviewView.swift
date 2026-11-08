@@ -55,7 +55,8 @@ struct StatisticsOverviewView: View {
             }
             UsageTodaySection(reading: today, usage: usage.today)
             Section("Reading streak") {
-                let streak = StatisticsMath.streak(model.streakHistory.days, goalMinutes: goal, resetHour: resetHour)
+                let history = model.streakHistory
+                let streak = StatisticsMath.streak(history.days, goalMinutes: goal, resetHour: resetHour)
                 LabeledContent("Current", value: streak.current == 1 ? "1 day" : "\(streak.current) days")
                 LabeledContent("Longest", value: streak.longest == 1 ? "1 day" : "\(streak.longest) days")
                 LabeledContent("Daily goal", value: goal == 1 ? "1 minute" : "\(min(120, max(1, goal))) minutes")
@@ -73,11 +74,13 @@ struct StatisticsOverviewView: View {
                 Text("Every device counts reading days in this time zone.").font(.caption).foregroundStyle(.secondary)
                 Text("All statistics days run from the selected hour until that hour the next morning.")
                     .font(.caption).foregroundStyle(.secondary)
-                if model.streakHistory.estimated {
+                if history.estimated {
                     Text("Earlier history has no exact time. Your streak receives credit for either possible reading day; reading totals stay unchanged.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                ProgressView(value: min(today.seconds / (Double(min(120, max(1, goal))) * 60), 1))
+                // The streak's day, like Android: it includes the credit for records without hours.
+                let goalSeconds = history.days.first { $0.date == readingDate }?.seconds ?? 0
+                ProgressView(value: min(goalSeconds / (Double(min(120, max(1, goal))) * 60), 1))
             }
             Section("All time") {
                 LabeledContent("Reading time", value: StatisticsMath.duration(model.books.reduce(0.0) { StatisticsNumbers.adding($0, $1.seconds) }))
@@ -203,13 +206,13 @@ struct ReadingHeatmap: View {
         let calendar = StatisticsZone.calendar
         let today = ReadingDay.date(at: .now, resetHour: resetHour)
         let mondayOffset = (calendar.component(.weekday, from: today) + 5) % 7
-        let start = calendar.date(byAdding: .day, value: -(15 * 7 + mondayOffset), to: today)!
+        let start = ReadingDay.shift(today, by: -(15 * 7 + mondayOffset), calendar: calendar)
         let maximum = days.filter { $0.date >= start && $0.date <= today }.map(\.seconds).max() ?? 1
         HStack(spacing: 3) {
             ForEach(0..<16, id: \.self) { week in
                 VStack(spacing: 3) {
                     ForEach(0..<7, id: \.self) { day in
-                        let date = calendar.date(byAdding: .day, value: week * 7 + day, to: start)!
+                        let date = ReadingDay.shift(start, by: week * 7 + day, calendar: calendar)
                         let seconds = days.first { $0.date == date }?.seconds ?? 0
                         RoundedRectangle(cornerRadius: 2)
                             .fill(date > today ? Color.clear : seconds == 0 ? Color.secondary.opacity(0.12) : Color.accentColor.opacity(0.25 + 0.75 * seconds / max(1, maximum)))

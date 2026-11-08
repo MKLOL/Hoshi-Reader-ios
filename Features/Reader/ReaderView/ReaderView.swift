@@ -773,7 +773,8 @@ struct ReaderView: View {
             viewModel.reloadStatistics()
         }
         .onReceive(NotificationCenter.default.publisher(for: .httpSyncBookmarkApplied)) { note in
-            guard note.userInfo?["syncId"] as? String == syncId(for: viewModel.book) else { return }
+            // A playing audiobook drives this device's position; another device's must not move it.
+            guard note.userInfo?["syncId"] as? String == syncId(for: viewModel.book), !viewModel.audiobookDrivesPosition else { return }
             viewModel.reloadAfterHttpBookmark()
         }
         .onDisappear {

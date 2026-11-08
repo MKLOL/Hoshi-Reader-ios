@@ -27,7 +27,7 @@ nonisolated struct UsageDay {
         guard let first = dates.first, let lastDay = dates.last else { return [:] }
         var result = Dictionary(uniqueKeysWithValues: dates.map { ($0, Self(date: $0)) })
         let start = ReadingDay.boundary(on: first, resetHour: resetHour, calendar: calendar)
-        let end = ReadingDay.boundary(on: calendar.date(byAdding: .day, value: 1, to: lastDay)!, resetHour: resetHour, calendar: calendar)
+        let end = ReadingDay.boundary(on: ReadingDay.shift(lastDay, by: 1, calendar: calendar), resetHour: resetHour, calendar: calendar)
         let ordered = events.sorted { $0.at < $1.at }
         var opened: [String: UsageEvent] = [:], last: [String: Date] = [:]
         var words: [Date: [String: (Int, Int)]] = [:]
@@ -36,7 +36,7 @@ nonisolated struct UsageDay {
             guard b > a else { return }
             var day = ReadingDay.date(at: a, resetHour: resetHour, calendar: calendar)
             while day <= lastDay {
-                let next = calendar.date(byAdding: .day, value: 1, to: day)!
+                let next = ReadingDay.shift(day, by: 1, calendar: calendar)
                 let spanStart = max(a, ReadingDay.boundary(on: day, resetHour: resetHour, calendar: calendar))
                 let spanEnd = min(b, ReadingDay.boundary(on: next, resetHour: resetHour, calendar: calendar))
                 if spanEnd > spanStart, result[day] != nil {
@@ -100,9 +100,9 @@ nonisolated enum ReadingTrends {
         let today = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         guard days > 0 else { return [] }
         return (0..<days).reversed().compactMap { offset in
-            let date = calendar.date(byAdding: .day, value: -offset, to: today)!
+            let date = ReadingDay.shift(today, by: -offset, calendar: calendar)
             if let since, date < since { return nil }
-            let window = (0..<3).map { calendar.date(byAdding: .day, value: -$0, to: date)! }.filter { since == nil || $0 >= since! }
+            let window = (0..<3).map { ReadingDay.shift(date, by: -$0, calendar: calendar) }.filter { since == nil || $0 >= since! }
             let numerator = window.reduce(0) { $0 + (values[$1] ?? 0) }
             let daily = values[date] ?? 0
             if let denominators {
@@ -128,7 +128,7 @@ nonisolated enum ReadingTrends {
         let calendar = StatisticsZone.calendar
         let readingToday = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         let summaries = await Task.detached {
-            let dates = (0...92).map { calendar.date(byAdding: .day, value: -$0, to: readingToday)! }
+            let dates = (0...92).map { ReadingDay.shift(readingToday, by: -$0, calendar: calendar) }
             return UsageDay.summarize(snapshot.events, dates: dates, calendar: calendar, resetHour: resetHour)
         }.value
         guard generation == reloadGeneration else { return }

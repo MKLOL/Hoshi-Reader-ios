@@ -26,20 +26,24 @@ nonisolated struct HttpSyncCloudBookRecord: Codable, Identifiable, Equatable, Se
 /// are staged here until all of the book's reading sidecars have been applied.
 @MainActor @Observable
 final class HttpSyncCloudBooks {
-    static let shared = HttpSyncCloudBooks()
+    // Opens in the current account's scope: the shelf can load before the first sync or
+    // foreground activation, and must already hide a manga that is installed but not yet shown.
+    static let shared = HttpSyncCloudBooks(scope: HttpSyncSettingsStore.shared.currentConfig())
     private(set) var records: [HttpSyncCloudBookRecord] = []
     private(set) var downloads: [String: Double] = [:]
+    /// The manga whose archive a pass is transferring; only cancelling it stops the pass.
+    private(set) var transferringSyncId: String?
     private(set) var generation = 0
     private var directory: URL
     private let baseDirectory: URL
     private var scope: String?
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, scope config: HttpSyncConfig? = nil) {
         let root = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("HoshiCloudCatalogue", isDirectory: true)
         self.baseDirectory = root
         self.directory = root
-        reload()
+        if let config { activateScope(config: config) } else { reload() }
     }
 
     func activateScope(config: HttpSyncConfig) {
@@ -51,6 +55,7 @@ final class HttpSyncCloudBooks {
         scope = identity
         directory = baseDirectory.appendingPathComponent(identity, isDirectory: true)
         downloads = [:]
+        transferringSyncId = nil
         reload()
     }
 
@@ -61,6 +66,7 @@ final class HttpSyncCloudBooks {
 
     var hasRequestedDownloads: Bool { records.contains { $0.downloadRequestedAt != nil } }
     var hasReadyDownloads: Bool { records.contains(where: \.awaitingBookmarkMap) }
+    var readySyncIds: Set<String> { Set(records.filter(\.awaitingBookmarkMap).map(\.syncId)) }
     var requestedSyncIds: Set<String> { Set(records.filter { $0.downloadRequestedAt != nil }.map(\.syncId)) }
     var hiddenInstalledSyncIds: Set<String> {
         Set(records.filter { $0.awaitingBookmarkMap || $0.downloadRequestedAt != nil || $0.downloadError != nil }.map(\.syncId))
@@ -87,10 +93,12 @@ final class HttpSyncCloudBooks {
     func withdrawRequests() {
         for index in records.indices { records[index].downloadRequestedAt = nil }
         downloads = [:]
+        transferringSyncId = nil
         save()
     }
 
-    func beginDownload(syncId: String) { downloads[syncId] = 0 }
+    func beginDownload(syncId: String) { downloads[syncId] = 0; transferringSyncId = syncId }
+    func endTransfer(syncId: String) { if transferringSyncId == syncId { transferringSyncId = nil } }
 
     func updateTransfer(_ sample: HttpSyncTransferSample) {
         guard !sample.uploading, sample.key.hasPrefix("books/"), sample.key.hasSuffix("/payload.zip") else { return }
@@ -114,16 +122,10 @@ final class HttpSyncCloudBooks {
         save()
     }
 
-    /// Called by the manager only after its bookmark-map lane has seen the newly installed book.
-    func finishDownloads(success: Bool) {
-        let ready = records.filter(\.awaitingBookmarkMap)
-        if success {
-            for record in ready { remove(syncId: record.syncId) }
-        } else {
-            for record in ready {
-                failDownload(syncId: record.syncId, message: "Reading data could not finish syncing. Tap to retry.")
-            }
-        }
+    /// Shows installed manga, called by the manager only after a bookmark-map exchange that
+    /// started once they were installed. A manga installed later waits for the next exchange.
+    func reveal(_ syncIds: Set<String>) {
+        for record in records where record.awaitingBookmarkMap && syncIds.contains(record.syncId) { remove(syncId: record.syncId) }
     }
 
     @discardableResult func recordListed(syncId: String, manifest: HttpSyncPayloadManifest, shelfName: String?, title: String? = nil) -> Bool {

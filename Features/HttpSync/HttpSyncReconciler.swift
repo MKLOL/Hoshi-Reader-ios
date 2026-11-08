@@ -346,7 +346,10 @@ struct HttpSyncReconciler {
         // next pass instead of being lost when this one completes.
         let requestedCloudIds = cloudBooks.requestedSyncIds
         let cloudGeneration = cloudBooks.generation
-        var failedCloudIds: Set<String> = []
+        // Only a failed manifest, archive transfer or unpack fails a tapped manga, as on Android, or
+        // an unreadable deletion state. Its chats, translations, statistics and shelf placement are
+        // reported like any book's and retried against the installed copy, so they never block it.
+        var failedCloudIds: [String: String] = [:]
         var stagedCloudIds: Set<String> = []
         var rootsBySyncId: [String: URL] = [:]
         var importedAtBySyncId: [String: String?] = [:]
@@ -474,7 +477,9 @@ struct HttpSyncReconciler {
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("metadata \(parsed.syncId): \(errorText(error))")
-                failedCloudIds.insert(parsed.syncId)
+                // Unlike the side files, this read says whether another device deleted the book;
+                // installing without it would publish the copy over that deletion.
+                failedCloudIds[parsed.syncId] = errorText(error)
                 markUnhandled(meta)
             }
         }
@@ -562,7 +567,7 @@ struct HttpSyncReconciler {
                 } catch {
                     guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     result.errors.append("payload \(parsed.syncId): \(errorText(error))")
-                    failedCloudIds.insert(parsed.syncId)
+                    failedCloudIds[parsed.syncId] = errorText(error)
                     markUnhandled(meta)
                     continue
                 }
@@ -580,7 +585,7 @@ struct HttpSyncReconciler {
                 } catch {
                     guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                     result.errors.append("payload \(parsed.syncId): \(errorText(error))")
-                    failedCloudIds.insert(parsed.syncId)
+                    failedCloudIds[parsed.syncId] = errorText(error)
                     markUnhandled(meta)
                 }
                 continue
@@ -599,7 +604,7 @@ struct HttpSyncReconciler {
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("payload \(parsed.syncId): \(errorText(error))")
-                failedCloudIds.insert(parsed.syncId)
+                failedCloudIds[parsed.syncId] = errorText(error)
                 // A `skip` error (e.g. can't ever fit this book) advances the cursor so we don't
                 // re-list and re-download it every sync; transient errors stay unhandled to retry.
                 if (error as? HttpSyncError)?.skip == true {
@@ -608,6 +613,7 @@ struct HttpSyncReconciler {
                     markUnhandled(meta)
                 }
             }
+            cloudBooks.endTransfer(syncId: parsed.syncId)
         }
         var retainedCloudIds: Set<String> = []
         for (meta, format) in allManifests where format == .mokuro {
@@ -644,7 +650,6 @@ struct HttpSyncReconciler {
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("metadata \(parsed.syncId): \(errorText(error))")
-                failedCloudIds.insert(parsed.syncId)
                 markUnhandled(meta)
             }
         }
@@ -688,7 +693,6 @@ struct HttpSyncReconciler {
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("\(parsed.syncId): \(errorText(error))")
-                failedCloudIds.insert(parsed.syncId)
                 markUnhandled(meta)
             }
         }
@@ -703,14 +707,13 @@ struct HttpSyncReconciler {
             } catch {
                 guard cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
                 result.errors.append("Statistics \(id): \(errorText(error))")
-                failedCloudIds.insert(id)
             }
         }
 
         for id in requestedCloudIds {
             guard !Task.isCancelled, cloudBooks.generation == cloudGeneration else { cursor.listingSucceeded = false; flushAppliedKeys(); return cursor }
-            if failedCloudIds.contains(id) {
-                cloudBooks.failDownload(syncId: id, message: "Download or reading data failed to sync. Tap to retry.")
+            if let message = failedCloudIds[id] {
+                cloudBooks.failDownload(syncId: id, message: message)
                 continue
             }
             guard let root = rootsBySyncId[id], cloudBooks.requestedSyncIds.contains(id) else { continue }
