@@ -1,6 +1,7 @@
 # What was done: branch `codex/ios-android-parity`
 
-None of this is pushed. This file is not committed.
+This file records Claude's initial handoff and the subsequent dated Codex fixes
+and verification. Later sections contain the current device results.
 
 ## Commits
 
@@ -548,7 +549,8 @@ connectivity failed immediately afterward. Reconnection then succeeded and a
 fresh library listing verified all 31 prior entries remained present. A subsequent
 fresh launch was explicitly rejected because the device was locked. The user has
 been asked to leave the mini unlocked for an actual-book startup measurement.
-Physical latency is still unverified; no claim of instant physical opening is made.
+At that checkpoint physical latency was still unverified; no claim of instant
+physical opening was made.
 The owned disposable review simulator was shut down and deleted after preserving
 its traces. The user's existing `hoshi-perf` simulator was preserved.
 
@@ -595,7 +597,55 @@ The final build with event-driven trace probes also passed optimized test-build
 compilation and strict/deep signature verification. It installed successfully over
 the existing iPad app, and all 31 previous library entries remained present.
 A fresh normal launch was again explicitly rejected with `Locked`; the diagnostic
-idle override has not run, and physical first-paint verification remains pending.
+idle override had not run, and physical first-paint verification remained pending
+until the successful unlocked runs below.
+
+### Verified physical manga opening — November 9, 2026
+
+After the iPad was unlocked, two optimized Release runs of the real-library test
+passed, with three openings each. The first run measured model-to-image readiness
+at **151, 78 and 80 ms**. The final run moved the timer to the actual bookshelf
+button handler, before selected-book state changes and reader presentation:
+
+| Opening | Selection-handler to decoded image readiness | Initial HTML loads |
+|---|---:|---:|
+| First after app launch | 148 ms | 1 |
+| Reopen | 83 ms | 1 |
+| Reopen again | 98 ms | 1 |
+
+Each final persisted trace contains `book_selected`, `model_created` and
+`first_visible` under the same trace ID. Selection-to-model construction took
+13.25 ms initially and 3.46–3.89 ms on reopen, so presentation setup is included
+in those final measurements. Image readiness remains the current document's
+successful image decode plus two browser frame callbacks received natively.
+This is not a literal finger-down to fully composited-screen measurement; the
+reader also has a 200 ms presentation fade that overlaps preparation.
+
+All six openings restored page 181 (decoded page index 180), with one initial
+document and no live bookmark displacement. All six exported screenshots show
+the actual artwork and page indicator 181/232, without a spinner or blank overlay.
+The root independently inspected the first screenshot from each run; a separate
+agent inspected all six. The bookmark's JSON values are unchanged before/after.
+
+The first physical trace reached HTML navigation at 53.84 ms, image request at
+91.18 ms, bytes at 99.39 ms, document completion at 102.08 ms and decoded readiness
+at 150.63 ms. Position and statistics setup each took under 2 ms on this real
+volume. No additional speculative position/statistics rewrite was made.
+
+XCTest's separate tap-to-observation wall times were approximately 3.6–3.7 s.
+The test log attributes roughly 0.5 s to event synthesis/automation and 3.1 s to
+its existence/readiness predicates and accessibility-query cadence. Those values
+are not the app's black-screen duration and are not substituted for native timing.
+
+This verifies the selected real volume and saved page on the user's physical
+iPad mini (A20 Pro), iPadOS 27.2. It does not establish zero lag for every title,
+every interaction or an immediate tap during cold app launch. The earlier zoom
+and broad-test limits above are unchanged.
+
+After verification, all 31 previous library directory entries were still present.
+The temporary XCTest runner was uninstalled, and the updated Hoshi app was
+successfully relaunched normally without diagnostic launch flags. The process-only
+idle override and trace probes are therefore disabled for normal use.
 
 Evidence (ignored): `build/codex-ocr-qol-native-final.log`,
 `build/codex-ocr-qol-performance-final.log`, `build/codex-ocr-qol-ui-final.log`,
@@ -613,5 +663,15 @@ Evidence (ignored): `build/codex-ocr-qol-native-final.log`,
 `build/codex-manga-physical-final-install.json`,
 `build/codex-manga-physical-final-books.json`,
 `build/codex-manga-physical-final-normal-launch.log`,
+`build/codex-manga-physical-release-run-unlocked.log`,
+`build/codex-manga-physical-first-traces/`,
+`build/codex-manga-physical-selection-build.log`,
+`build/codex-manga-physical-selection-run.log`,
+`build/codex-manga-physical-selection-traces/`,
+`build/codex-manga-physical-selection-stages.json`,
+`build/codex-manga-physical-selection-review/`,
+`build/codex-manga-physical-verified-library.json`,
+`build/codex-manga-physical-verified-remove-runner.log`,
+`build/codex-manga-physical-verified-normal-launch.log`,
 `build/codex-startup-parser-audit/actual-production-parser.json`, and
 `build/startup-first-paint-audit/position-open/results.json`.

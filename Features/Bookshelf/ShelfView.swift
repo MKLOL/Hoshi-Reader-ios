@@ -115,7 +115,10 @@ struct ShelfView: View {
                             viewModel: viewModel,
                             currentShelf: section.shelf?.name,
                             hideMove: section.isReading,
-                            onSelect: { selectedBook = book },
+                            onSelect: {
+                                MangaStartupTrace.bookSelected(book.id)
+                                selectedBook = book
+                            },
                             onMatch: { onMatch(book) },
                             isSelecting: isSelecting,
                             selectedBooks: $selectedBooks

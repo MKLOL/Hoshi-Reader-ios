@@ -17,7 +17,7 @@ import CHoshiDicts
 @MainActor
 final class MangaReaderViewModel {
     private var metadata: BookMetadata
-    let startupTrace = MangaStartupTrace()
+    let startupTrace: MangaStartupTrace
 
     private(set) var book: MokuroBook?
     private(set) var bookRoot: URL?
@@ -79,6 +79,7 @@ final class MangaReaderViewModel {
 
     init(metadata: BookMetadata) {
         self.metadata = metadata
+        self.startupTrace = MangaStartupTrace.forOpeningBook(metadata.id)
         self.renderCache = MangaPageRenderCache(imageLoader: imageLoader)
         self.twoPageEnabled = UserDefaults.standard.bool(forKey: Self.twoPageKey(metadata.id))
         startupTrace.mark("model_created")

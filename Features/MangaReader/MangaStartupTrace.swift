@@ -10,6 +10,34 @@ final class MangaStartupTrace {
     static let isEnabled = ProcessInfo.processInfo.environment[environmentKey] == "1"
     static let maximumStages = 48
 
+    private struct PendingSelection {
+        let bookID: UUID
+        let trace: MangaStartupTrace
+        let selectedAt: TimeInterval
+    }
+    private static var pendingSelection: PendingSelection?
+
+    /// Start at the actual bookshelf action, before SwiftUI presents or constructs the reader.
+    /// Keep only the newest selection in memory; its book identity never enters the output.
+    static func bookSelected(_ bookID: UUID) {
+        guard isEnabled else { return }
+        let trace = MangaStartupTrace()
+        trace.mark("book_selected")
+        pendingSelection = PendingSelection(bookID: bookID, trace: trace, selectedAt: trace.startedAt)
+    }
+
+    static func forOpeningBook(_ bookID: UUID) -> MangaStartupTrace {
+        guard isEnabled, let pending = pendingSelection else { return MangaStartupTrace() }
+        let age = ProcessInfo.processInfo.systemUptime - pending.selectedAt
+        guard age.isFinite, age >= 0, age <= 10 else {
+            pendingSelection = nil
+            return MangaStartupTrace()
+        }
+        guard pending.bookID == bookID else { return MangaStartupTrace() }
+        pendingSelection = nil
+        return pending.trace
+    }
+
     let id: String
     let enabled: Bool
     private(set) var firstVisibleMilliseconds: Double?
