@@ -25,16 +25,18 @@ def require_dependencies():
         raise RuntimeError("The full regression gate requires these commands on PATH: " + ", ".join(missing))
 
 
-def simulator_type(runtimes):
+def simulator_type(runtimes, family="iPhone"):
+    if family not in ("iPhone", "iPad mini"):
+        raise RuntimeError("HOSHI_IOS_DEVICE_FAMILY must be iPhone or iPad mini")
     available = sorted(
         (r for r in runtimes if r.get("isAvailable") and ".iOS-" in r["identifier"]),
         key=lambda r: tuple(int(p) for p in r["version"].split(".")), reverse=True,
     )
     for runtime in available:
         for device in runtime.get("supportedDeviceTypes", []):
-            if device.get("productFamily") == "iPhone":
+            if (family == "iPhone" and device.get("productFamily") == "iPhone") or (family == "iPad mini" and "iPad-mini" in device["identifier"]):
                 return device["identifier"], runtime["identifier"]
-    raise RuntimeError("Install an iOS simulator runtime in Xcode before running the regression gate.")
+    raise RuntimeError("Install an iOS simulator runtime supporting " + family + " before running the regression gate.")
 
 
 def boot_simulator(device):
@@ -61,8 +63,9 @@ def sync_server():
 def main():
     require_dependencies()
     listing = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "runtimes", "-j"], text=True))
-    device_type, runtime = simulator_type(listing["runtimes"])
-    name = "Hoshi regression iPhone " + uuid.uuid4().hex[:8]
+    family = os.environ.get("HOSHI_IOS_DEVICE_FAMILY", "iPhone")
+    device_type, runtime = simulator_type(listing["runtimes"], family)
+    name = "Hoshi regression " + family + " " + uuid.uuid4().hex[:8]
     device = subprocess.check_output(["xcrun", "simctl", "create", name, device_type, runtime], text=True).strip()
     if not device:
         raise RuntimeError("Simulator creation returned no device ID.")
@@ -88,6 +91,7 @@ def main():
             "-only-testing:HoshiReaderUITests/PodcastTranscriptUITests",
             "-only-testing:HoshiReaderUITests/StatisticsSyncUITests",
             "-only-testing:HoshiReaderUITests/CloudMangaDownloadUITests",
+            "-only-testing:HoshiReaderUITests/BookshelfNavigationUITests",
             "-only-testing:HoshiReaderUITests/ZoomPopupUITests/testUltraThinActionButtonsStayVisibleAndTappable",
             "-only-testing:HoshiReaderUITests/ZoomPopupUITests/testSelectionRectStaysNearZoomedMangaTap",
         ] + shlex.split(env["HOSHI_XCODEBUILD_ARGS"])
@@ -103,7 +107,7 @@ def main():
             ui_env = dict(env, TEST_RUNNER_HOSHI_KV_BASE_URL=base, TEST_RUNNER_HOSHI_KV_TOKEN=token)
             ui = subprocess.run(command, cwd=ROOT, env=ui_env, stdout=output, stderr=subprocess.STDOUT, check=False, timeout=900)
         output = log.read_text()
-        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"), ("CloudMangaDownloadUITests", "testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage"), ("ZoomPopupUITests", "testUltraThinActionButtonsStayVisibleAndTappable"), ("ZoomPopupUITests", "testSelectionRectStaysNearZoomedMangaTap"))
+        required = (("PodcastTranscriptUITests", "testTimestampPlaybackWordLookupEnglishAndFollowing"), ("PodcastTranscriptUITests", "testReaderAppearanceIsAvailableInsideTranscript"), ("StatisticsSyncUITests", "testSyncedActivityStreakControlsRetainedHistoryAndTrends"), ("CloudMangaDownloadUITests", "testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage"), ("ZoomPopupUITests", "testUltraThinActionButtonsStayVisibleAndTappable"), ("ZoomPopupUITests", "testSelectionRectStaysNearZoomedMangaTap"), ("BookshelfNavigationUITests", "testEveryTabAndAddMangaStayDirectlyAccessibleInBothOrientations"), ("BookshelfNavigationUITests", "testAddMangaOpensFilesAndEPUBRemainsInBookshelfOptions"))
         passed = all(any(suite in line and method in line and "passed" in line
                          for line in output.splitlines()) for suite, method in required)
         if ui.returncode or "** TEST SUCCEEDED **" not in output or not passed:

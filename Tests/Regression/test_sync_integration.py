@@ -6,7 +6,7 @@
 # the ANDROID client published (Tests/Fixtures/sync-corpus.json — regenerate it from the Android
 # repo with HOSHI_SYNC_CORPUS_OUT=... ./gradlew :app:testDebugUnitTest --tests '*SyncCorpusSnapshotTest*').
 #
-# Requires Xcode with an available iPhone simulator. Set HOSHI_IOS_SIMULATOR to a device name to
+# Requires Xcode with an available iPhone/iPad simulator. Set HOSHI_IOS_SIMULATOR to a device name to
 # pick a specific one, HOSHI_DERIVED_DATA to reuse a derived-data directory (default build/DD-sim).
 #
 # WARNING: the scenarios simulate fresh installs and WIPE their simulator's app library/settings.
@@ -45,7 +45,7 @@ def runtime_version(runtime: str) -> tuple[int, ...]:
 
 
 def pick_simulator() -> str | None:
-    """Require explicit selection; a shut-down simulator may still hold the user's library."""
+    """Require explicit selection; a shut-down iPhone/iPad may still hold the user's library."""
     wanted = os.environ.get("HOSHI_IOS_SIMULATOR")
     if not wanted:
         return None
@@ -57,7 +57,7 @@ def pick_simulator() -> str | None:
         if "iOS" not in runtime:
             continue
         for device in devices:
-            if not device.get("isAvailable", True) or "iPhone" not in device.get("name", ""):
+            if not device.get("isAvailable", True):
                 continue
             if wanted and device["name"] != wanted:
                 continue
@@ -127,7 +127,7 @@ class IosSyncIntegration(unittest.TestCase):
     def test_production_sync_stack_against_real_server(self):
         self.assertTrue(CORPUS.is_file(), f"missing {CORPUS}")
         simulator = pick_simulator()
-        self.assertIsNotNone(simulator, "Run python3 tools/test_ios_parity.py, or set HOSHI_IOS_SIMULATOR to a disposable iPhone simulator")
+        self.assertIsNotNone(simulator, "Run python3 tools/test_ios_parity.py, or set HOSHI_IOS_SIMULATOR to a disposable iPhone/iPad simulator")
         server = ServerProcess()
         try:
             server.call("POST", "/_test/load", CORPUS.read_bytes())
@@ -150,6 +150,12 @@ class IosSyncIntegration(unittest.TestCase):
                 f"-only-testing:{TEST_BUNDLE}",
             ]
             command += shlex.split(os.environ.get("HOSHI_XCODEBUILD_ARGS", ""))
+            # Public dictionary downloads are verified separately with explicit opt-in. The
+            # offline release gate must neither depend on GitHub nor count intentional skips.
+            if os.environ.get("HOSHI_TEST_LIVE_DICTIONARIES") == "1":
+                env["TEST_RUNNER_HOSHI_TEST_LIVE_DICTIONARIES"] = "1"
+            else:
+                command.append(f"-skip-testing:{TEST_BUNDLE}/DefaultDictionaryLiveTests")
             started = time.time()
             log = ROOT / "build" / "ios-sync-integration.log"
             log.parent.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,9 @@ SPEC.loader.exec_module(gate)
 
 class ReleaseGateTests(unittest.TestCase):
     def setUp(self):
+        self.family = patch.dict(gate.os.environ, {"HOSHI_IOS_DEVICE_FAMILY": "iPhone"})
+        self.family.start()
+        self.addCleanup(self.family.stop)
         self.dependencies = patch.object(gate, "require_dependencies")
         self.dependencies.start()
         self.addCleanup(self.dependencies.stop)
@@ -43,6 +46,17 @@ class ReleaseGateTests(unittest.TestCase):
     def runtime(self):
         return {"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "version": "27.0", "isAvailable": True,
                 "supportedDeviceTypes": [{"identifier": "iphone-fixture", "productFamily": "iPhone"}]}
+
+    def test_ipad_mini_selection_cannot_fall_back_to_an_iphone_or_ipad_pro(self):
+        runtime = self.runtime()
+        runtime["supportedDeviceTypes"] += [
+            {"identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Pro", "productFamily": "iPad"},
+            {"identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-mini-A17-Pro", "productFamily": "iPad"},
+        ]
+        self.assertEqual(gate.simulator_type([runtime], "iPad mini"),
+                         ("com.apple.CoreSimulator.SimDeviceType.iPad-mini-A17-Pro", runtime["identifier"]))
+        with self.assertRaises(RuntimeError):
+            gate.simulator_type([self.runtime()], "iPad mini")
 
     def test_missing_runtime_fails_without_using_an_existing_device(self):
         with self.assertRaises(RuntimeError):
@@ -86,7 +100,10 @@ class ReleaseGateTests(unittest.TestCase):
         cloud = statistics + "\nTest Case '-[HoshiReaderUITests.CloudMangaDownloadUITests testTappedMangaShowsProgressMovesOntoTheShelfAndOpensAtItsPage]' passed"
         thin = cloud + "\nTest Case '-[HoshiReaderUITests.ZoomPopupUITests testUltraThinActionButtonsStayVisibleAndTappable]' passed"
         success = thin + "\nTest Case '-[HoshiReaderUITests.ZoomPopupUITests testSelectionRectStaysNearZoomedMangaTap]' passed"
-        for log, status, expected in [(success, 0, 0), (thin, 0, 1), (cloud, 0, 1), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
+        success += "\nTest Case '-[HoshiReaderUITests.BookshelfNavigationUITests testEveryTabAndAddMangaStayDirectlyAccessibleInBothOrientations]' passed"
+        without_import = success
+        success += "\nTest Case '-[HoshiReaderUITests.BookshelfNavigationUITests testAddMangaOpensFilesAndEPUBRemainsInBookshelfOptions]' passed"
+        for log, status, expected in [(without_import, 0, 1), (success, 0, 0), (thin, 0, 1), (cloud, 0, 1), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
             with self.subTest(status=status, log=log), tempfile.TemporaryDirectory() as directory:
                 calls = []
                 def run(command, **kwargs):
@@ -116,6 +133,7 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertIn("-only-testing:HoshiReaderUITests/PodcastTranscriptUITests", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/StatisticsSyncUITests", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/CloudMangaDownloadUITests", calls[4])
+                self.assertIn("-only-testing:HoshiReaderUITests/BookshelfNavigationUITests", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testUltraThinActionButtonsStayVisibleAndTappable", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testSelectionRectStaysNearZoomedMangaTap", calls[4])
                 self.assertEqual(calls[-1], ["xcrun", "simctl", "delete", "owned-device"])

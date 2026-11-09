@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 
 struct BookshelfView: View {
     @Environment(\.colorScheme) private var systemColorScheme
+    @Environment(\.horizontalSizeClass) private var contentSizeClass
     @Environment(UserConfig.self) private var userConfig
     @State private var viewModel = BookshelfViewModel()
     @State private var showDictionaries = false
@@ -117,6 +118,7 @@ struct BookshelfView: View {
                 .onChange(of: selectedTab) {
                     clearSelection()
                 }
+                .environment(\.horizontalSizeClass, contentSizeClass)
             }
             
             // Tag 3 keeps the existing Books/Dictionary/Settings tags (0/1/2) that quick actions and
@@ -125,6 +127,7 @@ struct BookshelfView: View {
                 NavigationStack {
                     NewsView(pendingSharedURL: $pendingNewsURL)
                 }
+                .environment(\.horizontalSizeClass, contentSizeClass)
             }
 
             Tab("Dictionary", systemImage: "character.magnify.ja", value: 1) {
@@ -136,10 +139,13 @@ struct BookshelfView: View {
                     )
                     .id(dictionaryRoute.id)
                 }
+                .environment(\.horizontalSizeClass, contentSizeClass)
             }
             
             if PodcastStore.shared.enabled {
-                Tab("Podcasts", systemImage: "headphones", value: 4) { PodcastsView() }
+                Tab("Podcasts", systemImage: "headphones", value: 4) {
+                    PodcastsView().environment(\.horizontalSizeClass, contentSizeClass)
+                }
             }
             Tab("Settings", systemImage: "gearshape", value: 2) {
                 NavigationStack {
@@ -213,8 +219,13 @@ struct BookshelfView: View {
                         AppReadingSettingsView(userConfig: userConfig)
                     }
                 }
+                .environment(\.horizontalSizeClass, contentSizeClass)
             }
         }
+        // Give the tab controller its own bottom bar instead of sharing the iPad toolbar.
+        // Restore the real size class inside every tab so tablet readers and split layouts
+        // retain their normal dimensions and presentations.
+        .environment(\.horizontalSizeClass, UIDevice.current.userInterfaceIdiom == .pad ? .compact : contentSizeClass)
         .task(id: PodcastStore.shared.configID) { await PodcastStore.shared.monitorAccess() }
         .onChange(of: PodcastStore.shared.enabled) { _, enabled in if !enabled && selectedTab == 4 { selectedTab = 0 } }
 
@@ -347,60 +358,38 @@ struct BookshelfView: View {
             }
             ToolbarItem(placement: .topBarLeading) {
                 Menu {
+                    Picker("Sort books", selection: Bindable(userConfig).bookshelfSortOption) {
+                        ForEach(SortOption.allCases) { option in
+                            Label(option.rawValue, systemImage: option.icon).tag(option)
+                        }
+                    }
+                    Button {
+                        withAnimation(.default.speed(2)) { isSelecting = true }
+                    } label: {
+                        Label("Select books", systemImage: "checklist")
+                    }
+                    Button {
+                        showShelfManagement = true
+                    } label: {
+                        Label("Manage shelves", systemImage: "folder.badge.gearshape")
+                    }
                     Section {
-                        Text("Sorting by...")
-                            .foregroundStyle(.secondary)
-                        Picker("Sort", selection: Bindable(userConfig).bookshelfSortOption) {
-                            ForEach(SortOption.allCases) { option in
-                                Label(option.rawValue, systemImage: option.icon)
-                                    .tag(option)
-                            }
+                        Button { viewModel.isImportingEpub = true } label: {
+                            Label("Import EPUB", systemImage: "book")
                         }
                     }
                 } label: {
-                    Image(systemName: "arrow.up.arrow.down")
+                    Label("Bookshelf options", systemImage: "ellipsis.circle")
+                        .labelStyle(.iconOnly)
                 }
+                .accessibilityIdentifier("bookshelf-options")
             }
-            
-            ToolbarItem(placement: .topBarLeading) {
-                Button {
-                    withAnimation(.default.speed(2)) {
-                        isSelecting = true
-                    }
-                } label: {
-                    Image(systemName: "checklist")
-                }
-            }
-            
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showShelfManagement = true
-                } label: {
-                    Image(systemName: "folder.badge.gearshape")
+                Button { viewModel.isImporting = true } label: {
+                    Label("Add manga", systemImage: "plus")
+                        .labelStyle(.iconOnly)
                 }
-            }
-            
-            if #available(iOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
-            }
-            
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        viewModel.isImporting = true
-                    } label: {
-                        Label("Import Manga", systemImage: "book.pages")
-                    }
-                    Button {
-                        viewModel.isImportingEpub = true
-                    } label: {
-                        Label("Import EPUB", systemImage: "book")
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                } primaryAction: {
-                    viewModel.isImporting = true
-                }
+                .accessibilityIdentifier("bookshelf-add-manga")
             }
         }
     }

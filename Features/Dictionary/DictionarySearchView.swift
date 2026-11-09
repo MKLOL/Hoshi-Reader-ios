@@ -11,7 +11,7 @@ import CHoshiDicts
 
 struct DictionarySearchView: View {
     @Environment(UserConfig.self) private var userConfig
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.tabBarPlacement) private var tabBarPlacement
     @State private var query: String = ""
     @State private var lastQuery: String = ""
     @State private var content: String = ""
@@ -27,7 +27,7 @@ struct DictionarySearchView: View {
     var shouldFocus: Bool = false
     
     private var usesTopTabBarLayout: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
+        tabBarPlacement == .topBar
     }
     
     private var searchBarInset: CGFloat {
