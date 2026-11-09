@@ -343,6 +343,7 @@ struct BookshelfView: View {
                 } label: {
                     Image(systemName: "folder")
                 }
+                .accessibilityLabel("Move to shelf")
                 .disabled(selectedBooks.isEmpty)
             }
             
@@ -352,6 +353,7 @@ struct BookshelfView: View {
                 } label: {
                     Image(systemName: "trash")
                 }
+                .accessibilityLabel("Delete selected books")
                 .disabled(selectedBooks.isEmpty)
             }
         } else {

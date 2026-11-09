@@ -60,6 +60,8 @@ actor MokuroImportWorker {
 }
 
 nonisolated struct MokuroImporter {
+    /// Hidden folders in Books that hold a volume until it is complete.
+    static let stagingPrefix = ".MokuroImport-"
     /// File extensions accepted as zip archives of a mokuro volume.
     private static let archiveExtensions: Set<String> = ["zip", "cbz"]
     /// The `.mokuro` JSON file extension.
@@ -210,7 +212,7 @@ nonisolated struct MokuroImporter {
         let destinationRoot = booksDir.appendingPathComponent(folderName)
         // Publish only a complete volume. A foreground shelf refresh must not discover
         // metadata while a background import is still copying its pages or sidecars.
-        let targetRoot = booksDir.appendingPathComponent(".MokuroImport-\(UUID())", isDirectory: true)
+        let targetRoot = booksDir.appendingPathComponent("\(Self.stagingPrefix)\(UUID())", isDirectory: true)
 
         do {
             // Copy images into images/.

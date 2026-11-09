@@ -115,6 +115,9 @@ extension UIColor {
         let multiplier: CGFloat = 255.9999999
         
         getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        // A wide-gamut colour, as the colour picker gives on a P3 display, has components
+        // outside 0...1 in this space, which would not be two hex digits each.
+        red = min(1, max(0, red)); green = min(1, max(0, green)); blue = min(1, max(0, blue)); alpha = min(1, max(0, alpha))
         
         if alpha == 1.0 {
             return String(

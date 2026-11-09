@@ -35,6 +35,13 @@ class DictionaryManager {
     private static let configFileName = "config.json"
     
     private init() {
+        // An import the app was closed during leaves its unpacked banks behind, hidden from
+        // every listing and included in backups.
+        if let dictionaries = try? Self.getDictionariesDirectory() {
+            for type in [DictionaryType.term, .frequency, .pitch] {
+                BookStorage.removeInterruptedStaging(in: dictionaries.appendingPathComponent(type.rawValue), prefix: DictionaryDownloads.stagingPrefix)
+            }
+        }
         loadDictionaries()
         rebuildLookupQuery()
     }

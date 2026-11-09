@@ -9,6 +9,18 @@ nonisolated enum HoshiAutomation {
             || NSClassFromString("XCTestCase") != nil
     }
 
+    /// The launch environment as a UI-test fixture may read it. Fixtures replace real data: the
+    /// sync account, reading history, reader preferences and books. They exist only on a
+    /// simulator, so a Debug build on a real device ignores them and a test run pointed at it
+    /// by mistake cannot overwrite a library.
+    static var fixtureEnvironment: [String: String] {
+        #if DEBUG && targetEnvironment(simulator)
+        ProcessInfo.processInfo.environment
+        #else
+        [:]
+        #endif
+    }
+
     static var preventReports: Bool {
         #if DEBUG || targetEnvironment(simulator)
         true
@@ -116,9 +128,24 @@ final class AnonymousStatsReporter {
                 try writeState(.init(notBefore: at.addingTimeInterval(Self.sendInterval)))
                 return .notDue
             }
-            // Backward clock changes never hold an installation until the old date catches up.
-            if let date = state.notBefore, (0...Self.sendInterval).contains(date.timeIntervalSince(at)), date > at { return .notDue }
-            if let date = state.lastSentAt, (0..<Self.sendInterval).contains(at.timeIntervalSince(date)) { return .notDue }
+            // A clock set backward leaves these dates further ahead than any wait set here. The
+            // wait then starts again from the corrected clock: the old date is never waited for,
+            // and no report leaves sooner than the interval the privacy policy promises.
+            if let date = state.notBefore, date > at {
+                if date.timeIntervalSince(at) > Self.sendInterval {
+                    state.notBefore = at.addingTimeInterval(Self.sendInterval)
+                    try writeState(state)
+                }
+                return .notDue
+            }
+            if let date = state.lastSentAt {
+                if date > at {
+                    state.lastSentAt = at
+                    try writeState(state)
+                    return .notDue
+                }
+                if at.timeIntervalSince(date) < Self.sendInterval { return .notDue }
+            }
             if let date = state.lastAttemptAt, (0..<Self.retryInterval).contains(at.timeIntervalSince(date)) { return .notDue }
             let id = state.installId ?? UUID().uuidString.lowercased()
             state.installId = id
@@ -183,7 +210,9 @@ final class AnonymousStatsReporter {
             payload.screenHeightPx = Int(max(size.width, size.height))
         }
         payload.locale = Locale.current.language.languageCode?.identifier
-        payload.appLanguage = (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first ?? "system"
+        // The language alone: the stored preference also names a region, such as `en-RO`.
+        payload.appLanguage = (UserDefaults.standard.array(forKey: "AppleLanguages") as? [String])?.first
+            .flatMap { Locale.Language(identifier: $0).languageCode?.identifier } ?? "system"
         if let books = try? BookStorage.loadAllBooks() {
             payload.epubCount = books.filter { $0.resolvedContentType == .epub }.count
             payload.mangaCount = books.filter { $0.resolvedContentType == .mokuro }.count

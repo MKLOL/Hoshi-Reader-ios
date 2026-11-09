@@ -9,7 +9,8 @@
 #   ./install.sh 00008150-...    # a specific UDID
 #
 # Env overrides:
-#   CONFIG=Release ./install.sh  # leaner build (default: Debug, the proven config)
+#   CONFIG=Debug ./install.sh    # unoptimised build with the UI-test hooks compiled in
+#                                #   (default: Release, the build that is measured and shipped)
 #   NO_LAUNCH=1 ./install.sh     # install but don't auto-launch
 #
 # Notes:
@@ -22,7 +23,7 @@ cd "$(dirname "$0")"
 
 PROJECT="Hoshi Reader.xcodeproj"
 SCHEME="Hoshi Reader"
-CONFIG="${CONFIG:-Debug}"
+CONFIG="${CONFIG:-Release}"
 DERIVED="build/DD"
 APP="$DERIVED/Build/Products/${CONFIG}-iphoneos/Hoshi Reader.app"
 FILTER="${1:-}"
@@ -31,7 +32,11 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
 # --- 1. Discover paired iPhones/iPads --------------------------------------
-DEVJSON="$(mktemp -t hoshi-devs).json"
+WORK="$(mktemp -d -t hoshi-install)"
+trap 'rm -rf "$WORK"' EXIT
+DEVJSON="$WORK/devices.json"
+BUILD_LOG="build/install-build.log"
+mkdir -p build
 xcrun devicectl list devices --json-output "$DEVJSON" >/dev/null 2>&1 || true
 
 DEVICES=()
@@ -57,7 +62,6 @@ for d in devs:
     print(f"{udid}\t{name}")
 PY
 )
-rm -f "$DEVJSON"
 
 if [ "${#DEVICES[@]}" -eq 0 ]; then
   err "No matching paired iPhone/iPad found."
@@ -82,9 +86,9 @@ for d in "${DEVICES[@]}"; do
   if ! xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration "$CONFIG" \
         -destination "platform=iOS,id=$UDID" -derivedDataPath "$DERIVED" \
         -allowProvisioningUpdates -skipMacroValidation build \
-        >/tmp/hoshi-build.log 2>&1; then
-    err "  ✗ build failed — see /tmp/hoshi-build.log (last lines):"
-    tail -n 15 /tmp/hoshi-build.log >&2
+        >"$BUILD_LOG" 2>&1; then
+    err "  ✗ build failed — see $BUILD_LOG (last lines):"
+    tail -n 15 "$BUILD_LOG" >&2
     FAILED=1; continue
   fi
 
@@ -95,8 +99,9 @@ for d in "${DEVICES[@]}"; do
   fi
 
   echo "  installing…"
-  if ! xcrun devicectl device install app --device "$UDID" "$APP" >/dev/null 2>&1; then
-    err "  ✗ install failed (device unreachable, or needs Trust on-device?)"
+  if ! xcrun devicectl device install app --device "$UDID" "$APP" >"$WORK/install.log" 2>&1; then
+    err "  ✗ install failed (device unreachable, locked, or needs Trust on-device?):"
+    tail -n 5 "$WORK/install.log" >&2
     FAILED=1; continue
   fi
 

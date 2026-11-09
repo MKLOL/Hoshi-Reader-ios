@@ -38,6 +38,8 @@ class BookshelfViewModel {
     @ObservationIgnored private let mangaImporter: MokuroImportWorker
     @ObservationIgnored private var mangaImportTask: Task<Void, Never>?
     @ObservationIgnored private var pendingMangaImports: [URL] = []
+    /// The archive the background import is reading now; it has already left the queue.
+    @ObservationIgnored private var activeMangaImport: URL?
     @ObservationIgnored private var mangaImportsCompleted = 0
     @ObservationIgnored private var mangaImportTotal = 0
 
@@ -396,6 +398,7 @@ class BookshelfViewModel {
                 var failed: [String] = []
                 while !pendingMangaImports.isEmpty {
                     let url = pendingMangaImports.removeFirst()
+                    activeMangaImport = url
                     do {
                         let directory = try BookStorage.getBooksDirectory()
                         let metadata = try await mangaImporter.importBundle(from: url, booksDirectory: directory)
@@ -406,6 +409,7 @@ class BookshelfViewModel {
                         failed.append(url.lastPathComponent)
                     }
                     clearConsumedMangaInboxFile(url)
+                    activeMangaImport = nil
                     mangaImportsCompleted += 1
                     if !pendingMangaImports.isEmpty { updateMangaImportProgress() }
                 }
@@ -527,7 +531,12 @@ class BookshelfViewModel {
             return
         }
         
-        for item in inboxContents {
+        // Manga shared into the app is read by the background import after this returns. Those
+        // archives are removed by the import itself once it has finished with them.
+        let inUse = pendingMangaImports + [activeMangaImport].compactMap { $0 }
+        let inUseFiles = Set(inUse.map(\.standardizedFileURL))
+        let inUseNames = Set(inUse.filter { $0.deletingLastPathComponent().lastPathComponent == "Inbox" }.map(\.lastPathComponent))
+        for item in inboxContents where !inUseFiles.contains(item.standardizedFileURL) && !inUseNames.contains(item.lastPathComponent) {
             try? FileManager.default.removeItem(at: item)
         }
     }

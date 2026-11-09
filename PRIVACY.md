@@ -1,11 +1,13 @@
-*Last updated: October 31 2026*
+*Last updated: November 9 2026*
 # Privacy Policy
 
 Your data stays on your device unless you use the features below.
 
 **Google Drive Sync** - If enabled and when syncing a book, the book title, reading progress, statistics, and book cover can be uploaded to your Google Drive. The app can only access files that were created by the Google Cloud Project and cannot read any other files in your Drive. 
 
-**HTTP Sync** - When configured, books, per-device navigation histories, reading progress, reading preferences, reading statistics, streak settings and reading activity are sent to your chosen sync server. Activity includes reading sessions, looked-up words and manga bubble text used for translation. Device logs are excluded from system backups. Other devices’ cached activity is removed when switching sync accounts.
+**HTTP Sync** - When configured, books, per-device navigation histories, reading progress, reading preferences, reading statistics, streak settings, reading activity, translation history and translation prompts are sent to your chosen sync server. Activity includes reading sessions, looked-up words and manga bubble text used for translation. Device logs are excluded from system backups. Other devices’ cached activity is removed when switching sync accounts. A token pasted during first-launch setup is used with the Hoshi sync server at `dragos.games` unless you have set another address; you can change it in Settings → Advanced → HTTP Sync.
+
+**AI translation** - When you ask a cloud model for a translation, the text of the bubble or sentence, your prompt and any screenshot you selected are sent to the AI provider you configured, using your own API key. Keys are kept in the device Keychain and are never synced. Stored pre-translations and on-device models send nothing.
 
 **Audio** - When you play word audio or have Anki audio export configured, the word and reading are sent to a Cloudflare Worker by default. The default audio source can be disabled, and additional user-configurable audio sources can be added.
 

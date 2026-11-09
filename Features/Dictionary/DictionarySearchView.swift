@@ -14,6 +14,9 @@ struct DictionarySearchView: View {
     @Environment(\.tabBarPlacement) private var tabBarPlacement
     @State private var query: String = ""
     @State private var lastQuery: String = ""
+    /// Identifies the page that shows the current results. A page loads its HTML once, so it
+    /// must be replaced in the same update that sets its content, never before the lookup.
+    @State private var resultsPage = 0
     @State private var content: String = ""
     @State private var dictionaryStyles: [String: String] = [:]
     @State private var lookupEntries: [[String: Any]] = []
@@ -56,7 +59,7 @@ struct DictionarySearchView: View {
                     },
                     onTapOutside: closePopups
                 )
-                .id(lastQuery)
+                .id(resultsPage)
                 
                 ForEach($popups) { $popup in
                     let popupId = popup.id
@@ -140,12 +143,9 @@ struct DictionarySearchView: View {
         
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         hasSearched = true
-        lastQuery = trimmed
         
         guard !trimmed.isEmpty else {
-            content = ""
-            lookupEntries = []
-            dictionaryStyles = [:]
+            showNothing(for: trimmed)
             return
         }
         
@@ -154,13 +154,21 @@ struct DictionarySearchView: View {
         guard !Task.isCancelled, generation == lookupGeneration, query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
         let results = snapshot.results
         if results.isEmpty {
-            content = ""
-            lookupEntries = []
-            dictionaryStyles = [:]
+            showNothing(for: trimmed)
             return
         }
         
         constructHtml(results: results, styles: snapshot.styles)
+        lastQuery = trimmed
+        resultsPage += 1
+    }
+    
+    private func showNothing(for query: String) {
+        content = ""
+        lookupEntries = []
+        dictionaryStyles = [:]
+        lastQuery = query
+        resultsPage += 1
     }
     
     @State private var lookupGeneration = 0

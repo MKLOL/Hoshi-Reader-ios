@@ -31,27 +31,29 @@ struct HoshiReaderApp: App {
         BookStorage.migrateFromDocuments()
         if let books = try? BookStorage.getBooksDirectory() {
             HttpSyncPayloadCodec().recoverInterruptedReplacements(booksDirectory: books)
+            // A manga import the app was closed during leaves its whole staged volume behind.
+            BookStorage.removeInterruptedStaging(in: books, prefix: MokuroImporter.stagingPrefix)
         }
         WebViewPreloader.shared.warmup()
         _ = DictionaryManager.shared
         configureTabBarAppearance()
         #if DEBUG
-        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_ZOOM"] == "1" {
+        let fixtures = HoshiAutomation.fixtureEnvironment
+        if fixtures["HOSHI_UI_TESTING_ZOOM"] == "1" {
             HttpSyncSettingsStore.shared.token = ""
             do { try ZoomUITestFixture.seed() }
             catch { assertionFailure("Could not prepare the zoom fixture: \(error)") }
         }
-        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_STATISTICS"] == "1" {
+        if fixtures["HOSHI_UI_TESTING_STATISTICS"] == "1" {
             HttpSyncSettingsStore.shared.token = ""
             UserDefaults.standard.set(StatisticsZone.defaultID, forKey: StatisticsZone.key)
             UserDefaults.standard.set(3, forKey: ReadingDay.resetKey)
             UserDefaults.standard.set(10, forKey: ReadingDay.goalKey)
         }
         // Other UI scenarios run without sync, whatever an earlier scenario configured.
-        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_PODCAST"] == "1" { HttpSyncSettingsStore.shared.token = "" }
+        if fixtures["HOSHI_UI_TESTING_PODCAST"] == "1" { HttpSyncSettingsStore.shared.token = "" }
         // CloudMangaDownloadUITests: the gate's local sync server, as a pasted shared token would.
-        if let url = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_SYNC_URL"],
-           let token = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_SYNC_TOKEN"] {
+        if let url = fixtures["HOSHI_UI_TESTING_SYNC_URL"], let token = fixtures["HOSHI_UI_TESTING_SYNC_TOKEN"] {
             HttpSyncSettingsStore.shared.baseURL = url
             HttpSyncSettingsStore.shared.token = token
         }
@@ -72,9 +74,9 @@ struct HoshiReaderApp: App {
         WindowGroup {
             Group {
                 #if DEBUG
-                if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_PODCAST"] == "1" {
+                if HoshiAutomation.fixtureEnvironment["HOSHI_UI_TESTING_PODCAST"] == "1" {
                     PodcastTranscriptUITestFixture()
-                } else if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_STATISTICS"] == "1" {
+                } else if HoshiAutomation.fixtureEnvironment["HOSHI_UI_TESTING_STATISTICS"] == "1" {
                     StatisticsUITestFixture()
                 } else { bookshelf }
                 #else

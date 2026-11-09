@@ -19,6 +19,8 @@ nonisolated enum DictionaryDownloadError: LocalizedError {
 /// Release downloads redirect to short-lived signed URLs. Do not reuse a cached redirect on
 /// the next setup attempt, and never hand an HTTP error page to the native ZIP importer.
 nonisolated enum DictionaryDownloads {
+    /// Hidden folders beside the dictionaries that hold an import until it is complete.
+    static let stagingPrefix = ".import-"
     /// The native importer writes index.json first and this marker last. An interrupted
     /// import must not be listed as installed or skipped by the next setup attempt.
     static func isImportedDictionary(at directory: URL) -> Bool {
@@ -148,7 +150,7 @@ nonisolated enum DictionaryDownloads {
         let files = FileManager.default
         // Import under a hidden sibling on the same volume. Neither storage scans nor the
         // active lookup query should observe half-written banks, including during updates.
-        let staging = directory.appendingPathComponent(".import-\(UUID())", isDirectory: true)
+        let staging = directory.appendingPathComponent("\(stagingPrefix)\(UUID())", isDirectory: true)
         try files.createDirectory(at: staging, withIntermediateDirectories: true)
         defer { try? files.removeItem(at: staging) }
         // The default importer queues CPU-count + 4 banks. Limit it to two on mobile;

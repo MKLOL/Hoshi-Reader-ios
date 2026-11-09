@@ -84,6 +84,7 @@ struct AppearanceView: View {
                                     .font(.caption)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Delete this font")
                             .confirmationDialog("", isPresented: $showingDeleteConfirmation, titleVisibility: .hidden) {
                                 Button("Delete", role: .destructive) {
                                     if let fontName = fontToDelete {

@@ -77,6 +77,16 @@
 				<string>C617.1</string>
 			</array>
 		</dict>
+		<dict>
+			<!-- ProcessInfo.systemUptime times transfers, polls and manga opening inside the
+			     app, so 35F9.1: measure the amount of time between events within the app. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

@@ -41,6 +41,8 @@ struct BookCell: View {
             BookView(book: book, progress: viewModel.progress(for: book), pageLabel: viewModel.pageLabel(for: book), isSelected: isSelecting && isSelected, hasPretranslations: viewModel.pretranslatedBookIds.contains(book.id))
         }
         .buttonStyle(.plain)
+        // While choosing books for a move or deletion, VoiceOver says which ones are chosen.
+        .accessibilityAddTraits(isSelecting && isSelected ? .isSelected : [])
         .accessibilityIdentifier(book.resolvedContentType == .mokuro ? "manga-book-\(book.id.uuidString.lowercased())" : "book-\(book.id.uuidString.lowercased())")
         .contextMenu(isSelecting ? nil : ContextMenu {
             if !hideMove {

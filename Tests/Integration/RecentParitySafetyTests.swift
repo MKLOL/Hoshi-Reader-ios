@@ -50,6 +50,34 @@ nonisolated final class RecentParitySafetyTests: XCTestCase {
         XCTAssertThrowsError(try replaceRestoredFolder(staging: root.appendingPathComponent("missing"), destination: live, fileManager: .default))
         XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("current"), encoding: .utf8), "keep")
     }
+    /// Both backups are `.hoshi` files. One picked under the other heading must be refused,
+    /// since restoring replaces the whole collection.
+    func testABackupIsOnlyRestoredOverTheKindOfCollectionItHolds() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func staged(_ name: String, _ files: [String]) throws -> URL {
+            let folder = root.appendingPathComponent(name)
+            for file in files {
+                let url = folder.appendingPathComponent(file)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("{}".utf8).write(to: url)
+            }
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            return folder
+        }
+        let books = try staged("books", ["Novel/metadata.json", "Novel/bookmark.json", "Manga/metadata.json", "shelves.json", ".reading_history/a/statistics.json"])
+        let dictionaries = try staged("dictionaries", ["Term/JMdict/index.json", "Frequency/Jiten/index.json", "config.json"])
+        let emptyLibrary = try staged("empty", ["shelves.json"])
+        let unrelated = try staged("unrelated", ["notes/readme.txt", "photo.jpg"])
+        XCTAssertTrue(backupMatches("Books", staging: books, fileManager: .default))
+        XCTAssertTrue(backupMatches("Dictionaries", staging: dictionaries, fileManager: .default))
+        XCTAssertFalse(backupMatches("Books", staging: dictionaries, fileManager: .default), "dictionaries must not replace the library")
+        XCTAssertFalse(backupMatches("Dictionaries", staging: books, fileManager: .default), "books must not replace the dictionaries")
+        for folder in ["Books", "Dictionaries"] {
+            XCTAssertFalse(backupMatches(folder, staging: emptyLibrary, fileManager: .default), "nothing to restore over \(folder)")
+            XCTAssertFalse(backupMatches(folder, staging: unrelated, fileManager: .default), "an unrelated archive over \(folder)")
+        }
+    }
 }
 
 nonisolated final class BookshelfUsabilityTests: XCTestCase {

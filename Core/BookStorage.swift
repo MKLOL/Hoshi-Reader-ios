@@ -121,6 +121,18 @@ struct BookStorage {
         try FileManager.default.copyItem(at: source, to: destination)
     }
     
+    /// Removes the staging folders that imports interrupted by the app closing left in
+    /// `directory`. Call it at launch only: the folders are listed now, before any import of
+    /// this launch can create one, and deleted off the main thread.
+    static func removeInterruptedStaging(in directory: URL, prefix: String) {
+        let leftovers = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+        guard !leftovers.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for leftover in leftovers { try? FileManager.default.removeItem(at: leftover) }
+        }
+    }
+
     static func delete(at url: URL) throws {
         guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
             return

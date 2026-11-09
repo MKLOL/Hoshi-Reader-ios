@@ -34,7 +34,7 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         #if DEBUG
         // UI tests choose preferences with launch arguments; an earlier launch's journal must not
         // override them.
-        if ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1" { defaults.removeObject(forKey: journalKey) }
+        if HoshiAutomation.fixtureEnvironment["HOSHI_UI_TESTING"] == "1" { defaults.removeObject(forKey: journalKey) }
         #endif
         if let data = defaults.data(forKey: journalKey) {
             do {

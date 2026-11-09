@@ -106,6 +106,7 @@ struct DictionaryView: View {
                 Button("", systemImage: "curlybraces") {
                     showCSSEditor = true
                 }
+                .accessibilityLabel("Edit dictionary CSS")
                 .disabled(dictionaryManager.isImporting || dictionaryManager.isUpdating)
             }
             
@@ -138,6 +139,7 @@ struct DictionaryView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityLabel("Import dictionary")
                 .fileImporter(
                     isPresented: $isImporting,
                     allowedContentTypes: [.zip],
@@ -227,6 +229,7 @@ struct DictionaryDetailSettingView: View {
                         } label: {
                             Image(systemName: "xmark")
                         }
+                        .accessibilityLabel("Close")
                     }
                 }
         }

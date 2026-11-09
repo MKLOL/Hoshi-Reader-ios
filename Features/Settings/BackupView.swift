@@ -18,6 +18,8 @@ struct BackupView: View {
     @State private var isLoading = false
     @State private var loadingString = ""
     @State private var operation: Task<Void, Never>?
+    @State private var pendingRestore: URL?
+    @State private var restoreFailure: String?
     
     var body: some View {
         List {
@@ -60,8 +62,28 @@ struct BackupView: View {
             allowedContentTypes: [UTType(filenameExtension: "hoshi")!]
         ) { result in
             if case .success(let url) = result {
-                restoreFolder(from: url, to: target)
+                pendingRestore = url
             }
+        }
+        // Restoring replaces everything of that kind on this device, so the file is named
+        // and confirmed before anything is touched.
+        .confirmationDialog(
+            target == "Books" ? "Replace all books?" : "Replace all dictionaries?",
+            isPresented: Binding(get: { pendingRestore != nil }, set: { if !$0 { pendingRestore = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingRestore
+        ) { url in
+            Button("Restore", role: .destructive) { restoreFolder(from: url, to: target) }
+            Button("Cancel", role: .cancel) {}
+        } message: { url in
+            Text(target == "Books"
+                 ? "The books, bookmarks and reading history on this device will be replaced by “\(url.lastPathComponent)”."
+                 : "The dictionaries on this device will be replaced by “\(url.lastPathComponent)”.")
+        }
+        .alert("Not restored", isPresented: Binding(get: { restoreFailure != nil }, set: { if !$0 { restoreFailure = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(restoreFailure ?? "")
         }
         .disabled(isLoading)
         .overlay {
@@ -141,18 +163,31 @@ struct BackupView: View {
             let staged = (try? fm.contentsOfDirectory(atPath: staging.path(percentEncoded: false))) ?? []
             let extractedSomething = staged.contains { !$0.hasPrefix(".") && $0 != "__MACOSX" }
             let restored: Bool
+            var failure: String?
             if ok && extractedSomething && !Task.isCancelled {
-                do {
-                    try replaceRestoredFolder(staging: staging, destination: destination, fileManager: fm)
-                    restored = true
-                } catch {
+                // Both kinds of backup share one file type. A dictionary backup restored as
+                // books would replace the whole library with dictionary folders.
+                if backupMatches(folder, staging: staging, fileManager: fm) {
+                    do {
+                        try replaceRestoredFolder(staging: staging, destination: destination, fileManager: fm)
+                        restored = true
+                    } catch {
+                        restored = false
+                        failure = "The backup could not be put in place. Nothing was changed."
+                    }
+                } else {
                     restored = false
+                    failure = folder == "Books"
+                        ? "This file is not a backup of books. Nothing was changed."
+                        : "This file is not a backup of dictionaries. Nothing was changed."
                 }
             } else {
                 restored = false
+                if !Task.isCancelled { failure = "The backup could not be read. Nothing was changed." }
             }
             await MainActor.run {
                 isLoading = false
+                restoreFailure = failure
                 if restored {
                     DictionaryManager.shared.loadDictionaries()
                     DictionaryManager.shared.rebuildLookupQuery()
@@ -160,6 +195,20 @@ struct BackupView: View {
                 }
             }
         }
+    }
+}
+
+/// Whether an unpacked backup holds what its target stores: books are folders with their
+/// metadata, dictionaries are sorted into folders by kind.
+nonisolated func backupMatches(_ folder: String, staging: URL, fileManager fm: FileManager) -> Bool {
+    let entries = (try? fm.contentsOfDirectory(at: staging, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+    let directories = entries.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+    // The folder names of `DictionaryType`.
+    let dictionaryKinds: Set<String> = ["Term", "Frequency", "Pitch"]
+    let holdsDictionaries = directories.contains { dictionaryKinds.contains($0.lastPathComponent) }
+    if folder == "Dictionaries" { return holdsDictionaries }
+    return !holdsDictionaries && directories.contains {
+        fm.fileExists(atPath: $0.appendingPathComponent(FileNames.metadata).path(percentEncoded: false))
     }
 }
 
