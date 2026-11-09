@@ -227,21 +227,12 @@ class ShortcutSceneDelegate: NSObject, UIWindowSceneDelegate {
 
 class WebViewPreloader {
     static let shared = WebViewPreloader()
-    private var dummy: WKWebView?
     func warmup() {
-        DispatchQueue.main.async {
-            self.dummy = WKWebView(frame: .zero)
-            self.dummy?.loadHTMLString("", baseURL: nil)
-        }
+        DispatchQueue.main.async { MangaWebViewPreloader.shared.warmup() }
     }
-    
+
     func close() {
-        guard dummy != nil else {
-            return
-        }
-        DispatchQueue.main.async {
-            self.dummy = nil
-        }
+        DispatchQueue.main.async { MangaWebViewPreloader.shared.discardIdle() }
     }
 }
 
@@ -465,7 +456,7 @@ private enum OfflineLlmLaunchSelfTest {
         try JSONSerialization.data(withJSONObject: ["title": title, "pages": pages])
             .write(to: root.appendingPathComponent(FileNames.mokuro))
         let metadata = BookMetadata(title: title, cover: nil, folder: title, lastAccess: Date(),
-                                    contentType: .mokuro, syncId: "ui_zoom_fixture")
+                                    contentType: .mokuro, syncId: "ui_zoom_fixture_\(UUID().uuidString)")
         try BookStorage.save(metadata, inside: root, as: FileNames.metadata)
         try BookStorage.save(Bookmark(chapterIndex: 0, progress: 0, characterCount: 0), inside: root, as: FileNames.bookmark)
     }

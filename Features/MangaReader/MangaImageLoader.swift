@@ -73,6 +73,9 @@ actor MangaImageLoader {
     func image(for url: URL, allowedPaths: Set<String>) async throws -> Data {
         guard url.scheme == MangaImageScheme.scheme, url.host == MangaImageScheme.host,
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw URLError(.badURL) }
+        guard components.queryItems?.filter({ $0.name == "hoshiImage" }).map(\.value) == [namespace] else {
+            throw URLError(.noPermissionsToReadFile)
+        }
         let path = String(components.path.drop(while: { $0 == "/" }))
         guard allowedPaths.contains(path), declaredPaths.contains(path) else { throw URLError(.noPermissionsToReadFile) }
         // Retry once if an image was replaced while it was being read. A failed speculative

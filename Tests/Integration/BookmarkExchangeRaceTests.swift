@@ -98,7 +98,7 @@ nonisolated final class BookmarkExchangeRaceTests: XCTestCase {
         exchange.queueBookmark(book: book)
         var historyRuns = 0
         let manager = HttpSyncManager(settings: settings, batchState: exchange, mapTransportFactory: { _ in kv },
-            positionHistoryExchange: { _, _, _, _ in historyRuns += 1; await history.pauseOnce() })
+            positionHistoryExchange: { _, _, _, _ in historyRuns += 1; await history.pauseOnce() }, pollCompanionLanes: false)
         manager.suspendPolling()
         let started = ProcessInfo.processInfo.systemUptime
         await manager.syncBookmarksBeforeReading(book: book)
@@ -129,7 +129,7 @@ nonisolated final class BookmarkExchangeRaceTests: XCTestCase {
         exchange.queueBookmark(book: book)
         var historyRuns = 0
         let manager = HttpSyncManager(settings: settings, batchState: exchange, mapTransportFactory: { _ in kv },
-            positionHistoryExchange: { _, _, _, _ in historyRuns += 1; await history.pauseOnce() })
+            positionHistoryExchange: { _, _, _, _ in historyRuns += 1; await history.pauseOnce() }, pollCompanionLanes: false)
         manager.suspendPolling()
         await manager.syncBookmarksBeforeReading(book: book)
         await history.waitUntilPaused()
@@ -162,7 +162,7 @@ nonisolated final class BookmarkExchangeRaceTests: XCTestCase {
         await kv.suspendGet(maps)
         let exchange = HttpSyncBatchState(booksDirectory: directory)
         let manager = HttpSyncManager(settings: settings, batchState: exchange, mapTransportFactory: { _ in kv },
-            positionHistoryExchange: { _, _, _, _ in })
+            positionHistoryExchange: { _, _, _, _ in }, pollCompanionLanes: false)
         manager.suspendPolling()
         let started = ProcessInfo.processInfo.systemUptime
         let opening = Task { await manager.syncBookmarksBeforeReading(book: book) }
@@ -196,7 +196,7 @@ nonisolated final class BookmarkExchangeRaceTests: XCTestCase {
         exchange.queueBookmark(book: book)
         var historyRuns = 0
         let manager = HttpSyncManager(settings: settings, batchState: exchange, mapTransportFactory: { _ in kv },
-            positionHistoryExchange: { _, _, _, _ in historyRuns += 1; await history.pauseOnce() })
+            positionHistoryExchange: { _, _, _, _ in historyRuns += 1; await history.pauseOnce() }, pollCompanionLanes: false)
         manager.suspendPolling()
         await manager.syncBookmarksBeforeReading(book: book)
         await history.waitUntilPaused()
@@ -249,7 +249,7 @@ private actor BookmarkRaceKV: HttpSyncKvTransport {
         bodies[httpSyncBookmarksMapPrefix + "remote.json"] = try JSONEncoder().encode(["race": entry])
     }
     func uploadedPage() throws -> Int? {
-        guard let key = writes.last, let data = bodies[key] else { return nil }
+        guard let key = writes.last(where: { $0.hasPrefix(httpSyncBookmarksMapPrefix) }), let data = bodies[key] else { return nil }
         return try JSONDecoder().decode([String: HttpSyncBookmarkMapEntry].self, from: data)["race"]?.value?.chapterIndex
     }
     func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {

@@ -53,6 +53,7 @@ final class HttpSyncManager {
     private let settings: HttpSyncSettingsStore
     private let batchState: HttpSyncBatchState
     private let mapTransportFactory: @MainActor (HttpSyncConfig) -> HttpSyncKvTransport
+    private let pollCompanionLanes: Bool
     private let positionHistoryExchange: (@MainActor (HttpSyncKvTransport, [String: HttpSyncKvKeyMeta], String, HttpSyncConfig) async -> Void)?
     /// Agent C makes `AiChatSettingsStore` conform to `AiSettingsSyncing` in Phase 2 and assigns
     /// it here (or via the initializer). Until then this is nil and the AI-settings sync path is
@@ -75,11 +76,13 @@ final class HttpSyncManager {
     init(settings: HttpSyncSettingsStore? = nil, aiSettings: AiSettingsSyncing? = nil,
          batchState: HttpSyncBatchState? = nil,
          mapTransportFactory: (@MainActor (HttpSyncConfig) -> HttpSyncKvTransport)? = nil,
-         positionHistoryExchange: (@MainActor (HttpSyncKvTransport, [String: HttpSyncKvKeyMeta], String, HttpSyncConfig) async -> Void)? = nil) {
+         positionHistoryExchange: (@MainActor (HttpSyncKvTransport, [String: HttpSyncKvKeyMeta], String, HttpSyncConfig) async -> Void)? = nil,
+         pollCompanionLanes: Bool = true) {
         self.settings = settings ?? HttpSyncSettingsStore.shared
         self.batchState = batchState ?? HttpSyncBatchState.shared
         self.mapTransportFactory = mapTransportFactory ?? { HttpSyncKvClient(baseURL: $0.baseURL, bearerToken: $0.token) }
         self.positionHistoryExchange = positionHistoryExchange
+        self.pollCompanionLanes = pollCompanionLanes
         // Default to the app's ChatGPT settings store so model/prompt sync works out of the box;
         // tests can inject a stub.
         self.aiSettings = aiSettings ?? AiChatSettingsStore.shared
@@ -649,8 +652,10 @@ final class HttpSyncManager {
             guard settings.currentConfig() == config, !Task.isCancelled else { return nil }
             // A manga left waiting by a stopped or failed pass is shown once its maps were exchanged.
             if !ready.isEmpty, settings.currentConfig() == config { HttpSyncCloudBooks.shared.reveal(ready) }
-            HttpStatisticsLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
-            HttpReaderPreferencesLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
+            if pollCompanionLanes {
+                HttpStatisticsLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
+                HttpReaderPreferencesLane.shared.poll(transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)) { self.settings.currentConfig() == config }
+            }
             notePushOutcome(success: true)
             guard foreground else { return changes }
             if changes.needsBootstrap || changes.booksChanged || changes.otherChanged {

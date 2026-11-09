@@ -33,7 +33,7 @@ struct MangaReaderView: View {
     var onTranslateCrop: ((AiChatImage) -> Void)?
 
     @State private var model: MangaReaderViewModel
-    @State private var controller = MangaWebViewController()
+    @State private var controller: MangaWebViewController
     /// Drives the ChatGPT popup (bubble translate + screenshot translate). Used when the host
     /// doesn't override `onAskAi`/`onTranslateCrop`.
     @State private var aiController = MangaAiController()
@@ -50,6 +50,8 @@ struct MangaReaderView: View {
     @State private var uiTestCropProbe = "none"
     @State private var uiTestActionProbe = "actions=pending"
     @State private var uiTestCopyProbe = "copy=none"
+    @State private var initialRenderPage: Int?
+    @State private var initialRenderSize: CGSize = .zero
 
     // MARK: Directional page-turn slide
     //
@@ -85,7 +87,11 @@ struct MangaReaderView: View {
         self.metadata = metadata
         self.onAskAi = onAskAi
         self.onTranslateCrop = onTranslateCrop
-        _model = State(initialValue: MangaReaderViewModel(metadata: metadata))
+        let model = MangaReaderViewModel(metadata: metadata)
+        let controller = MangaWebViewController()
+        controller.startupTrace = model.startupTrace
+        _model = State(initialValue: model)
+        _controller = State(initialValue: controller)
     }
 
     private let backgroundColor: Color = .black
@@ -116,6 +122,12 @@ struct MangaReaderView: View {
 #endif
     }
 
+    private var firstImageProbeLabel: String {
+        controller.firstImagePaintedMilliseconds.map {
+            "first_image_ms=\(Int($0.rounded()));load_token=\(controller.loadToken);painted_pages=\(controller.firstImagePaintedPages.map(String.init).joined(separator: ","))"
+        } ?? "first_image=pending"
+    }
+
     private var pageNavigationEnabled: Bool {
         !screenshotCropMode && !showGoToPageDialog && !showMangaSettings &&
         !showStatisticsSheet && !aiController.isPresented
@@ -125,18 +137,17 @@ struct MangaReaderView: View {
         ZStack {
             backgroundColor.ignoresSafeArea()
 
-            if model.isReady {
-                // The page is always full-bleed and the top/bottom chrome floats above it
-                // (matching Android). Overlays receive taps before the WebView (the dictionary
-                // popups in pageContent prove this), so the chrome stays responsive; toggling
-                // focus mode only changes bar visibility and never relayouts/refits the page.
-                pageContent
-                    .ignoresSafeArea()
-            } else if let error = model.errorMessage {
+            // Start WebKit alongside local decoding, rather than after network and model work.
+            // Until the local page is ready, only the loading/error overlay is interactive.
+            pageContent
+                .ignoresSafeArea()
+                .allowsHitTesting(model.isReady)
+                .accessibilityHidden(!model.isReady)
+            if let error = model.errorMessage {
                 Text(error)
                     .foregroundStyle(.secondary)
                     .padding()
-            } else {
+            } else if !model.isReady {
                 ProgressView().tint(.secondary)
             }
         }
@@ -154,6 +165,12 @@ struct MangaReaderView: View {
         .overlay(alignment: .topLeading) {
             if uiTestingEnabled {
                 VStack(spacing: 0) {
+                    Text(verbatim: firstImageProbeLabel)
+                        .font(.system(size: 1))
+                        .foregroundStyle(.clear)
+                        .frame(width: 1, height: 1)
+                        .accessibilityIdentifier("manga-first-image-probe")
+                        .accessibilityLabel(firstImageProbeLabel)
                     TimelineView(.periodic(from: .now, by: 0.25)) { _ in
                         Text("page=\(model.pageIndex + 1);\(controller.uiTestViewportProbeLabel())")
                             .font(.system(size: 1))
@@ -220,7 +237,11 @@ struct MangaReaderView: View {
         .persistentSystemOverlays(.hidden)
         .task { await model.load(controller: controller, userConfig: userConfig) }
         .onChange(of: model.pageIndex) { oldIndex, newIndex in
-            beginPageTurn(from: oldIndex, to: newIndex)
+            if controller.hasFinishedPage { beginPageTurn(from: oldIndex, to: newIndex) }
+            else { renderInitialPageIfNeeded(size: lastSize) }
+        }
+        .onChange(of: model.isReady) { _, ready in
+            if ready { renderInitialPageIfNeeded(size: lastSize) }
         }
         .task(id: model.isReady) {
             guard model.isReady else { return }
@@ -427,13 +448,13 @@ struct MangaReaderView: View {
             lastSize = geometry.size
             model.viewportSize = geometry.size
             model.isLandscape = geometry.size.width > geometry.size.height
-            model.renderCurrentPage(controller: controller, screenSize: geometry.size, userConfig: userConfig)
+            renderInitialPageIfNeeded(size: geometry.size)
         }
         .onChange(of: geometry.size) { _, newSize in
             lastSize = newSize
             model.viewportSize = newSize
             model.isLandscape = newSize.width > newSize.height
-            model.renderCurrentPage(controller: controller, screenSize: newSize, userConfig: userConfig)
+            renderInitialPageIfNeeded(size: newSize)
         }
         .onChange(of: model.twoPageEnabled) { _, _ in
             // Flipping the spread toggle re-renders the current page (as a spread or single page).
@@ -469,6 +490,19 @@ struct MangaReaderView: View {
         }
     }
 
+    /// Readiness, geometry and bookmark restoration can arrive in the same SwiftUI update.
+    /// Coalesce that first document, but still replace it if a genuinely newer remote page
+    /// arrives before WebKit finishes. A blank startup document is never a page-turn snapshot.
+    private func renderInitialPageIfNeeded(size: CGSize) {
+        guard model.isReady, size.width > 0, size.height > 0 else { return }
+        if !controller.hasFinishedPage {
+            guard initialRenderPage != model.pageIndex || initialRenderSize != size else { return }
+            initialRenderPage = model.pageIndex
+            initialRenderSize = size
+        }
+        model.renderCurrentPage(controller: controller, screenSize: size, userConfig: userConfig)
+    }
+
     private func uiTestProbeLabel(for selection: SelectionData) -> String {
         let rect = selection.rect
         let vertical: String
@@ -499,6 +533,7 @@ struct MangaReaderView: View {
     /// repeat turns via `slideGeneration`, and to snapshot failure (falls back to an instant swap
     /// with a brief opacity dip — never a stuck state).
     private func beginPageTurn(from oldIndex: Int, to newIndex: Int) {
+        model.startupTrace.mark("initial_page_change")
         model.closePopups()
         // Real page turn: this only fires on an actual page-index change (driven by
         // `onChange(of: model.pageIndex)`), so `.pageturn` autostart and the stats update happen
@@ -508,7 +543,7 @@ struct MangaReaderView: View {
         let direction: NavigationDirection = newIndex >= oldIndex ? .forward : .backward
 
         // No laid-out size yet (first render) — just swap.
-        guard !userConfig.disablePageTurnAnimation, lastSize.width > 0, lastSize.height > 0 else {
+        guard controller.hasFinishedPage, !userConfig.disablePageTurnAnimation, lastSize.width > 0, lastSize.height > 0 else {
             clearSlide()
             model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
             return
@@ -516,7 +551,9 @@ struct MangaReaderView: View {
 
         Task {
             // Snapshot the page *before* the reload swaps the HTML underneath.
+            model.startupTrace.mark("snapshot_started")
             let snapshot = await controller.snapshotCurrentPage()
+            model.startupTrace.mark("snapshot_finished")
             // A newer turn superseded this one while we were snapshotting — abandon it.
             guard generation == slideGeneration else { return }
 
@@ -558,6 +595,7 @@ struct MangaReaderView: View {
             try? await Task.sleep(for: .seconds(2))
             if Task.isCancelled { return }
             guard generation == slideGeneration else { return }
+            model.startupTrace.mark("page_ready_timeout")
             clearSlide()
             withAnimation(.easeInOut(duration: 0.18)) { pageOpacity = 1 }
         }
@@ -618,6 +656,7 @@ struct MangaReaderView: View {
                 // full-bleed page art (white-on-white otherwise).
                 .background(Circle().fill(.black.opacity(0.28)).padding(6))
                 .contentShape(Circle())
+                .accessibilityIdentifier("manga-back")
                 .onTapGesture {
                     model.flushPendingBookmark()
                     model.persistStatistics()

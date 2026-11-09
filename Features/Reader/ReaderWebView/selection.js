@@ -414,6 +414,7 @@ window.hoshiSelection = {
         const normalizedOffset = window.hoshiReader ? this.getNormalizedOffset(hit.node, hit.offset) : null;
         const rect = this.getSelectionRect(x, y);
         webkit.messageHandlers.textSelected.postMessage({
+            documentIdentity: window.hoshiMangaDocumentIdentity ?? null,
             text,
             sentence,
             rect,

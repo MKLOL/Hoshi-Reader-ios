@@ -87,6 +87,30 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(oldBox.originalFontSize, oldBox.fontSize)
     }
 
+    func testUnusedLineCoordinatesDoNotAffectParsedBook() throws {
+        let block: [String: Any] = [
+            "box": [10, 20, 110, 420], "font_size": 18.125,
+            "vertical": true, "lines": ["学校で本を読む。"]
+        ]
+        func parse(coordinates: Any?) throws -> MokuroBook {
+            var source = block
+            source["lines_coords"] = coordinates
+            let data = try JSONSerialization.data(withJSONObject: ["pages": [[
+                "img_path": "fixture.png", "img_width": 1400,
+                "img_height": 2100, "blocks": [source]
+            ]]])
+            return try XCTUnwrap(JSONDecoder().decode(RawMokuro.self, from: data)
+                .toMokuroBook(fallbackTitle: "Fixture"))
+        }
+        let expected = try parse(coordinates: nil)
+        XCTAssertEqual(try parse(coordinates: NSNull()), expected)
+        XCTAssertEqual(try parse(coordinates: "malformed coordinates"), expected)
+        let quadrilateral = [[10.125, 20.75], [110.125, 20.75], [110.125, 420.75], [10.125, 420.75]]
+        XCTAssertEqual(try parse(coordinates: Array(repeating: quadrilateral, count: 4_096)), expected)
+        XCTAssertEqual(expected.pages[0].textBoxes[0].fontSize, 24)
+        XCTAssertEqual(expected.pages[0].textBoxes[0].originalFontSize, 18)
+    }
+
     @MainActor func testIPadOCRLookupKeepsImageRelativeFontAndTranslationButtonStableWithRuby() async throws {
         let text = "学校で本を読む。"
         let page = MokuroPage(index: 0, imagePath: "fixture.png", imageWidth: 1400, imageHeight: 2100,
@@ -350,6 +374,28 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertLessThanOrEqual(try XCTUnwrap(fields["bottom"] as? Double), 640)
         XCTAssertEqual(fields["scrollLeft"] as? Double, 0)
         XCTAssertEqual(fields["scrollTop"] as? Double, 0)
+    }
+
+    func testImageLoaderRejectsAnObsoleteBooksNamespace() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data([1, 2, 3]).write(to: root.appendingPathComponent("page.png"))
+        let previous = MangaImageLoader(), current = MangaImageLoader()
+        await previous.configure(root: root, declaredPaths: ["page.png"])
+        await current.configure(root: root, declaredPaths: ["page.png"])
+        let obsoleteSource = await previous.source(relativePath: "page.png")
+        let obsoleteURL = try XCTUnwrap(obsoleteSource.flatMap { URL(string: $0.url) })
+        do {
+            _ = try await current.image(for: obsoleteURL, allowedPaths: ["page.png"])
+            XCTFail("an old document must not request bytes from the new book through an identical relative path")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .noPermissionsToReadFile)
+        }
+        let source = await current.source(relativePath: "page.png")
+        let url = try XCTUnwrap(source.flatMap { URL(string: $0.url) })
+        let bytes = try await current.image(for: url, allowedPaths: ["page.png"])
+        XCTAssertEqual(bytes, Data([1, 2, 3]))
     }
 
     func testHTMLCacheRevalidatesReplacedImageVersions() async throws {

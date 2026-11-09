@@ -17,6 +17,7 @@ import CHoshiDicts
 @MainActor
 final class MangaReaderViewModel {
     private var metadata: BookMetadata
+    let startupTrace = MangaStartupTrace()
 
     private(set) var book: MokuroBook?
     private(set) var bookRoot: URL?
@@ -80,12 +81,16 @@ final class MangaReaderViewModel {
         self.metadata = metadata
         self.renderCache = MangaPageRenderCache(imageLoader: imageLoader)
         self.twoPageEnabled = UserDefaults.standard.bool(forKey: Self.twoPageKey(metadata.id))
+        startupTrace.mark("model_created")
     }
 
     // MARK: Loading
 
-    func load(controller: MangaWebViewController, userConfig: UserConfig) async {
+    func load(controller: MangaWebViewController, userConfig: UserConfig,
+              bookmarkRefresh: (@MainActor (BookMetadata) async -> Void)? = nil) async {
         guard !isReady, errorMessage == nil else { return }
+        controller.startupTrace = startupTrace
+        startupTrace.mark("load_started")
         guard let booksDir = try? BookStorage.getBooksDirectory(), let folder = metadata.folder else {
             errorMessage = "Could not locate the manga book."
             return
@@ -94,14 +99,23 @@ final class MangaReaderViewModel {
         // Parse off the main actor; return a Sendable tuple (the error reduced to its message so
         // no non-Sendable `Error` existential crosses the task boundary; `String` can't be a
         // `Result.Failure` since it isn't `Error`).
+        startupTrace.mark("parse_started")
         let parsing = Task.detached(priority: .userInitiated) { () -> (book: MokuroBook?, error: String?) in
             do { return (try MokuroBookParser.shared.parse(bookRoot: root), nil) }
             catch { return (nil, error.localizedDescription) }
         }
-        // Local decoding can run while the bounded bookmark-map refresh is in flight. Only
-        // restoring the initial position needs the map result, not reading the local sidecar.
-        await HttpSyncManager.shared.syncBookmarksBeforeReading(book: metadata)
+        // Opening reads the durable local winner without manufacturing a page-turn event.
+        // Maps continue independently; the reader's lifetime notification subscription applies
+        // a late winner, while the exchange rechecks local navigation before applying it.
+        let openingMetadata = metadata
+        Task { @MainActor [startupTrace] in
+            startupTrace.mark("bookmark_refresh_started")
+            if let bookmarkRefresh { await bookmarkRefresh(openingMetadata) }
+            else { await HttpSyncManager.shared.syncBookmarksBeforeReading(book: openingMetadata) }
+            startupTrace.mark("bookmark_refresh_finished")
+        }
         let parsed = await parsing.value
+        startupTrace.mark("parse_ready_on_main")
         guard !Task.isCancelled else { return }
 
         if let parsedBook = parsed.book {
@@ -109,17 +123,26 @@ final class MangaReaderViewModel {
             bookRoot = root
             controller.bookRootForScheme = root
             controller.imageLoader = imageLoader
+            startupTrace.mark("image_loader_started")
             await imageLoader.configure(root: root, declaredPaths: Set(parsedBook.pages.map { $0.imagePath.trimmingPrefixSlash() }))
+            startupTrace.mark("image_loader_finished")
+            guard !Task.isCancelled else { return }
             // Mark this book as the most recently opened so "Recent" sort floats it to the front of
             // its shelf. Mirrors the EPUB reader (ReaderLoaderViewModel.loadBook); the bookshelf
             // re-reads metadata from disk on its next loadBooks().
+            startupTrace.mark("metadata_started")
             metadata.lastAccess = Date()
             try? BookStorage.save(metadata, inside: root, as: FileNames.metadata)
+            startupTrace.mark("metadata_finished")
+            startupTrace.mark("position_started")
             if let id = syncId(for: metadata) { positionSession = ReadingPositionRepository.shared.open(bookId: id, root: root) }
             let restored = (positionSession?.initialBookmark ?? BookStorage.loadBookmark(root: root))?.chapterIndex ?? 0
             pageIndex = max(0, min(restored, max(0, parsedBook.pages.count - 1)))
+            startupTrace.mark("position_finished")
             isReady = true
+            startupTrace.mark("statistics_started")
             setUpStatistics(title: parsedBook.title, root: root, userConfig: userConfig)
+            startupTrace.mark("statistics_finished")
         } else {
             errorMessage = parsed.error ?? "Could not parse the manga."
         }
@@ -227,7 +250,9 @@ final class MangaReaderViewModel {
         Task { [renderCache, imageLoader] in
             guard self.renderGeneration == generation else { return }
             await imageLoader.setWindow(wantedPaths)
+            self.startupTrace.mark("html_started")
             let html = await renderCache.htmlFor(page: page, leftPage: leftPage, config: config)
+            self.startupTrace.mark("html_finished")
             guard self.renderGeneration == generation else { return }
             let loadToken = controller.load(html: html, allowedImagePaths: allowedPaths)
             onLoadToken?(loadToken)

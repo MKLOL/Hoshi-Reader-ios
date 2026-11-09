@@ -31,12 +31,17 @@ final class MangaWebViewController {
     /// Bumped to request a (re)load of the current page HTML.
     fileprivate(set) var loadToken = 0
     fileprivate var pendingHtml: String?
+    fileprivate var documentIdentity = UUID().uuidString
     fileprivate var allowedImagePaths: Set<String> = []
     fileprivate weak var webView: WKWebView?
 
     /// Book root used by the scheme handler to resolve `hoshi-img://` requests off disk.
     var bookRootForScheme: URL?
     var imageLoader: MangaImageLoader?
+    var startupTrace: MangaStartupTrace?
+    fileprivate(set) var firstImagePaintedMilliseconds: Double?
+    fileprivate(set) var firstImagePaintedPages: [Int] = []
+    private(set) var hasFinishedPage = false
     private var readyLoadToken: Int?
     private var pendingPredecode: (token: Int, script: String)?
 
@@ -53,6 +58,7 @@ final class MangaWebViewController {
         webView?.evaluateJavaScript("window.hoshiMangaImageCache && window.hoshiMangaImageCache.cancel()") { _, _ in }
         readyLoadToken = nil
         pendingPredecode = nil
+        documentIdentity = UUID().uuidString
         self.pendingHtml = html
         self.allowedImagePaths = allowedImagePaths
         loadToken += 1
@@ -68,6 +74,7 @@ final class MangaWebViewController {
     fileprivate func pageReady(_ token: Int) {
         guard token == loadToken else { return }
         readyLoadToken = token
+        hasFinishedPage = true
         startPredecodeIfReady()
     }
 
@@ -188,17 +195,17 @@ struct MangaReaderWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeUIView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        // Register the image scheme handler BEFORE creating the webview.
-        config.setURLSchemeHandler(context.coordinator, forURLScheme: MangaImageScheme.scheme)
-        let controllerJS = config.userContentController
+        controller.startupTrace?.mark("webview_creation_started")
+        let prepared = MangaWebViewPreloader.shared.take()
+        context.coordinator.preparedWebView = prepared
+        prepared.schemeHandler.receiver = context.coordinator
+        let webView = prepared.webView
+        let controllerJS = webView.configuration.userContentController
         controllerJS.add(context.coordinator, name: "textSelected")
         controllerJS.add(context.coordinator, name: "hoshiManga")
         controllerJS.add(context.coordinator, name: "hoshiMangaAi")
         controllerJS.add(context.coordinator, name: "hoshiMangaClipboard")
-        config.defaultWebpagePreferences.preferredContentMode = .mobile
 
-        let webView = MangaKeyCommandWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
         webView.backgroundColor = backgroundColor
         webView.scrollView.backgroundColor = backgroundColor
@@ -217,12 +224,14 @@ struct MangaReaderWebView: UIViewRepresentable {
         swipeLeft.delegate = coordinator
         swipeLeft.cancelsTouchesInView = false
         webView.addGestureRecognizer(swipeLeft)
+        coordinator.swipeLeftRecognizer = swipeLeft
 
         let swipeRight = UISwipeGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleSwipeRight(_:)))
         swipeRight.direction = .right
         swipeRight.delegate = coordinator
         swipeRight.cancelsTouchesInView = false
         webView.addGestureRecognizer(swipeRight)
+        coordinator.swipeRightRecognizer = swipeRight
 
         // UIScrollView already owns a coordinated pinch + pan pair. Observe its pinch for
         // telemetry and state syncing, but never write zoomScale/contentOffset from this callback;
@@ -273,6 +282,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         }
 
         controller.attach(webView)
+        controller.startupTrace?.mark("webview_creation_finished")
         return webView
     }
 
@@ -288,10 +298,35 @@ struct MangaReaderWebView: UIViewRepresentable {
             let loadToken = controller.loadToken
             context.coordinator.lastLoadToken = loadToken
             context.coordinator.allowedImagePaths = controller.allowedImagePaths
-            if let navigation = webView.loadHTMLString(html, baseURL: URL(string: MangaPageHtml.baseURLString)) {
+            controller.startupTrace?.mark("html_navigation_\(min(loadToken, 32))")
+            let identity = controller.documentIdentity
+            context.coordinator.documentIdentity = identity
+            let identifiedHTML = html.replacingOccurrences(of: "<head>", with:
+                "<head><script>window.hoshiMangaDocumentIdentity='\(identity)';</script>")
+            let document = controller.startupTrace?.enabled == true
+                ? identifiedHTML.replacingOccurrences(of: "</body>", with: "<script>" + Self.startupImagePaintScript(loadToken: loadToken, identity: identity) + "</script></body>")
+                : identifiedHTML
+            if let navigation = webView.loadHTMLString(document, baseURL: URL(string: MangaPageHtml.baseURLString)) {
                 context.coordinator.trackNavigation(navigation, loadToken: loadToken)
             }
         }
+    }
+
+    /// This opt-in measurement waits for decoded artwork and two browser frame callbacks.
+    /// It records a paint opportunity; physical screen captures remain the visual check.
+    private static func startupImagePaintScript(loadToken: Int, identity: String) -> String {
+        """
+        (function() {
+          var images = Array.from(document.querySelectorAll('img.page-image'));
+          if (!images.length) return;
+          Promise.all(images.map(function(image) { return image.decode(); })).then(function() {
+            if (!images.every(function(image) { return image.complete && image.naturalWidth > 0 && image.naturalHeight > 0; })) return;
+            requestAnimationFrame(function() { requestAnimationFrame(function() {
+              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'startupImagePainted', documentIdentity: '\(identity)', token: \(loadToken), pages: images.map(function(image) { return Number(image.closest('.frame').dataset.pageIndex); })});
+            }); });
+          }).catch(function() {});
+        })();
+        """
     }
 
     private static func configureZoom(for scrollView: UIScrollView) {
@@ -310,6 +345,10 @@ struct MangaReaderWebView: UIViewRepresentable {
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         coordinator.selectionTask?.cancel()
         coordinator.cancelImageReads()
+        webView.stopLoading()
+        if coordinator.parent.controller.webView === webView {
+            coordinator.parent.controller.webView = nil
+        }
         let controllerJS = webView.configuration.userContentController
         controllerJS.removeScriptMessageHandler(forName: "textSelected")
         controllerJS.removeScriptMessageHandler(forName: "hoshiManga")
@@ -330,14 +369,24 @@ struct MangaReaderWebView: UIViewRepresentable {
         if let trackpadPageTurn = coordinator.trackpadPageTurnRecognizer {
             webView.scrollView.removeGestureRecognizer(trackpadPageTurn)
         }
+        if let swipe = coordinator.swipeLeftRecognizer { webView.removeGestureRecognizer(swipe) }
+        if let swipe = coordinator.swipeRightRecognizer { webView.removeGestureRecognizer(swipe) }
         webView.scrollView.delegate = nil
         webView.navigationDelegate = nil
+        if let prepared = coordinator.preparedWebView {
+            coordinator.preparedWebView = nil
+            MangaWebViewPreloader.shared.recycle(prepared)
+        }
     }
 
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler,
                              WKURLSchemeHandler, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var selectionTask: Task<Void, Never>?
+        var preparedWebView: MangaWebViewPreloader.Prepared?
+        var documentIdentity: String?
+        weak var swipeLeftRecognizer: UISwipeGestureRecognizer?
+        weak var swipeRightRecognizer: UISwipeGestureRecognizer?
         var parent: MangaReaderWebView
         var lastLoadToken = 0
         var allowedImagePaths: Set<String> = []
@@ -391,6 +440,8 @@ struct MangaReaderWebView: UIViewRepresentable {
                 return
             }
             guard finishedLoadToken == parent.controller.loadToken else { return }
+            parent.controller.startupTrace?.mark("document_finished")
+            webView.isHidden = false
             // WebKit can restore the previous document's viewport during navigation. Reset only
             // after the current document loads, before exposing it for page-turn gestures.
             MangaReaderWebView.configureZoom(for: webView.scrollView)
@@ -423,6 +474,11 @@ struct MangaReaderWebView: UIViewRepresentable {
         // MARK: Script messages
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            // A recycled view can still have an obsolete document's queued IPC callbacks.
+            // Only this exact navigation may dispatch OCR, AI, clipboard or readiness events.
+            guard let payload = message.body as? [String: Any],
+                  let identity = payload["documentIdentity"] as? String,
+                  identity == documentIdentity, identity == parent.controller.documentIdentity else { return }
             switch message.name {
             case "textSelected":
                 guard let body = message.body as? [String: Any],
@@ -447,6 +503,14 @@ struct MangaReaderWebView: UIViewRepresentable {
             case "hoshiManga":
                 guard let body = message.body as? [String: Any] else { return }
                 switch body["event"] as? String {
+                case "startupImagePainted":
+                    guard let token = body["token"] as? Int, token == parent.controller.loadToken,
+                          let trace = parent.controller.startupTrace, trace.enabled, !trace.isFinished,
+                          let pages = body["pages"] as? [Int], !pages.isEmpty, pages.count <= 2,
+                          pages.allSatisfy({ $0 >= 0 }) else { return }
+                    trace.finish()
+                    parent.controller.firstImagePaintedPages = pages
+                    parent.controller.firstImagePaintedMilliseconds = trace.firstVisibleMilliseconds
                 case "scrollableBubbleRegions":
                     let values = body["regions"] as? [[String: Any]] ?? []
                     scrollableBubbleRegions = values.prefix(256).compactMap { value in
@@ -499,8 +563,10 @@ struct MangaReaderWebView: UIViewRepresentable {
             guard let url = urlSchemeTask.request.url else {
                 activeSchemeTasks.remove(taskId)
                 urlSchemeTask.didFailWithError(URLError(.badURL))
+                preparedWebView?.schemeHandler.complete(urlSchemeTask)
                 return
             }
+            parent.controller.startupTrace?.mark("image_requested")
             let loader = parent.controller.imageLoader
             let root = bookRoot, allowed = allowedImagePaths
             schemeReads[taskId] = Task { [weak self] in
@@ -516,11 +582,13 @@ struct MangaReaderWebView: UIViewRepresentable {
                         }.value
                     }
                     guard let self, !Task.isCancelled, self.activeSchemeTasks.contains(taskId) else { return }
+                    self.parent.controller.startupTrace?.mark("image_bytes_ready")
                     let response = URLResponse(url: url, mimeType: MangaImageScheme.mimeType(for: url),
                                                expectedContentLength: data.count, textEncodingName: nil)
                     urlSchemeTask.didReceive(response)
                     urlSchemeTask.didReceive(data)
                     urlSchemeTask.didFinish()
+                    self.preparedWebView?.schemeHandler.complete(urlSchemeTask)
                     self.activeSchemeTasks.remove(taskId)
                     self.schemeReads.removeValue(forKey: taskId)
                 } catch {
@@ -528,6 +596,7 @@ struct MangaReaderWebView: UIViewRepresentable {
                     self.activeSchemeTasks.remove(taskId)
                     self.schemeReads.removeValue(forKey: taskId)
                     urlSchemeTask.didFailWithError(error)
+                    self.preparedWebView?.schemeHandler.complete(urlSchemeTask)
                 }
             }
         }

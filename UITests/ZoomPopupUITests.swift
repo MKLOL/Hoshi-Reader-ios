@@ -1,6 +1,116 @@
 import XCTest
+import UIKit
 
 final class ZoomPopupUITests: XCTestCase {
+    /// Measures the full production manga route on a disposable simulator. The fixture is
+    /// generated only by its explicit DEBUG launch flag; this test must never run on a device
+    /// containing the user's library. Readiness is image decode + two frames, not DOM/navigation.
+    func testMangaStartupShowsDecodedImagePromptlyAndReopensAtSavedPage() throws {
+#if !targetEnvironment(simulator)
+        throw XCTSkip("The generated startup fixture is restricted to a disposable simulator.")
+#endif
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
+        app.launchEnvironment["HOSHI_UI_TESTING_ZOOM"] = "1"
+        app.launchEnvironment["HOSHI_MANGA_STARTUP_TRACE"] = "1"
+        app.launchArguments += ["-mangaSingleTapLookup", "NO", "-mangaShowFurigana", "NO"]
+        XCUIDevice.shared.orientation = .portrait
+        // A fail-fast XCTest assertion can bypass deferred teardown. Explicitly replace the
+        // preceding process so the first measurement cannot reuse its completed controller.
+        app.terminate()
+        app.launch()
+        defer { app.terminate() }
+
+        for opening in 0..<3 {
+            let fixture = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "IDB Zoom Fixture")).firstMatch
+            XCTAssertTrue(fixture.waitForExistence(timeout: 5))
+            let tappedAt = ProcessInfo.processInfo.systemUptime
+            fixture.tap()
+            let visible = app.descendants(matching: .any)["manga-first-image-probe"].firstMatch
+            let imageReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH %@", "first_image_ms="), object: visible)
+            XCTAssertEqual(XCTWaiter.wait(for: [imageReady], timeout: 5), .completed,
+                           "the manga image never decoded and reached two rendering frames: \(visible.label)")
+            let firstImageLabel = visible.label
+            print("Manga first-image probe opening=\(opening + 1) label=\(firstImageLabel.debugDescription)")
+            let timingField = try XCTUnwrap(firstImageLabel.split(separator: ";").first,
+                                           "first-image label has no timing field: \(firstImageLabel.debugDescription)")
+            let milliseconds = try XCTUnwrap(Double(timingField.replacingOccurrences(of: "first_image_ms=", with: "")),
+                                            "first-image timing is not a machine-readable number: \(firstImageLabel.debugDescription)")
+            XCTAssertGreaterThan(milliseconds, 0)
+            print("Manga first visible image opening=\(opening + 1) native_ms=\(milliseconds) ui_tap_elapsed_ms=\((ProcessInfo.processInfo.systemUptime - tappedAt) * 1000)")
+
+            let viewport = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+            let expectedPage = opening == 0 ? 1 : 2
+            let paintedPages = try XCTUnwrap(firstImageLabel.split(separator: ";").first { $0.hasPrefix("painted_pages=") },
+                                            "decoded image identity is missing: \(firstImageLabel.debugDescription)")
+            XCTAssertEqual(String(paintedPages), "painted_pages=\(expectedPage - 1)",
+                           "the decoded HTML image must match the restored bookmark, not just the model page")
+            XCTAssertTrue(waitForViewport(viewport, containing: "page=\(expectedPage);"),
+                          "reopening must restore the saved nonzero page: \(viewport.label)")
+            XCTAssertTrue(visible.label.split(separator: ";").contains("load_token=1"),
+                          "initial bookmark restoration must load one document: \(visible.label)")
+            let duplicateInitialLoad = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == true AND NOT (label MATCHES %@)", ".*;load_token=1(;.*)?"), object: visible)
+            duplicateInitialLoad.isInverted = true
+            XCTAssertEqual(XCTWaiter.wait(for: [duplicateInitialLoad], timeout: 0.5), .completed,
+                           "a late initial-page change must not replace the first document")
+            try assertFixtureArtworkIsVisible(name: "manga-first-image-opening-\(opening + 1)")
+            XCTAssertLessThan(milliseconds, 1500,
+                              "a local three-page book must not regress to a three-second black screen")
+
+            if opening == 0 {
+                app.buttons["manga-options-menu"].tap()
+                app.buttons["Go to page"].tap()
+                let field = app.textFields["manga-go-to-page-field"]
+                XCTAssertTrue(field.waitForExistence(timeout: 3))
+                field.tap()
+                let oldValue = field.value as? String ?? ""
+                field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + "2")
+                app.buttons["manga-go-to-page-confirm"].tap()
+                XCTAssertTrue(waitForViewport(viewport, containing: "page=2;"), viewport.label)
+            }
+            let back = app.descendants(matching: .any)["manga-back"].firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 3))
+            back.tap()
+            let readerClosed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: visible)
+            XCTAssertEqual(XCTWaiter.wait(for: [readerClosed], timeout: 5), .completed)
+        }
+    }
+
+    /// Check the fixture's white paper and two gray artwork blocks. White alone could be the
+    /// bookshelf behind an invisible reader; the image-relative blocks prove the artwork shows.
+    private func assertFixtureArtworkIsVisible(name: String) throws {
+        let screenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let image = try XCTUnwrap(screenshot.image.cgImage)
+        let sourceWidth: CGFloat = 1179, sourceHeight: CGFloat = 2556
+        let scale = min(CGFloat(image.width) / sourceWidth, CGFloat(image.height) / sourceHeight)
+        let origin = CGPoint(x: (CGFloat(image.width) - sourceWidth * scale) / 2,
+                             y: (CGFloat(image.height) - sourceHeight * scale) / 2)
+        let samples: [(String, CGPoint, ClosedRange<UInt8>)] = [
+            ("white paper", CGPoint(x: 590, y: 1280), 221...255),
+            ("upper gray artwork", CGPoint(x: 480, y: 975), 150...190),
+            ("lower gray artwork", CGPoint(x: 450, y: 1775), 150...190)
+        ]
+        for (label, sourcePoint, expected) in samples {
+            let point = CGPoint(x: (origin.x + sourcePoint.x * scale).rounded(.down),
+                                y: (origin.y + sourcePoint.y * scale).rounded(.down))
+            let pixelImage = try XCTUnwrap(image.cropping(to: CGRect(origin: point, size: CGSize(width: 1, height: 1))))
+            var pixel = [UInt8](repeating: 0, count: 4)
+            try pixel.withUnsafeMutableBytes { bytes in
+                let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
+                    bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(pixelImage, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            }
+            XCTAssertTrue(pixel.prefix(3).allSatisfy { expected.contains($0) },
+                          "first-image readiness must show \(label), not a blank/hidden reader; pixel=\(pixel), point=\(point)")
+        }
+    }
+
     func testPageJumpSubmitsWithKeyboardGo() throws {
         continueAfterFailure = false
         let app = try launchZoomFixture(syntheticFixture: true)

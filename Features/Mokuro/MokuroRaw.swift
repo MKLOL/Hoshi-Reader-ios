@@ -59,14 +59,9 @@ nonisolated struct RawMokuroBlock: Decodable {
     let vertical: Bool
     let fontSize: Double
     let lines: [String]
-    /// Per-line quadrilateral `[[x, y], ...]` in image pixels — the measured extent of each
-    /// drawn line. For vertical text the quad's width is the drawn glyph size.
-    let linesCoords: [[[Double]]]
-
     enum CodingKeys: String, CodingKey {
         case box, vertical, lines
         case fontSize = "font_size"
-        case linesCoords = "lines_coords"
     }
 
     init(from decoder: Decoder) throws {
@@ -75,9 +70,8 @@ nonisolated struct RawMokuroBlock: Decodable {
         vertical = try c.decodeIfPresent(Bool.self, forKey: .vertical) ?? false
         fontSize = try c.decodeIfPresent(Double.self, forKey: .fontSize) ?? 0
         lines = try c.decodeIfPresent([String].self, forKey: .lines) ?? []
-        // try? (not decodeIfPresent): a malformed lines_coords anywhere in the file must not
-        // fail the whole book parse — sizing falls back to geometry/font_size instead.
-        linesCoords = (try? c.decode([[[Double]]].self, forKey: .linesCoords)) ?? []
+        // Android's image-space font curve needs only font_size. Leave lines_coords as an
+        // unknown key so opening a volume does not allocate unused per-line quadrilaterals.
     }
 }
 
@@ -135,8 +129,7 @@ extension RawMokuroBlock {
                 boxWidth: width,
                 boxHeight: height,
                 vertical: vertical,
-                lines: lines,
-                linesCoords: linesCoords
+                lines: lines
             ),
             vertical: vertical,
             lines: lines,

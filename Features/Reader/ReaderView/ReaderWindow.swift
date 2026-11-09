@@ -78,6 +78,7 @@ final class ReaderWindow {
         } completion: { _ in
             // Dismiss the whole reader stack even if the host is presenting sentence mode.
             (host.presentingViewController ?? host).dismiss(animated: false) {
+                WebViewPreloader.shared.warmup()
                 onDismiss?()
             }
         }

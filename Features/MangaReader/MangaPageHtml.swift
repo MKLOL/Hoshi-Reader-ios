@@ -698,7 +698,7 @@ nonisolated enum MangaPageHtml {
             if (p.scrollWidth <= p.clientWidth + 1 && p.scrollHeight <= p.clientHeight + 1) return;
             regions.push(manga.hostRectFromViewportRect(p.getBoundingClientRect()));
           });
-          h.hoshiManga.postMessage({event:'scrollableBubbleRegions', regions:regions});
+          h.hoshiManga.postMessage({documentIdentity: window.hoshiMangaDocumentIdentity, event:'scrollableBubbleRegions', regions:regions});
         },
         annotationBaseHit: function(box, x, y) {
           var annotations = box.querySelectorAll('rt');
@@ -1132,7 +1132,7 @@ nonisolated enum MangaPageHtml {
             if (result === null || typeof result === 'undefined') {
               var h = handlers();
               if (h && h.hoshiManga) {
-                h.hoshiManga.postMessage({ event: 'selectedNothing' });
+                h.hoshiManga.postMessage({ documentIdentity: window.hoshiMangaDocumentIdentity, event: 'selectedNothing' });
               }
             }
           }
@@ -1223,7 +1223,7 @@ nonisolated enum MangaPageHtml {
             var aiBlockId = aiActions && aiActions.dataset ? (aiActions.dataset.blockId || '') : '';
             var h = handlers();
             if (aiText && h && h.hoshiMangaAi) {
-              h.hoshiMangaAi.postMessage({ text: aiText, blockId: aiBlockId });
+              h.hoshiMangaAi.postMessage({ documentIdentity: window.hoshiMangaDocumentIdentity, text: aiText, blockId: aiBlockId });
             }
             window.hoshiManga.clearRevealed();
             return '__ai__';
@@ -1234,7 +1234,7 @@ nonisolated enum MangaPageHtml {
             var copyText = copyActions && copyActions.dataset ? copyActions.dataset.bubbleText : '';
             var hc = handlers();
             if (copyText && hc && hc.hoshiMangaClipboard) {
-              hc.hoshiMangaClipboard.postMessage({ text: copyText });
+              hc.hoshiMangaClipboard.postMessage({ documentIdentity: window.hoshiMangaDocumentIdentity, text: copyText });
             }
             window.hoshiManga.clearRevealed();
             return '__copied__';
@@ -1253,7 +1253,7 @@ nonisolated enum MangaPageHtml {
               window.hoshiManga.prepareReveal(box);
               box.classList.add('revealed');
               var revealedText = box.querySelector('p');
-              window.webkit.messageHandlers.hoshiManga.postMessage({event: 'bubbleRevealed', text: window.hoshiManga.bubbleText(box), blockId: box.dataset.hoshiBlock || ''});
+              window.webkit.messageHandlers.hoshiManga.postMessage({documentIdentity: window.hoshiMangaDocumentIdentity, event: 'bubbleRevealed', text: window.hoshiManga.bubbleText(box), blockId: box.dataset.hoshiBlock || ''});
               window.hoshiManga.tryWrapFallback(box);
               window.hoshiManga.fitFurigana(box);
               window.hoshiManga.notifyScrollableBubbleRegions();
