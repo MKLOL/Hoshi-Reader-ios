@@ -15,7 +15,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-enum MokuroCover {
+nonisolated enum MokuroCover {
     enum CoverError: LocalizedError {
         case sourceUnreadable(URL)
         case thumbnailFailed(URL)

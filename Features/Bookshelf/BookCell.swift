@@ -63,7 +63,7 @@ struct BookCell: View {
                 }
             }
             
-            if userConfig.enableSync {
+            if book.resolvedContentType == .epub && userConfig.enableSync {
                 if userConfig.syncMode == .manual {
                     Menu {
                         Button {
@@ -88,7 +88,7 @@ struct BookCell: View {
                 }
             }
             
-            if userConfig.enableSasayaki {
+            if book.resolvedContentType == .epub && userConfig.enableSasayaki {
                 Button {
                     onMatch()
                 } label: {

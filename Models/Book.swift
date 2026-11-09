@@ -60,11 +60,11 @@ nonisolated struct Bookmark: Codable, Equatable, Sendable {
     var lastModified: Date?
 }
 
-struct BookInfo: Codable {
+nonisolated struct BookInfo: Codable, Sendable {
     let characterCount: Int
     let chapterInfo: [String: ChapterInfo]
     
-    struct ChapterInfo: Codable {
+    struct ChapterInfo: Codable, Sendable {
         let spineIndex: Int?
         let currentTotal: Int
         let chapterCount: Int

@@ -21,7 +21,7 @@
 import EPUBKit
 import Foundation
 
-enum MokuroImportError: LocalizedError {
+nonisolated enum MokuroImportError: LocalizedError {
     case noMokuroFile
     case noPages
     case missingImage(String)
@@ -41,7 +41,25 @@ enum MokuroImportError: LocalizedError {
     }
 }
 
-struct MokuroImporter {
+/// A single executor prevents simultaneous local imports from choosing the same destination.
+/// The operation is synchronous on this actor so it cannot interleave halfway through a volume.
+actor MokuroImportWorker {
+    static let shared = MokuroImportWorker()
+    typealias Operation = @Sendable (URL, URL) throws -> BookMetadata
+    private let operation: Operation
+
+    init(operation: @escaping Operation = { source, directory in
+        try MokuroImporter.importBundle(from: source, booksDirectory: directory)
+    }) {
+        self.operation = operation
+    }
+
+    func importBundle(from source: URL, booksDirectory: URL) throws -> BookMetadata {
+        try operation(source, booksDirectory)
+    }
+}
+
+nonisolated struct MokuroImporter {
     /// File extensions accepted as zip archives of a mokuro volume.
     private static let archiveExtensions: Set<String> = ["zip", "cbz"]
     /// The `.mokuro` JSON file extension.
@@ -55,7 +73,13 @@ struct MokuroImporter {
     /// `bookinfo.json` (with `characterCount = page count` so the bookshelf progress bar is
     /// page-based). Returns the created book's metadata, or the existing metadata if a book
     /// directory with the same sanitized title already exists.
-    static func importBundle(from sourceURL: URL) throws -> BookMetadata {
+    @MainActor static func importBundle(from sourceURL: URL) throws -> BookMetadata {
+        try importBundle(from: sourceURL, booksDirectory: BookStorage.getBooksDirectory())
+    }
+
+    /// Filesystem-only entry point. Resolve app storage on the caller's actor, then perform
+    /// expensive archive/image work without touching the main-actor BookStorage caches.
+    static func importBundle(from sourceURL: URL, booksDirectory: URL) throws -> BookMetadata {
         let accessing = sourceURL.startAccessingSecurityScopedResource()
         defer {
             if accessing {
@@ -93,7 +117,8 @@ struct MokuroImporter {
             }
         }
 
-        return try assembleBook(staging: staging, fallbackName: sourceURL.deletingPathExtension().lastPathComponent)
+        return try assembleBook(staging: staging, fallbackName: sourceURL.deletingPathExtension().lastPathComponent,
+                                booksDirectory: booksDirectory)
     }
 
     // MARK: - Assembly
@@ -101,7 +126,7 @@ struct MokuroImporter {
     /// Given a `staging` directory mirroring the source layout, locate the `.mokuro` file,
     /// copy its referenced images into the target book directory, write the path-rewritten
     /// `mokuro.json`, the cover, and the metadata/bookinfo sidecars.
-    private static func assembleBook(staging: URL, fallbackName: String) throws -> BookMetadata {
+    private static func assembleBook(staging: URL, fallbackName: String, booksDirectory: URL) throws -> BookMetadata {
         let fileManager = FileManager.default
 
         guard let mokuroFile = findMokuroFile(in: staging) else {
@@ -166,13 +191,13 @@ struct MokuroImporter {
         // + page count) by returning the existing book; otherwise uniquify the directory name so a
         // different volume that sanitizes to the same name never clears/overwrites an existing
         // book's images/bookmark/statistics (mirrors Android's createMokuroBookDirectory).
-        let booksDir = try BookStorage.getBooksDirectory()
+        let booksDir = booksDirectory
         let safeTitle = sanitizeFileName(title)
         let primaryRoot = booksDir.appendingPathComponent(safeTitle)
         if fileManager.fileExists(atPath: primaryRoot.path(percentEncoded: false)),
-           let existing = BookStorage.loadMetadata(root: primaryRoot),
+           let existing = loadSidecar(BookMetadata.self, root: primaryRoot, name: FileNames.metadata),
            existing.title == title,
-           BookStorage.loadBookInfo(root: primaryRoot)?.characterCount == plannedBasenames.count {
+           loadSidecar(BookInfo.self, root: primaryRoot, name: FileNames.bookinfo)?.characterCount == plannedBasenames.count {
             return existing
         }
 
@@ -182,7 +207,10 @@ struct MokuroImporter {
             folderName = "\(safeTitle)-\(suffix)"
             suffix += 1
         }
-        let targetRoot = booksDir.appendingPathComponent(folderName)
+        let destinationRoot = booksDir.appendingPathComponent(folderName)
+        // Publish only a complete volume. A foreground shelf refresh must not discover
+        // metadata while a background import is still copying its pages or sidecars.
+        let targetRoot = booksDir.appendingPathComponent(".MokuroImport-\(UUID())", isDirectory: true)
 
         do {
             // Copy images into images/.
@@ -230,11 +258,12 @@ struct MokuroImporter {
                 importedAt: rfc3339Now(),
                 syncId: deriveSyncId(title, folderName: folderName)
             )
-            try BookStorage.save(metadata, inside: targetRoot, as: FileNames.metadata)
+            try saveSidecar(metadata, root: targetRoot, name: FileNames.metadata)
 
             // Page-based progress: total = page count, no per-chapter info.
             let bookInfo = BookInfo(characterCount: plannedBasenames.count, chapterInfo: [:])
-            try BookStorage.save(bookInfo, inside: targetRoot, as: FileNames.bookinfo)
+            try saveSidecar(bookInfo, root: targetRoot, name: FileNames.bookinfo)
+            try fileManager.moveItem(at: targetRoot, to: destinationRoot)
 
             return metadata
         } catch {
@@ -242,6 +271,18 @@ struct MokuroImporter {
             try? fileManager.removeItem(at: targetRoot)
             throw error
         }
+    }
+
+    /// Fresh Codable reads avoid sharing BookStorage's main-actor remembered-decode cache.
+    private static func loadSidecar<T: Decodable>(_ type: T.Type, root: URL, name: String) -> T? {
+        guard let data = try? Data(contentsOf: root.appendingPathComponent(name)) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private static func saveSidecar<T: Encodable>(_ value: T, root: URL, name: String) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        try encoder.encode(value).write(to: root.appendingPathComponent(name), options: .atomic)
     }
 
     // MARK: - Location helpers
@@ -378,7 +419,7 @@ struct MokuroImporter {
 
 private extension String {
     /// Kotlin `String.ifBlank { null }`: nil if empty or all-whitespace.
-    var nonBlank: String? {
+    nonisolated var nonBlank: String? {
         trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
     }
 }

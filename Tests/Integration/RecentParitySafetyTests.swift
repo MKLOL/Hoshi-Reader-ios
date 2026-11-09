@@ -51,3 +51,156 @@ nonisolated final class RecentParitySafetyTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: live.appendingPathComponent("current"), encoding: .utf8), "keep")
     }
 }
+
+nonisolated final class BookshelfUsabilityTests: XCTestCase {
+    @MainActor func testMarkReadRestoresLastMangaPageAndPreservesEPUBSpineSemantics() throws {
+        let directory = try BookStorage.getBooksDirectory()
+        let mangaRoot = directory.appendingPathComponent("mark-read-manga-\(UUID())")
+        let epubRoot = directory.appendingPathComponent("mark-read-epub-\(UUID())")
+        defer {
+            try? FileManager.default.removeItem(at: mangaRoot)
+            try? FileManager.default.removeItem(at: epubRoot)
+        }
+        let shelf = BookshelfViewModel()
+        for (root, type, info, finalIndex) in [
+            (mangaRoot, ContentType.mokuro, BookInfo(characterCount: 200, chapterInfo: [:]), 199),
+            (epubRoot, ContentType.epub, BookInfo(characterCount: 200, chapterInfo: [
+                "first": .init(spineIndex: 2, currentTotal: 0, chapterCount: 100),
+                "last": .init(spineIndex: 7, currentTotal: 100, chapterCount: 100)
+            ]), 7)
+        ] {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let book = BookMetadata(title: "Mark read fixture", cover: nil, folder: root.lastPathComponent,
+                                    lastAccess: .now, contentType: type, syncId: UUID().uuidString.lowercased())
+            try BookStorage.save(book, inside: root, as: FileNames.metadata)
+            try BookStorage.save(info, inside: root, as: FileNames.bookinfo)
+            shelf.markRead(book: book)
+            let bookmark = try XCTUnwrap(BookStorage.loadBookmark(root: root))
+            XCTAssertEqual(bookmark.chapterIndex, finalIndex)
+            XCTAssertEqual(bookmark.progress, 1)
+            XCTAssertEqual(bookmark.characterCount, 200)
+            let reopened = ReadingPositionRepository.shared.open(bookId: try XCTUnwrap(book.syncId), root: root)
+            XCTAssertEqual(reopened.initialBookmark?.chapterIndex, finalIndex)
+        }
+    }
+
+    @MainActor func testMangaRejectsEPUBOnlyActionsBeforeSyncOrReadingSubtitles() async {
+        let shelf = BookshelfViewModel()
+        let manga = BookMetadata(title: "Manga", cover: nil, folder: nil, lastAccess: .now, contentType: .mokuro)
+        shelf.syncBook(book: manga, syncStats: true, statsSyncMode: .merge, syncAudioBook: true)
+        XCTAssertFalse(shelf.isSyncing)
+        do {
+            _ = try await shelf.runSasayakiMatch(book: manga,
+                srtURL: URL(fileURLWithPath: "/nonexistent/subtitles.srt"), searchWindow: 100)
+            XCTFail("Manga must not be sent to the EPUB parser")
+        } catch BookshelfActionError.epubRequired { }
+        catch { XCTFail("Wrong failure: \(error)") }
+    }
+
+    @MainActor func testSingleMangaImportShowsProgressWithoutBlockingMainActorAndQueuesLaterImports() async throws {
+        let started = expectation(description: "Background import started")
+        let imported = expectation(description: "All queued manga imported")
+        imported.expectedFulfillmentCount = 3
+        let release = DispatchSemaphore(value: 0)
+        let first = URL(fileURLWithPath: "/fixture/first.cbz")
+        let worker = MokuroImportWorker { source, _ in
+            XCTAssertFalse(Thread.isMainThread, "Archive and image work must stay off the UI thread")
+            if source == first { started.fulfill() }
+            guard release.wait(timeout: .now() + 5) == .success else { throw CancellationError() }
+            imported.fulfill()
+            return BookMetadata(title: nil, cover: nil, folder: nil, lastAccess: .now, contentType: .mokuro)
+        }
+        let shelf = BookshelfViewModel(mangaImporter: worker)
+        defer { for _ in 0..<3 { release.signal() } }
+        shelf.importMangaBundles(result: .success([first]))
+        XCTAssertEqual(shelf.importBooksProgress, "Importing 1 / 1...")
+        await fulfillment(of: [started], timeout: 2)
+        // These main-actor updates execute while the worker is deliberately blocked.
+        shelf.importMangaBundles(result: .success([
+            URL(fileURLWithPath: "/fixture/second.cbz"), URL(fileURLWithPath: "/fixture/third.cbz")
+        ]))
+        XCTAssertEqual(shelf.importBooksProgress, "Importing 1 / 3...")
+        for _ in 0..<3 { release.signal() }
+        await fulfillment(of: [imported], timeout: 3)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while shelf.importBooksProgress != nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(shelf.importBooksProgress)
+        XCTAssertFalse(shelf.shouldShowError, shelf.errorMessage)
+    }
+
+    func testBackgroundMangaImportPublishesCompleteVolumeDeduplicatesAndPreservesExistingBookOnFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("manga-import-\(UUID())")
+        let source = root.appendingPathComponent("source"), books = root.appendingPathComponent("Books")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let png = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII="))
+        for page in ["one.png", "two.png"] { try png.write(to: source.appendingPathComponent(page)) }
+        let json = try JSONSerialization.data(withJSONObject: ["title": "Import fixture", "pages": [
+            ["img_path": "one.png", "img_width": 1, "img_height": 1, "blocks": []],
+            ["img_path": "two.png", "img_width": 1, "img_height": 1, "blocks": []]
+        ]])
+        try json.write(to: source.appendingPathComponent("fixture.mokuro"))
+        let worker = MokuroImportWorker()
+        let book = try await worker.importBundle(from: source, booksDirectory: books)
+        let installed = books.appendingPathComponent(try XCTUnwrap(book.folder))
+        XCTAssertEqual(try JSONDecoder().decode(BookMetadata.self,
+            from: Data(contentsOf: installed.appendingPathComponent(FileNames.metadata))), book)
+        XCTAssertEqual(try JSONDecoder().decode(BookInfo.self,
+            from: Data(contentsOf: installed.appendingPathComponent(FileNames.bookinfo))).characterCount, 2)
+        XCTAssertEqual(try MokuroBookParser().parse(bookRoot: installed).pages.count, 2)
+        let again = try await worker.importBundle(from: source, booksDirectory: books)
+        XCTAssertEqual(again.id, book.id)
+        try FileManager.default.removeItem(at: source.appendingPathComponent("two.png"))
+        do {
+            _ = try await worker.importBundle(from: source, booksDirectory: books)
+            XCTFail("Missing source page must fail")
+        } catch MokuroImportError.missingImage { }
+        XCTAssertEqual(try Data(contentsOf: installed.appendingPathComponent("images/two.png")), png)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: books.path), [book.folder!],
+                       "Only the complete volume is published; no staging directory survives")
+    }
+
+    @MainActor func testSharedMangaInboxSourceSurvivesUntilImportCompletesAndCleanupPreservesOtherFiles() async throws {
+        let documents = try XCTUnwrap(FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first)
+        let inbox = documents.appendingPathComponent("Inbox", isDirectory: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        let source = inbox.appendingPathComponent("shared-manga-\(UUID()).cbz")
+        let unrelated = inbox.appendingPathComponent("other-share-\(UUID()).cbz")
+        let bytes = Data("Shared source fixture".utf8)
+        try bytes.write(to: source)
+        try bytes.write(to: unrelated)
+        defer {
+            try? FileManager.default.removeItem(at: source)
+            try? FileManager.default.removeItem(at: unrelated)
+        }
+        let started = expectation(description: "Shared source import started")
+        let finished = expectation(description: "Shared source was read")
+        let release = DispatchSemaphore(value: 0)
+        let worker = MokuroImportWorker { url, _ in
+            started.fulfill()
+            guard release.wait(timeout: .now() + 5) == .success else { throw CancellationError() }
+            XCTAssertEqual(try Data(contentsOf: url), bytes)
+            finished.fulfill()
+            return BookMetadata(title: nil, cover: nil, folder: nil, lastAccess: .now, contentType: .mokuro)
+        }
+        let shelf = BookshelfViewModel(mangaImporter: worker)
+        defer { release.signal() }
+        shelf.importMangaBundles(result: .success([source]))
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+        release.signal()
+        await fulfillment(of: [finished], timeout: 3)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while shelf.importBooksProgress != nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(shelf.importBooksProgress)
+        XCTAssertFalse(shelf.shouldShowError, shelf.errorMessage)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(try Data(contentsOf: unrelated), bytes)
+    }
+}

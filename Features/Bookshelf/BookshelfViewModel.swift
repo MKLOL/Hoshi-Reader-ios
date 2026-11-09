@@ -9,6 +9,12 @@
 import SwiftUI
 import EPUBKit
 
+nonisolated enum BookshelfActionError: LocalizedError {
+    case epubRequired
+
+    var errorDescription: String? { "This action is available for EPUB books only." }
+}
+
 @Observable
 @MainActor
 class BookshelfViewModel {
@@ -29,6 +35,15 @@ class BookshelfViewModel {
     private var bookPageLabel: [UUID: String] = [:]
     private(set) var pretranslatedBookIds: Set<UUID> = []
     private var translationsTask: Task<Void, Never>?
+    @ObservationIgnored private let mangaImporter: MokuroImportWorker
+    @ObservationIgnored private var mangaImportTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingMangaImports: [URL] = []
+    @ObservationIgnored private var mangaImportsCompleted = 0
+    @ObservationIgnored private var mangaImportTotal = 0
+
+    init(mangaImporter: MokuroImportWorker = .shared) {
+        self.mangaImporter = mangaImporter
+    }
     
     func loadBooks() {
         do {
@@ -366,40 +381,35 @@ class BookshelfViewModel {
     func importMangaBundles(result: Result<[URL], Error>) {
         do {
             let urls = try result.get()
-            if urls.isEmpty {
-                return
-            }
-
-            if urls.count == 1 {
-                do {
-                    try importMangaBundle(from: urls[0])
-                    loadBooks()
-                } catch {
-                    showError(message: error.localizedDescription)
+            guard !urls.isEmpty else { return }
+            pendingMangaImports.append(contentsOf: urls)
+            mangaImportTotal += urls.count
+            updateMangaImportProgress()
+            guard mangaImportTask == nil else { return }
+            mangaImportTask = Task {
+                defer {
+                    mangaImportTask = nil
+                    importBooksProgress = nil
+                    mangaImportsCompleted = 0
+                    mangaImportTotal = 0
                 }
-                return
-            }
-
-            importBooksProgress = "Importing 1 / \(urls.count)..."
-            Task {
-                defer { importBooksProgress = nil }
-                await Task.yield()
-
                 var failed: [String] = []
-                for (index, url) in urls.enumerated() {
+                while !pendingMangaImports.isEmpty {
+                    let url = pendingMangaImports.removeFirst()
                     do {
-                        try importMangaBundle(from: url)
+                        let directory = try BookStorage.getBooksDirectory()
+                        let metadata = try await mangaImporter.importBundle(from: url, booksDirectory: directory)
+                        // UI state and sync publication stay on the main actor; extraction,
+                        // OCR decoding, image copies and cover generation run on the worker.
+                        HttpSyncManager.shared.onBookImported(book: metadata)
                     } catch {
                         failed.append(url.lastPathComponent)
                     }
-                    let next = index + 1
-                    if next < urls.count {
-                        importBooksProgress = "Importing \(next + 1) / \(urls.count)..."
-                        await Task.yield()
-                    }
+                    clearConsumedMangaInboxFile(url)
+                    mangaImportsCompleted += 1
+                    if !pendingMangaImports.isEmpty { updateMangaImportProgress() }
                 }
                 loadBooks()
-
                 if !failed.isEmpty {
                     showError(message: "Failed to import:\n\(failed.joined(separator: "\n"))")
                 }
@@ -409,11 +419,19 @@ class BookshelfViewModel {
         }
     }
 
-    private func importMangaBundle(from url: URL) throws {
-        // MokuroImporter owns the security-scoped access (single owner; no double start/stop).
-        let metadata = try MokuroImporter.importBundle(from: url)
-        // Publish the new book's metadata immediately (payload uploads on manual sync).
-        HttpSyncManager.shared.onBookImported(book: metadata)
+    private func updateMangaImportProgress() {
+        importBooksProgress = "Importing \(mangaImportsCompleted + 1) / \(mangaImportTotal)..."
+    }
+
+    private func clearConsumedMangaInboxFile(_ source: URL) {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let inbox = documents.appendingPathComponent("Inbox", isDirectory: true).standardizedFileURL
+        let file = source.standardizedFileURL
+        guard file.deletingLastPathComponent() == inbox,
+              !pendingMangaImports.contains(where: { $0.standardizedFileURL == file }) else { return }
+        // A newly shared or unrelated Inbox file may already be waiting. Remove only
+        // this source, once all queued uses have completed and security access ended.
+        try? FileManager.default.removeItem(at: file)
     }
 
     func importRemoteBook(from url: URL) {
@@ -433,6 +451,7 @@ class BookshelfViewModel {
     }
     
     func syncBook(book: BookMetadata, direction: SyncDirection? = nil, syncStats: Bool, statsSyncMode: StatisticsSyncMode, syncAudioBook: Bool) {
+        guard book.resolvedContentType == .epub else { return }
         isSyncing = true
         Task {
             defer {
@@ -474,7 +493,9 @@ class BookshelfViewModel {
         guard let bookInfo = BookStorage.loadBookInfo(root: url) else { return }
         
         let bookmark = Bookmark(
-            chapterIndex: bookInfo.chapterInfo.values.compactMap(\.spineIndex).max() ?? 0,
+            chapterIndex: book.resolvedContentType == .mokuro
+                ? max(0, bookInfo.characterCount - 1)
+                : bookInfo.chapterInfo.values.compactMap(\.spineIndex).max() ?? 0,
             progress: 1,
             characterCount: bookInfo.characterCount,
             lastModified: Date()
@@ -512,6 +533,9 @@ class BookshelfViewModel {
     }
     
     func runSasayakiMatch(book: BookMetadata, srtURL: URL, searchWindow: Int) async throws -> SasayakiMatchData {
+        guard book.resolvedContentType == .epub else {
+            throw BookshelfActionError.epubRequired
+        }
         guard let folder = book.folder else {
             throw URLError(.fileDoesNotExist)
         }

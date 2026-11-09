@@ -267,7 +267,9 @@ struct BookshelfView: View {
                 } else {
                     viewModel.importBook(result: .success(url))
                 }
-                viewModel.clearInbox()
+                // Manga imports finish on a background worker. Its consumed Inbox file
+                // is removed after the worker releases it; EPUB/Anki remain synchronous.
+                if ext != "cbz" && ext != "zip" { viewModel.clearInbox() }
                 pendingImportURL = nil
             }
         }
