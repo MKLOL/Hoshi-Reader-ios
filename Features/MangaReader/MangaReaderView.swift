@@ -43,6 +43,7 @@ struct MangaReaderView: View {
     @State private var showMangaSettings = false
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
+    @FocusState private var goToPageFieldFocused: Bool
     @State private var pageOpacity: Double = 1
     @State private var topBarBottom: CGFloat = 0
     @State private var uiTestSelectionProbe = "none"
@@ -113,6 +114,11 @@ struct MangaReaderView: View {
 #else
         false
 #endif
+    }
+
+    private var pageNavigationEnabled: Bool {
+        !screenshotCropMode && !showGoToPageDialog && !showMangaSettings &&
+        !showStatisticsSheet && !aiController.isPresented
     }
 
     var body: some View {
@@ -348,6 +354,7 @@ struct MangaReaderView: View {
                 controller: controller,
                 backgroundColor: UIColor(backgroundColor),
                 onNavigate: { direction in
+                    guard pageNavigationEnabled else { return }
                     model.navigate(direction)
                 },
                 onTextSelected: { selection in
@@ -396,10 +403,10 @@ struct MangaReaderView: View {
                 },
                 onPageReady: { loadToken in onPageReady(loadToken: loadToken) },
                 tappableTopInset: mangaActionTopInset(for: geometry),
-                // Suppress hardware-keyboard ← / → and trackpad two-finger page turns while the
-                // crop overlay or go-to-page dialog is up so they aren't disturbed by a stray input.
+                // Keep hardware keys and trackpad gestures from changing the page behind a
+                // translation, history, settings, statistics, crop or page-jump presentation.
                 onBubbleRevealed: { text, block in model.usage?.reveal(text: text, block: block, page: model.pageIndex + 1) },
-                pageTurnEnabled: !screenshotCropMode && !showGoToPageDialog
+                pageTurnEnabled: pageNavigationEnabled
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)
@@ -641,8 +648,7 @@ struct MangaReaderView: View {
                         showGoToPageDialog = true
                     } label: { Label("Go to page", systemImage: "arrow.right.to.line") }
                     Button {
-                        model.closePopups()
-                        screenshotCropMode = true
+                        startScreenshotCrop()
                     } label: { Label("Screenshot translate", systemImage: "camera.viewfinder") }
                     Button {
                         model.closePopups()
@@ -664,9 +670,13 @@ struct MangaReaderView: View {
                         Label("Two-page spread (landscape)", systemImage: "book.pages")
                     }
                 } label: {
-                    CircleButton(systemName: "slider.horizontal.3")
-                        .background(Circle().fill(.black.opacity(0.28)).padding(6))
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(.black.opacity(0.28)))
                 }
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("manga-options-menu")
                 .accessibilityLabel("Manga options")
 
@@ -677,8 +687,7 @@ struct MangaReaderView: View {
                         .background(Circle().fill(.black.opacity(0.28)).padding(6))
                         .contentShape(Circle())
                         .onTapGesture {
-                            model.closePopups()
-                            screenshotCropMode = true
+                            startScreenshotCrop()
                         }
                         .accessibilityIdentifier("manga-screenshot-button")
                         .accessibilityLabel("Screenshot translate")
@@ -745,28 +754,48 @@ struct MangaReaderView: View {
                 Text("Go to page")
                     .font(.headline)
                 TextField("Page (1 - \(model.pageCount))", text: $goToPageText)
-                    .keyboardType(.numberPad)
+                    .accessibilityIdentifier("manga-go-to-page-field")
+                    .keyboardType(.numbersAndPunctuation)
+                    .submitLabel(.go)
+                    .focused($goToPageFieldFocused)
+                    .onSubmit(submitGoToPage)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 200)
                 HStack {
                     Button("Cancel", role: .cancel) { showGoToPageDialog = false }
                     Spacer()
-                    Button("Go") {
-                        if let page = Int(goToPageText), page >= 1, page <= model.pageCount {
-                            showGoToPageDialog = false
-                            model.goToPage(page - 1)
-                        }
-                    }
-                    .disabled(Int(goToPageText).map { $0 < 1 || $0 > model.pageCount } ?? true)
+                    Button("Go", action: submitGoToPage)
+                        .accessibilityIdentifier("manga-go-to-page-confirm")
+                        .disabled(validGoToPage == nil)
                 }
                 .frame(width: 200)
             }
             .padding(24)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .onAppear { goToPageFieldFocused = true }
+            .onDisappear { goToPageFieldFocused = false }
         }
     }
 
+    private var validGoToPage: Int? {
+        guard let page = Int(goToPageText), page >= 1, page <= model.pageCount else { return nil }
+        return page - 1
+    }
+
+    private func submitGoToPage() {
+        guard let page = validGoToPage else { return }
+        goToPageFieldFocused = false
+        showGoToPageDialog = false
+        model.goToPage(page)
+    }
+
     // MARK: Screenshot crop
+
+    private func startScreenshotCrop() {
+        model.closePopups()
+        controller.clearRevealedBubbles()
+        screenshotCropMode = true
+    }
 
     private func translateCrop(_ rect: MangaScreenshotCropRect) async {
         model.usage?.record(.screenshot, page: model.pageIndex + 1)

@@ -438,7 +438,10 @@ private enum OfflineLlmLaunchSelfTest {
         let root = try BookStorage.getBooksDirectory().appendingPathComponent(title, isDirectory: true)
         if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("images"), withIntermediateDirectories: true)
-        let width = 1179, height = 2556
+        // The chrome fixture fills the mini's portrait viewport with white artwork, making
+        // the History/options backgrounds visible in the interaction screenshots.
+        let width = 1179
+        let height = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_CHROME"] == "1" ? 1796 : 2556
         let blocks: [[String: Any]] = [
             ["box": [200, 900, 760, 1050], "vertical": false, "font_size": 72,
              "lines": ["日本語のテキスト"], "lines_coords": [[[200, 900], [760, 900], [760, 1050], [200, 1050]]]],

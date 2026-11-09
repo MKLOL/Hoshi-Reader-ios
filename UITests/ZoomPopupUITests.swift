@@ -1,6 +1,107 @@
 import XCTest
 
 final class ZoomPopupUITests: XCTestCase {
+    func testPageJumpSubmitsWithKeyboardGo() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture(syntheticFixture: true)
+        let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["Go to page"].tap()
+        let field = app.textFields["manga-go-to-page-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 3))
+        field.tap()
+        let oldValue = field.value as? String ?? ""
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + "2")
+        XCTAssertEqual(field.value as? String, "2")
+        XCTAssertTrue(app.buttons["manga-go-to-page-confirm"].isEnabled)
+        field.typeText("\n")
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;"), probe.label)
+        XCTAssertFalse(field.exists)
+    }
+
+    func testScreenshotCropClearsRevealedOCRBeforeSelecting() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture(syntheticFixture: true)
+        let box = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "日本語")).firstMatch
+        XCTAssertTrue(box.waitForExistence(timeout: 5))
+        box.tap()
+        let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Ask about this bubble")).firstMatch
+        XCTAssertTrue(translate.waitForExistence(timeout: 3))
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["Screenshot translate"].tap()
+        let cancel = app.buttons["Cancel"].firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 3))
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: translate)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 3), .completed)
+        cancel.tap()
+        // The action stays cleared after removing the crop overlay; it was not merely covered.
+        XCTAssertFalse(translate.exists)
+        box.tap()
+        XCTAssertTrue(translate.waitForExistence(timeout: 3))
+    }
+
+    func testTranslationAndHistoryBlockHardwarePageTurns() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture(aiStub: true, syntheticFixture: true)
+        let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+        XCTAssertTrue(waitForViewport(probe, containing: "page=1;"), probe.label)
+        try askAboutBubble(app: app, textContains: "日本語")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.waitForExistence(timeout: 3))
+        app.typeKey(XCUIKeyboardKey.leftArrow.rawValue, modifierFlags: [])
+        let hiddenTurn = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "page=2;"), object: probe)
+        hiddenTurn.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [hiddenTurn], timeout: 1), .completed)
+        dismissAiPopup(app)
+        app.typeKey(XCUIKeyboardKey.leftArrow.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;"), probe.label)
+
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["Chat history"].tap()
+        XCTAssertTrue(app.staticTexts["Translation history"].firstMatch.waitForExistence(timeout: 3))
+        XCTAssertFalse(app.buttons["translation-history-toggle"].exists, "history-only mode must not offer a dead Back to chat action")
+        XCTAssertFalse(app.staticTexts["translation-history-empty"].exists)
+        let copyReply = app.buttons["translation-history-copy-reply"].firstMatch
+        XCTAssertTrue(copyReply.waitForExistence(timeout: 3))
+        XCTAssertTrue(copyReply.isHittable)
+        app.typeKey(XCUIKeyboardKey.leftArrow.rawValue, modifierFlags: [])
+        let historyTurn = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", "page=3;"), object: probe)
+        historyTurn.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [historyTurn], timeout: 1), .completed)
+        dismissAiPopup(app)
+        app.typeKey(XCUIKeyboardKey.leftArrow.rawValue, modifierFlags: [])
+        XCTAssertTrue(waitForViewport(probe, containing: "page=3;"), probe.label)
+    }
+
+    func testRepeatedOCRTapKeepsTranslateButtonInPlace() throws {
+        continueAfterFailure = false
+        for showCopy in [false, true] {
+            let app = try launchZoomFixture(showCopy: showCopy, syntheticFixture: true, chromeFixture: true)
+            for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
+                XCUIDevice.shared.orientation = orientation
+                let box = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "日本語")).firstMatch
+                XCTAssertTrue(box.waitForExistence(timeout: 5))
+                let tap = box.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                tap.tap()
+                let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Ask about this bubble")).firstMatch
+                XCTAssertTrue(translate.waitForExistence(timeout: 5))
+                let first = translate.frame
+                XCTAssertGreaterThan(first.width, 20)
+                XCTAssertGreaterThan(first.height, 20)
+                for _ in 0..<3 {
+                    tap.tap()
+                    XCTAssertTrue(translate.exists)
+                    let repeated = translate.frame
+                    XCTAssertEqual(repeated.minX, first.minX, accuracy: 1, "repeated OCR tap shifted translate horizontally")
+                    XCTAssertEqual(repeated.minY, first.minY, accuracy: 1, "repeated OCR tap shifted translate vertically")
+                    XCTAssertEqual(repeated.width, first.width, accuracy: 1)
+                    XCTAssertEqual(repeated.height, first.height, accuracy: 1)
+                }
+                saveScreenshot(app, name: "ocr-repeat-\(showCopy ? "copy" : "solo")-\(orientation.rawValue)")
+            }
+            app.terminate()
+        }
+    }
+
     @MainActor func testPopupCardsLivePreview() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -77,7 +178,7 @@ final class ZoomPopupUITests: XCTestCase {
         field.tap()
         let oldValue = field.value as? String ?? ""
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + "2")
-        app.buttons["Go"].tap()
+        app.buttons["manga-go-to-page-confirm"].tap()
         XCTAssertTrue(waitForViewport(probe, containing: "page=2;zoom=1.000;offsetX=0.0;offsetY=0.0"), probe.label)
         webView.swipeRight()
         XCTAssertTrue(waitForViewport(probe, containing: "page=3;zoom=1.000;offsetX=0.0;offsetY=0.0"), probe.label)
@@ -485,7 +586,7 @@ final class ZoomPopupUITests: XCTestCase {
         add(attachment)
     }
 
-    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false) throws -> XCUIApplication {
+    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false, chromeFixture: Bool = false) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
         app.launchArguments += ["-mangaShowCopyButton", showCopy ? "YES" : "NO"]
@@ -493,6 +594,7 @@ final class ZoomPopupUITests: XCTestCase {
             app.launchEnvironment["HOSHI_UI_TESTING_ZOOM"] = "1"
             app.launchArguments += ["-mangaSingleTapLookup", "NO", "-mangaShowFurigana", "NO"]
         }
+        if chromeFixture { app.launchEnvironment["HOSHI_UI_TESTING_CHROME"] = "1" }
         if aiStub {
             app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"
         }
@@ -503,11 +605,14 @@ final class ZoomPopupUITests: XCTestCase {
         guard fixture.waitForExistence(timeout: 5) else {
             throw ProbeError("Requires IDB Zoom Fixture seeded into the app container.")
         }
+        let openingStarted = ProcessInfo.processInfo.systemUptime
         fixture.tap()
 
         let window = app.windows.firstMatch
-        XCTAssertTrue(window.waitForExistence(timeout: 6))
-        sleep(2)
+        XCTAssertTrue(window.exists)
+        let ready = app.descendants(matching: .any)["manga-action-layout-probe"].firstMatch
+        XCTAssertTrue(waitForActionProbe(ready, timeout: 10), ready.label)
+        print("Synthetic manga tap-to-page-ready through UI automation: \(ProcessInfo.processInfo.systemUptime - openingStarted) seconds")
         let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
         if probe.waitForExistence(timeout: 5), !probe.label.contains("page=1;") {
             app.buttons["manga-options-menu"].tap()
@@ -516,7 +621,7 @@ final class ZoomPopupUITests: XCTestCase {
             field.tap()
             let oldValue = field.value as? String ?? ""
             field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: oldValue.count) + "1")
-            app.buttons["Go"].tap()
+            app.buttons["manga-go-to-page-confirm"].tap()
             XCTAssertTrue(waitForViewport(probe, containing: "page=1;zoom=1.000"), probe.label)
         }
         return app
@@ -669,8 +774,7 @@ final class ZoomPopupUITests: XCTestCase {
     private func waitForActionProbe(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let label = element.label
-            if label.hasPrefix("[") { return true }
+            if element.exists && element.label.hasPrefix("[") { return true }
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
         return false

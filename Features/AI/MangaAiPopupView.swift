@@ -132,6 +132,7 @@ struct MangaAiPopupView: View {
                 }
                 .help("Copy reply")
                 .accessibilityLabel("Copy reply")
+                .accessibilityIdentifier("translation-copy-reply")
             }
             Button {
                 settings.setUseUniformMarkdownTextSize(!settings.useUniformMarkdownTextSize)
@@ -145,18 +146,17 @@ struct MangaAiPopupView: View {
             .accessibilityLabel(settings.useUniformMarkdownTextSize
                                 ? "Use Markdown heading sizes"
                                 : "Use default text size")
-            Button {
-                guard controller.state != .browsingHistory else {
-                    showHistory = true
-                    reloadHistory()
-                    return
+            if controller.state != .browsingHistory {
+                Button {
+                    showHistory.toggle()
+                    if showHistory { reloadHistory() }
+                } label: {
+                    Image(systemName: showHistory ? "bubble.left.and.bubble.right" : "clock.arrow.circlepath")
                 }
-                showHistory.toggle()
-                if showHistory { reloadHistory() }
-            } label: {
-                Image(systemName: showHistory ? "bubble.left.and.bubble.right" : "clock.arrow.circlepath")
+                .help(showHistory ? "Back to chat" : "History")
+                .accessibilityLabel(showHistory ? "Back to chat" : "History")
+                .accessibilityIdentifier("translation-history-toggle")
             }
-            .help(showHistory ? "Back to chat" : "History")
             Button {
                 dismiss()
             } label: {
@@ -284,10 +284,11 @@ struct MangaAiPopupView: View {
 
     @ViewBuilder
     private var historyBody: some View {
-        ForEach(AiChatRequests.shared.forBook(book).filter { request in
+        let pendingRequests = AiChatRequests.shared.forBook(book).filter { request in
             if case .result = request.state { return false }
             return true
-        }.reversed()) { request in
+        }
+        ForEach(pendingRequests.reversed()) { request in
             VStack(alignment: .leading, spacing: 8) {
                 Text(request.bubbleText).modifier(CardFont(style: .body))
                 if request.isRunning {
@@ -304,21 +305,33 @@ struct MangaAiPopupView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
         }
-        if historyEntries.isEmpty {
+        if historyEntries.isEmpty && pendingRequests.isEmpty {
             Text("No translation history for this manga yet.")
                 .modifier(CardFont(style: .subheadline))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.vertical, 24)
-        } else {
-            ForEach(historyEntries.reversed()) { entry in
-                VStack(alignment: .leading, spacing: 8) {
-                    entryView(entry)
+                .accessibilityIdentifier("translation-history-empty")
+        }
+        ForEach(historyEntries.reversed()) { entry in
+            VStack(alignment: .leading, spacing: 8) {
+                entryView(entry)
+                HStack {
+                    Spacer()
+                    Button {
+                        UIPasteboard.general.string = AiThinkingTextSanitizer.strip(entry.response)
+                    } label: {
+                        Label("Copy reply", systemImage: "doc.on.doc")
+                            .modifier(CardFont(style: .caption))
+                            .frame(minHeight: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("translation-history-copy-reply")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 

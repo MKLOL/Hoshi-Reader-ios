@@ -343,7 +343,7 @@ class LastTenRegressionTests(unittest.TestCase):
             popup.index("Button {"):
             popup.index(".help(showHistory ?")
         ]
-        self.assertIn("guard controller.state != .browsingHistory else", history_button)
+        self.assertIn("if controller.state != .browsingHistory {", history_button)
 
     def test_ai_popup_tokenizer_preserves_words_and_japanese_lookup_units(self):
         # PopupCardStyleTests exercises responsive card geometry against production APIs.
@@ -825,8 +825,11 @@ assertEqual(
         self.assertIn("hideActions: function(actions)", html)
         self.assertIn("var avoidGap = Math.max(gap + 10, Math.ceil(actionsHeight * 0.55));", place_actions)
         self.assertIn("var aboveTop = renderedTop - actionsHeight - avoidGap;", place_actions)
-        self.assertIn("var actionsWidth = actions.offsetWidth || 56;", place_actions)
-        self.assertIn("var actionsHeight = actions.offsetHeight || 26;", place_actions)
+        self.assertIn("actions.style.display = 'flex';", place_actions)
+        self.assertIn("var actionsWidth = actions.offsetWidth;", place_actions)
+        self.assertIn("var actionsHeight = actions.offsetHeight;", place_actions)
+        self.assertNotIn("actions.offsetWidth ||", place_actions)
+        self.assertNotIn("actions.offsetHeight ||", place_actions)
         self.assertIn("var belowClearance = Math.max(gap + 10, Math.ceil(actionsHeight * 0.65));", place_actions)
         self.assertIn("boxFontSize", place_actions)
         self.assertIn("var belowTop = renderedBottom + Math.max(belowClearance, avoidGap);", place_actions)
@@ -1231,12 +1234,14 @@ assertEqual(
         self.assertIn("screenSize.height * 0.42", popup)
         self.assertIn("return max(1, min(max(spaceAbove, spaceBelow) - screenBorderPadding, cappedMaxHeight))", popup)
 
-    def test_manga_ocr_reveal_font_size_overrides_drawn_size(self):
+    def test_manga_ocr_font_size_matches_android_without_device_size_boost(self):
         html = read("Features/MangaReader/MangaPageHtml.swift")
-        self.assertIn("font-size: var(--hoshi-drawn-fs);", html)
-        self.assertIn("font-size: var(--hoshi-reveal-fs);", html)
-        self.assertIn("--hoshi-drawn-fs:", html)
-        self.assertNotIn("height: \\(heightPct)%; font-size:", html)
+        self.assertIn("box.revealFontSize(enlargeSmallText: enlargeSmallText)", html)
+        self.assertIn("height: \\(heightPct)%; font-size:", html)
+        self.assertNotIn("--hoshi-reveal-fs", html)
+        self.assertNotIn("targetRevealPt", html)
+        self.assertIn("actions.style.display = 'flex';", html)
+        self.assertNotIn("actions.offsetWidth || 56", html)
         self.assertIn("delete revealed[i].dataset.wrapTried;", html)
 
     def test_manga_reader_is_full_bleed_with_overlay_chrome(self):

@@ -49,13 +49,15 @@ nonisolated struct MokuroTextBox: Codable, Equatable {
     /// offline pre-translation cache addresses bubbles by the mokuro index, which every platform
     /// and the desktop tool agree on. Defaults to 0 for older decoded data.
     var blockIndex: Int = 0
+    /// Unmodified mokuro glyph height, used when Enlarge Small Text is disabled.
+    let originalFontSize: Int
 
     enum CodingKeys: String, CodingKey {
-        case left, top, width, height, fontSize, vertical, lines, blockIndex
+        case left, top, width, height, fontSize, vertical, lines, blockIndex, originalFontSize
     }
 
     init(left: Int, top: Int, width: Int, height: Int, fontSize: Int, vertical: Bool,
-         lines: [String], blockIndex: Int = 0) {
+         lines: [String], blockIndex: Int = 0, originalFontSize: Int? = nil) {
         self.left = left
         self.top = top
         self.width = width
@@ -64,6 +66,7 @@ nonisolated struct MokuroTextBox: Codable, Equatable {
         self.vertical = vertical
         self.lines = lines
         self.blockIndex = blockIndex
+        self.originalFontSize = originalFontSize ?? fontSize
     }
 
     init(from decoder: Decoder) throws {
@@ -76,5 +79,10 @@ nonisolated struct MokuroTextBox: Codable, Equatable {
         vertical = try c.decode(Bool.self, forKey: .vertical)
         lines = try c.decodeIfPresent([String].self, forKey: .lines) ?? []
         blockIndex = try c.decodeIfPresent(Int.self, forKey: .blockIndex) ?? 0
+        originalFontSize = try c.decodeIfPresent(Int.self, forKey: .originalFontSize) ?? fontSize
+    }
+
+    func revealFontSize(enlargeSmallText: Bool) -> Int {
+        max(1, enlargeSmallText ? fontSize : originalFontSize)
     }
 }

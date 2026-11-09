@@ -73,20 +73,18 @@ nonisolated enum MangaPageHtml {
         // geometry make taps/selection/crop work per page with no other changes.
         let viewportWidth = max(viewportCssWidth, 1)
         let viewportHeight = max(viewportCssHeight, 1)
-        let shortSide = Double(min(viewportWidth, viewportHeight))
-        let longSide = Double(max(viewportWidth, viewportHeight))
         let gap = 2
         let perPageWidth = leftPage == nil ? viewportWidth : max(1, (viewportWidth - gap) / 2)
 
         var frames = ""
         if let leftPage {
             frames += frameHtml(page: leftPage, availableWidth: perPageWidth,
-                                viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
+                                viewportHeight: viewportHeight,
                                 showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana, imageURL: imageSources[leftPage.imagePath])
             frames += "\n"
         }
         frames += frameHtml(page: page, availableWidth: perPageWidth,
-                            viewportHeight: viewportHeight, shortSide: shortSide, longSide: longSide,
+                            viewportHeight: viewportHeight,
                             showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana, imageURL: imageSources[page.imagePath])
 
         let css = pageCss(
@@ -137,15 +135,12 @@ nonisolated enum MangaPageHtml {
 
     /// One page's `<div class="frame">` (image + OCR overlay), fitted into `availableWidth` ×
     /// `viewportHeight` with `object-fit: contain`. The frame size is inline so a single page (full
-    /// width) and a spread page (half width) share one CSS rule. `shortSide`/`longSide` are the FULL
-    /// viewport's dimensions: the readability zoom stays anchored to the portrait-orientation fit, so
-    /// text zooms the same relative to the art whether the page is shown full-width or half-width.
+    /// width) and a spread page (half width) share one CSS rule. OCR font sizes remain relative to
+    /// the image, matching Android in portrait, landscape, and two-page spreads.
     private static func frameHtml(
         page: MokuroPage,
         availableWidth: Int,
         viewportHeight: Int,
-        shortSide: Double,
-        longSide: Double,
         showActionButtons: Bool,
         enlargeSmallText: Bool,
         showFurigana: Bool,
@@ -159,18 +154,13 @@ nonisolated enum MangaPageHtml {
         )
         let frameWidthCss = formatNumber(Double(imageWidth) * fitScale)
         let frameHeightCss = formatNumber(Double(imageHeight) * fitScale)
-        let readabilityFitScale = min(
-            shortSide / Double(imageWidth),
-            longSide / Double(imageHeight)
-        )
         let boxes = page.textBoxes
             .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight,
-                               readabilityFitScale: readabilityFitScale, pageIndex: page.index, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana) }
+                               pageIndex: page.index, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana) }
             .joined(separator: "\n")
         let uiTestBoxes = uiTestActionBoxesHtml(
             imageWidth: imageWidth,
             imageHeight: imageHeight,
-            readabilityFitScale: readabilityFitScale,
             enlargeSmallText: enlargeSmallText
         )
         let actionButtons = showActionButtons ? actionButtonsHtml : ""
@@ -247,7 +237,6 @@ nonisolated enum MangaPageHtml {
           color: transparent;
           background: transparent;
           border-radius: 3px;
-          font-size: var(--hoshi-drawn-fs);
           padding: 0.08em;
           \(ocrBoxFontFamilyRule)
           -webkit-user-select: text;
@@ -263,13 +252,15 @@ nonisolated enum MangaPageHtml {
           word-break: normal;
           overflow-wrap: break-word;
         }
+        .ocr-box.wrap::before {
+          /* Wrap fitting must measure text overflow, not the expanded pseudo-element.
+             Programmatic hit slop still keeps thin and wrapped bubbles easy to tap. */
+          display: none;
+        }
         .ocr-box.revealed {
           z-index: 30;
           color: #000;
           background: #fff;
-          /* The readability zoom (see textBoxHtml) applies only once revealed; unrevealed
-             transparent text stays at drawn size so it can't steal neighbours' taps. */
-          font-size: var(--hoshi-reveal-fs);
           /* The white halo carries legibility wherever boosted text spills past the plate;
              the extra 3px ring makes it read slightly stronger over busy art. NO box-shadow /
              plate apron here: a hard-edged white square stamped over the balloon reads as a
@@ -364,7 +355,6 @@ nonisolated enum MangaPageHtml {
         _ box: MokuroTextBox,
         imageWidth: Int,
         imageHeight: Int,
-        readabilityFitScale: Double,
         extraAttributes: String = "",
         pageIndex: Int? = nil,
         enlargeSmallText: Bool = true,
@@ -374,30 +364,10 @@ nonisolated enum MangaPageHtml {
         let topPct = percent(box.top, imageHeight)
         let widthPct = percent(box.width, imageWidth)
         let heightPct = percent(box.height, imageHeight)
-        // Readability zoom, computed in RENDERED points (readabilityFitScale = rendered pt per
-        // image px at the PORTRAIT-orientation fit, so the zoom is image-relative and identical in
-        // portrait and landscape; the viewport is initial-scale=1, so CSS px == pt). `box.fontSize`
-        // is the art's measured glyph size (see MokuroRaw.clampMokuroFontSize); small-on-screen text
-        // is lifted toward the readable target, big text reveals at art size:
-        //
-        //   revealPt = drawnPt + max(0, target - drawnPt) × boost
-        //
-        // The lift is additive-only, so the reveal is NEVER smaller than the drawn art, and
-        // the zoom multiplier strictly decreases as drawn size grows (smaller art zooms more).
-        // Defined in pt so it self-adjusts across scan resolutions and devices.
-        let drawnPt = Double(max(1, box.fontSize)) * readabilityFitScale
-        let revealPt = enlargeSmallText ? drawnPt + max(0, MangaFontTuning.targetRevealPt - drawnPt) * MangaFontTuning.revealBoost : drawnPt
-        // readabilityFitScale > 0 always (build() clamps image and viewport dims to >= 1). Dividing
-        // back out yields an image-space reveal size; the cqw unit below then renders it against the
-        // real frame width, so on screen it tracks the displayed image in either orientation.
-        let revealImagePx = revealPt / readabilityFitScale
-        // Express relative to image width so it scales with the rendered frame
-        // (cqw = 1% of the container's width). The UNREVEALED box renders at the art's drawn
-        // size — its transparent text must hug the box for elementFromPoint hit-testing, or
-        // boosted invisible glyphs from one bubble would steal taps meant for a neighbour.
-        // The readability zoom kicks in via `.revealed` (--hoshi-reveal-fs in the CSS).
-        let drawnCqw = percent(box.fontSize, imageWidth)
-        let revealCqw = formatNumber(revealImagePx * 100.0 / Double(imageWidth))
+        // Match Android: the selected image-space font scales with the artwork (cqw = 1%
+        // of the frame width). The reveal CSS changes visibility without an extra device-size
+        // boost; the shared wrap fallback can still repair a misidentified horizontal bubble.
+        let fontCqw = percent(box.revealFontSize(enlargeSmallText: enlargeSmallText), imageWidth)
         let verticalClass = box.vertical ? " vertical" : ""
         // Join with literal `\n` so the shared selection scanner sees mokuro's line boundaries
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
@@ -416,8 +386,7 @@ nonisolated enum MangaPageHtml {
             <div class="ocr-box\(verticalClass)"\(blockAttribute) \(extraAttributes) role="button" tabindex="0" \
         data-ocr-text="\(escapeAttribute(canonicalText))" data-readings="\(escapeAttribute(readingsJSON))" \
         aria-label="\(escapeAttribute(canonicalText))" aria-pressed="false" style="left: \(leftPct)%; top: \(topPct)%; \
-        width: \(widthPct)%; height: \(heightPct)%; --hoshi-drawn-fs: \(drawnCqw)cqw; \
-        --hoshi-reveal-fs: \(revealCqw)cqw;">\
+        width: \(widthPct)%; height: \(heightPct)%; font-size: \(fontCqw)cqw;">\
         <p>\(text)</p></div>
         """
     }
@@ -425,7 +394,6 @@ nonisolated enum MangaPageHtml {
     private static func uiTestActionBoxesHtml(
         imageWidth: Int,
         imageHeight: Int,
-        readabilityFitScale: Double,
         enlargeSmallText: Bool
     ) -> String {
         #if DEBUG
@@ -467,7 +435,6 @@ nonisolated enum MangaPageHtml {
                 box,
                 imageWidth: imageWidth,
                 imageHeight: imageHeight,
-                readabilityFitScale: readabilityFitScale,
                 extraAttributes: "data-hoshi-ui-test=\"\(id)\"",
                 enlargeSmallText: enlargeSmallText
             )
@@ -767,9 +734,11 @@ nonisolated enum MangaPageHtml {
             revealed[i].classList.remove('furigana-scroll');
             revealed[i].classList.remove('revealed');
             revealed[i].setAttribute('aria-pressed', 'false');
-            // Drop any inline font the wrap fallback pinned at reveal size, so the
-            // unrevealed box returns to drawn size (keeps hit-testing honest).
-            revealed[i].style.fontSize = '';
+            // Restore the image-relative font after a wrap-fallback enlargement.
+            if (typeof revealed[i].dataset.wrapOriginalFontSize === 'string') {
+              revealed[i].style.fontSize = revealed[i].dataset.wrapOriginalFontSize;
+              delete revealed[i].dataset.wrapOriginalFontSize;
+            }
             revealed[i].classList.remove('wrap');
             delete revealed[i].dataset.wrapTried;
           }
@@ -794,6 +763,7 @@ nonisolated enum MangaPageHtml {
           var MIN_FS = 1;
           var MAX_FS = 400;
           var originalInlineFontSize = box.style.fontSize;
+          box.dataset.wrapOriginalFontSize = originalInlineFontSize;
           function overflowing() {
             return box.scrollWidth > box.clientWidth ||
               box.scrollHeight > box.clientHeight;
@@ -928,8 +898,14 @@ nonisolated enum MangaPageHtml {
           if (copyButton) {
             copyButton.setAttribute('aria-label', 'Copy bubble text' + uiTestSuffix);
           }
-          var actionsWidth = actions.offsetWidth || 56;
-          var actionsHeight = actions.offsetHeight || 26;
+          // A hidden toolbar has no layout dimensions. Measure its actual buttons before
+          // choosing an anchor, so first reveal and subsequent lookup taps use the same size.
+          var previousDisplay = actions.style.display;
+          actions.style.display = 'flex';
+          var actionsWidth = actions.offsetWidth;
+          var actionsHeight = actions.offsetHeight;
+          actions.style.display = previousDisplay;
+          if (actionsWidth <= 0 || actionsHeight <= 0) return;
           var boxWidth = box.clientWidth;
           var boxHeight = box.clientHeight;
           // Position in frame-local coordinates so the toolbar is not clipped by an ultra-thin box.
@@ -1273,8 +1249,7 @@ nonisolated enum MangaPageHtml {
               ? (this.annotationBaseHit(box, x, y) || window.hoshiSelection.getCharacterAtPoint(x, y)) : null;
             if (!alreadyRevealed) {
               window.hoshiManga.clearRevealed();
-              // Reveal BEFORE the wrap fallback: the fallback fits from the computed
-              // font-size, which only becomes the boosted reveal size once .revealed applies.
+              // The image-relative font is the same before and after reveal.
               window.hoshiManga.prepareReveal(box);
               box.classList.add('revealed');
               var revealedText = box.querySelector('p');
@@ -1303,14 +1278,6 @@ nonisolated enum MangaPageHtml {
 
     private static func percent(_ value: Int, _ total: Int) -> String {
         formatNumber(percentValue(value, total))
-    }
-
-    /// Readability zoom tuning for the OCR reveal, in RENDERED points (see `textBoxHtml`).
-    /// The only two knobs: raise/lower `targetRevealPt` (sane band 24–28) for the floor small
-    /// text is lifted toward; `revealBoost` (0.55–0.7) for how firmly the gap is closed.
-    nonisolated enum MangaFontTuning {
-        static let targetRevealPt = 26.0
-        static let revealBoost = 0.65
     }
 
     private static func percentValue(_ value: Int, _ total: Int) -> Double {
