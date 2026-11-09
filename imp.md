@@ -424,3 +424,141 @@ and the ignored `build/mini-zoom-reset-trace-diagnostics/` export.
 Product fixes: `70d755a` (default dictionaries) and `7fe181f` (compact navigation).
 The tested changes are committed locally; they require a new app build to reach
 an installed iPad. No physical-device installation or profiling was performed.
+
+
+## 2026-11-09 — Manga OCR, iPad usability and measured startup follow-up
+
+The earlier map/history change did not establish that the reported three-second
+opening delay was fixed. The user reproduced it on the physical mini after the
+first update. That result reopens the startup issue; model readiness and page-turn
+CPU measurements are not tap-to-visible-page measurements.
+
+### Implemented changes and review
+
+- `9b330e7`: reader-open consumes map readiness while histories continue in the
+  same flight; close-flush still waits for the final history. Local parsing runs
+  concurrently. Cold position warmup yields after each eight admissions rather
+  than processing the whole library in one main-actor slice.
+- `3c2feb9`: serialized background manga imports with progress and atomic staging,
+  safe shared-Inbox cleanup, correct manga Mark Read, and EPUB-only bookshelf
+  actions hidden/guarded for manga.
+- `6666b47`: Android's image-relative OCR sizing and 30-pixel half-headroom curve,
+  removal of the extra iOS reveal-size boost, stable measured AI toolbar placement,
+  corrected wrap overflow measurement, and matching translucent settings/history
+  controls. Crop clears revealed OCR, modal screens gate page navigation, keyboard
+  Go submits page jumps, and history controls/empty states/copy actions are corrected.
+- `2735e02`: manga opens the durable local position while bookmark refresh runs
+  independently. A late remote winner still reaches the reader; newer local turns
+  remain protected. WebKit is mounted during decoding and initial readiness,
+  geometry and bookmark changes coalesce into one initial document. Initial
+  restoration never snapshots a blank page as a page-turn animation.
+- The same commit replaces the unused generic preloader with one prepared manga
+  WebView, registered with its image scheme before construction. Readers reuse that
+  view after removing their handlers, delegates, gestures, keyboard closures and
+  controller attachment. The view stays hidden until its current navigation finishes.
+  Per-document UUID checks reject obsolete OCR/AI/clipboard/readiness messages;
+  image namespace checks reject an earlier book's requests. A closing/cancelled
+  load does not start statistics after the image-loader suspension.
+- Unused `lines_coords` arrays are no longer decoded. An optimized standalone
+  Mac benchmark on a synthetic 12.07 MB/250-page sidecar improved from 238.37 ms
+  to 59.05 ms. This is a smaller parsing improvement, not evidence for the full
+  three-second cause.
+
+Four independent reviewers examined the initial reader fixes, then three separate
+agents searched and fixed library, daily-reader and translation QoL issues. After
+the user's remaining startup report, three agents traced first paint, audited
+large-book work, and built meaningful startup measurements/tests. They also
+reviewed the WebView reuse and late-sync behavior; their concrete findings above
+were addressed.
+
+Android history was checked, including `3f6cfc9d` (the reported 3–5-second startup
+fix) and `9b69b57d` (maps before histories). Android's original fixes bounded sync,
+avoided redundant sidecar rewriting, and prevented repeated first-page loads during
+system-bar changes. Its recorded cold no-sync result was 0.6 s and stalled-server
+result 2.1 s; those are not universal instant-opening guarantees.
+
+### Opening measurements
+
+New opt-in Release-capable tracing records constant stage names with no book
+titles, paths, OCR text or credentials. It is disabled normally, emits at most 48
+lines, and writes one bounded diagnostic file in the background after the first
+image signal. Only the newest eight traces are retained; there is no polling.
+
+On the disposable mini simulator, the previous sequence reached HTML navigation
+at 150.8 ms, then did not request the image until 1568.5 ms. Image bytes were ready
+at 1569.4 ms, document loading finished at 1574.5 ms, and image decode plus two
+browser frames completed at 1853.3 ms. This isolated a roughly 1.4-second WebKit
+startup gap that removing the sync wait alone did not eliminate. In that sample,
+statistics initialization took 2.9 ms, so it was not moved based on speculation.
+
+With the actual manga WebView prepared/reused, the final fresh-launch UI run
+measured **336 ms**, then **80 ms** and **92 ms** reopening saved page 2. Each
+opening used exactly one initial document; the callback identified the actual
+page image and screenshots checked white paper plus both gray fixture blocks.
+These timings start at model creation and end at image decode plus two browser
+frames. XCTest's tap operation/idle waits add overhead (the external automation
+measurements were about 1.5–1.6 s); they are separate from the native timing and
+do not establish physical finger-to-screen latency.
+
+The synthetic DEBUG fixture now uses a fresh sync ID per launch, so an old
+position journal cannot defeat its intentionally reset bookmark. Reopening in
+the same launch preserves its real saved-page journal and is checked twice.
+No synthetic fixture was installed on physical hardware.
+
+### Verification and limits
+
+- **49/49** final focused native tests passed: bookmark races, late map/local turn
+  ordering, image namespace and parser behavior, OCR/ruby layout, reader lifetime,
+  remote positions, scheme cancellation routing and clean concurrent view reuse.
+  Test managers explicitly disable unrelated shared post-map lanes so isolated
+  bookmark tests cannot scan a previous UI fixture's library. Production defaults
+  retain both companion lanes. Mock uploads are selected by bookmark-map key and
+  retain content types, rather than decoding an unrelated gzip usage upload.
+- **107/107** non-hosted Python regressions passed, with no skips, using the
+  existing `build/parity-python` environment. The first system-Python run skipped
+  seven sentence tests for its missing regex dependency; that run was replaced.
+- **Six distinct** final mini UI scenarios passed: decoded-image startup and two
+  saved-page reopenings, repeated OCR actions in portrait/landscape, keyboard Go,
+  crop clearing, AI/history navigation gating, and thin action controls. Five
+  interaction cases passed together; startup passed separately after fixture
+  isolation was corrected. Physical Return key delivery remains unvalidated;
+  the platform SwiftUI field is retained and temporary keyboard workarounds removed.
+- Earlier in this follow-up, the broad hosted run passed 311/312 and exposed the
+  existing 8 ms cold-history limit. After batching, three consecutive isolated
+  measurements passed that unchanged limit: 2.92, 2.29 and 4.31 ms. The complete
+  312-case gate was not rerun after the final startup changes.
+- The earlier large-library live-scroll scenario passed with 80 books, 2400
+  statistics rows, 787 display callbacks across 14 seconds, and a maximum display
+  gap of 50 ms. A manga turn took 6.96 ms CPU / 7.40 ms wall time. These simulator
+  results include missed frames and do not establish zero lag on the physical mini.
+- The independently reproduced iOS 27.0 mini-simulator pinch-reset issue described
+  above remains open. Physical iPadOS 27.2 zoom has not been profiled.
+
+The first optimized update was installed and its new bundle process was verified
+on the user's iPad mini; a physical screenshot showed a manga reader. All 31
+previous library directory entries remained present. That check established
+installation/display and library preservation, not opening latency. Physical
+startup tracing attempts then lost the connection or encountered a locked device;
+there is no usable physical before/after timing from those attempts.
+
+Latest optimized startup update (`2735e02`): Release build and strict/deep code
+signature verification passed. The update installed successfully over the existing
+app into bundle container `BC723C32-D86D-4DD6-AE0F-082540A0A8C4`. Wireless CoreDevice
+connectivity failed immediately afterward. Reconnection then succeeded and a
+fresh library listing verified all 31 prior entries remained present. A subsequent
+fresh launch was explicitly rejected because the device was locked. The user has
+been asked to leave the mini unlocked for an actual-book startup measurement.
+Physical latency is still unverified; no claim of instant physical opening is made.
+The owned disposable review simulator was shut down and deleted after preserving
+its traces. The user's existing `hoshi-perf` simulator was preserved.
+
+Evidence (ignored): `build/codex-ocr-qol-native-final.log`,
+`build/codex-ocr-qol-performance-final.log`, `build/codex-ocr-qol-ui-final.log`,
+`build/codex-ocr-qol-ui-keyboard-go-final.log`, `build/codex-ocr-chrome-screens/`,
+`build/codex-manga-startup-ui-baseline-v2.log`,
+`build/codex-manga-startup-ui-prewarm.log`,
+`build/codex-manga-startup-native-final-v2.log`,
+`build/codex-manga-startup-python-final.log`,
+`build/codex-manga-startup-ui-final.log`,
+`build/codex-manga-startup-ui-final-startup.log`, and
+`build/codex-manga-startup-release-final-build.log`.
