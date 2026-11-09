@@ -2,6 +2,105 @@ import XCTest
 import UIKit
 
 final class ZoomPopupUITests: XCTestCase {
+    /// Explicitly selected physical-device diagnosis. It uses an existing library book and
+    /// its saved position; it never seeds a fixture, changes preferences or turns a page.
+    func testPhysicalLibraryMangaStartupOpensSavedPageThreeTimes() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let targetIdentifier = environment["HOSHI_REAL_MANGA_TARGET_ID"],
+              targetIdentifier.hasPrefix("manga-book-"), !targetIdentifier.dropFirst("manga-book-".count).isEmpty else {
+            throw XCTSkip("Set HOSHI_REAL_MANGA_TARGET_ID to the explicitly selected existing manga button identifier.")
+        }
+#if targetEnvironment(simulator)
+        throw XCTSkip("This opt-in diagnosis measures an existing book on the physical iPad.")
+#endif
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HOSHI_MANGA_STARTUP_TRACE"] = "1"
+        app.terminate()
+        app.launch()
+        defer { app.terminate() }
+
+        let booksTab = app.tabBars.buttons["Books"].firstMatch
+        if booksTab.waitForExistence(timeout: 3), booksTab.isHittable { booksTab.tap() }
+        let expectedDiskPage = environment["HOSHI_REAL_MANGA_EXPECTED_PAGE"].flatMap(Int.init)
+        var preservedPage: Int?
+        for opening in 0..<3 {
+            let target = app.buttons[targetIdentifier].firstMatch
+            try revealPhysicalManga(target, in: app)
+            var tappedAt = ProcessInfo.processInfo.systemUptime
+            target.tap()
+            let visible = app.descendants(matching: .any)["manga-first-image-probe"].firstMatch
+            // A compact shelf cover expands its shelf first. The same identifier on its
+            // expanded BookCell makes the second tap open the selected book without titles.
+            if !visible.waitForExistence(timeout: 2) {
+                XCTAssertTrue(target.exists && target.isHittable, "selected manga did not open or expand its shelf")
+                tappedAt = ProcessInfo.processInfo.systemUptime
+                target.tap()
+            }
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label BEGINSWITH %@", "first_image_ms="), object: visible)
+            XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed,
+                           "the selected real manga never reported decoded artwork")
+            let viewport = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+            var matched: (label: String, page: Int, pages: [Int], token: Int)?
+            let pageMatchesImage = NSPredicate { [self] _, _ in
+                let imageLabel = visible.label, modelLabel = viewport.label
+                guard let token = startupValue("load_token", in: imageLabel).flatMap(Int.init),
+                      let paintedToken = startupValue("painted_token", in: imageLabel).flatMap(Int.init),
+                      token == paintedToken,
+                      let page = startupValue("page", in: modelLabel).flatMap(Int.init),
+                      let decoded = startupValue("decoded_pages", in: imageLabel) else { return false }
+                let fields = decoded.split(separator: ","), pages = fields.compactMap { Int($0) }
+                guard (1...2).contains(pages.count), pages.count == fields.count,
+                      pages.allSatisfy({ $0 >= 0 }), pages.contains(page - 1),
+                      visible.label == imageLabel else { return false }
+                matched = (imageLabel, page, pages, token)
+                return true
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: pageMatchesImage, object: viewport)], timeout: 10), .completed,
+                           "the current document's decoded page must match the reader bookmark after any live sync update")
+            let observed = try XCTUnwrap(matched, "no decoded current-page observation was captured")
+            let milliseconds = try XCTUnwrap(Double(try startupField("first_image_ms", in: observed.label)))
+            let stablePage = preservedPage.map { $0 == observed.page } ?? true
+            if preservedPage == nil { preservedPage = observed.page }
+            // A live remote winner may legitimately differ from the earlier read-only disk
+            // snapshot; record that comparison without treating the snapshot as authoritative.
+            print("PHYSICAL_MANGA_STARTUP opening=\(opening + 1) native_ms=\(milliseconds) ui_tap_elapsed_ms=\((ProcessInfo.processInfo.systemUptime - tappedAt) * 1000) load_token=\(observed.token) page=\(observed.page) decoded_pages=\(observed.pages) prior_disk_page=\(expectedDiskPage ?? -1) stable_page=\(stablePage) no_initial_reload=\(observed.token == 1)")
+            saveScreenshot(app, name: "physical-manga-startup-opening-\(opening + 1)")
+            XCTAssertTrue(milliseconds.isFinite && milliseconds > 0, "first-image latency must be finite and positive")
+
+            let back = app.descendants(matching: .any)["manga-back"].firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 3))
+            back.tap()
+            let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: visible)
+            XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 10), .completed)
+        }
+    }
+
+    private func startupField(_ key: String, in label: String) throws -> String {
+        try XCTUnwrap(startupValue(key, in: label), "startup probe is missing \(key)")
+    }
+
+    private func startupValue(_ key: String, in label: String) -> String? {
+        let prefix = key + "="
+        guard let field = label.split(separator: ";").first(where: { $0.hasPrefix(prefix) }) else { return nil }
+        return String(field.dropFirst(prefix.count))
+    }
+
+    private func revealPhysicalManga(_ target: XCUIElement, in app: XCUIApplication) throws {
+        if target.waitForExistence(timeout: 10), target.isHittable { return }
+        let shelf = app.scrollViews.firstMatch
+        XCTAssertTrue(shelf.exists, "the library shelf is unavailable")
+        for _ in 0..<10 {
+            if target.exists && target.isHittable { return }
+            shelf.swipeUp()
+        }
+        for _ in 0..<10 {
+            if target.exists && target.isHittable { return }
+            shelf.swipeDown()
+        }
+        throw ProbeError("The explicitly selected real manga is not accessible on the current bookshelf.")
+    }
+
     /// Measures the full production manga route on a disposable simulator. The fixture is
     /// generated only by its explicit DEBUG launch flag; this test must never run on a device
     /// containing the user's library. Readiness is image decode + two frames, not DOM/navigation.

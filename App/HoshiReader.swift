@@ -86,6 +86,10 @@ struct HoshiReaderApp: App {
             .onChange(of: scenePhase, initial: true) { _, phase in
                 switch phase {
                 case .active:
+                    // Device diagnostics must not ask the user to keep unlocking during capture.
+                    // This process-only flag is absent from normal launches; quitting restores
+                    // UIKit's default idle timer without changing a system preference.
+                    if MangaStartupTrace.isEnabled { UIApplication.shared.isIdleTimerDisabled = true }
                     LocalFileServer.shared.endBackgroundTask()
                     LocalFileServer.shared.setAudioServer(enabled: userConfig.enableLocalAudio)
                     HttpSyncManager.shared.resumePolling()

@@ -124,8 +124,16 @@ struct MangaReaderView: View {
 
     private var firstImageProbeLabel: String {
         controller.firstImagePaintedMilliseconds.map {
-            "first_image_ms=\(Int($0.rounded()));load_token=\(controller.loadToken);painted_pages=\(controller.firstImagePaintedPages.map(String.init).joined(separator: ","))"
+            "first_image_ms=\(Int($0.rounded()));load_token=\(controller.loadToken);painted_pages=\(controller.firstImagePaintedPages.map(String.init).joined(separator: ","));painted_token=\(controller.decodedPageToken);decoded_pages=\(controller.decodedPageIndices.map(String.init).joined(separator: ","))"
         } ?? "first_image=pending"
+    }
+
+    private var viewportProbe: some View {
+        Text("page=\(model.pageIndex + 1);\(controller.uiTestViewportProbeLabel())")
+            .font(.system(size: 1))
+            .foregroundStyle(.clear)
+            .frame(width: 1, height: 1)
+            .accessibilityIdentifier("manga-viewport-probe")
     }
 
     private var pageNavigationEnabled: Bool {
@@ -163,7 +171,7 @@ struct MangaReaderView: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            if uiTestingEnabled {
+            if uiTestingEnabled || MangaStartupTrace.isEnabled {
                 VStack(spacing: 0) {
                     Text(verbatim: firstImageProbeLabel)
                         .font(.system(size: 1))
@@ -171,12 +179,12 @@ struct MangaReaderView: View {
                         .frame(width: 1, height: 1)
                         .accessibilityIdentifier("manga-first-image-probe")
                         .accessibilityLabel(firstImageProbeLabel)
-                    TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-                        Text("page=\(model.pageIndex + 1);\(controller.uiTestViewportProbeLabel())")
-                            .font(.system(size: 1))
-                            .foregroundStyle(.clear)
-                            .frame(width: 1, height: 1)
-                            .accessibilityIdentifier("manga-viewport-probe")
+                    if uiTestingEnabled {
+                        TimelineView(.periodic(from: .now, by: 0.25)) { _ in viewportProbe }
+                    } else {
+                        // Real-library startup diagnosis observes state changes without adding
+                        // a periodic UI refresh to the work being measured.
+                        viewportProbe
                     }
                     Text(uiTestSelectionProbe)
                         .font(.system(size: 1))

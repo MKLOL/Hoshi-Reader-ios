@@ -41,6 +41,8 @@ final class MangaWebViewController {
     var startupTrace: MangaStartupTrace?
     fileprivate(set) var firstImagePaintedMilliseconds: Double?
     fileprivate(set) var firstImagePaintedPages: [Int] = []
+    fileprivate(set) var decodedPageToken = 0
+    fileprivate(set) var decodedPageIndices: [Int] = []
     private(set) var hasFinishedPage = false
     private var readyLoadToken: Int?
     private var pendingPredecode: (token: Int, script: String)?
@@ -505,12 +507,16 @@ struct MangaReaderWebView: UIViewRepresentable {
                 switch body["event"] as? String {
                 case "startupImagePainted":
                     guard let token = body["token"] as? Int, token == parent.controller.loadToken,
-                          let trace = parent.controller.startupTrace, trace.enabled, !trace.isFinished,
+                          let trace = parent.controller.startupTrace, trace.enabled,
                           let pages = body["pages"] as? [Int], !pages.isEmpty, pages.count <= 2,
                           pages.allSatisfy({ $0 >= 0 }) else { return }
-                    trace.finish()
-                    parent.controller.firstImagePaintedPages = pages
-                    parent.controller.firstImagePaintedMilliseconds = trace.firstVisibleMilliseconds
+                    parent.controller.decodedPageIndices = pages
+                    parent.controller.decodedPageToken = token
+                    if !trace.isFinished {
+                        trace.finish()
+                        parent.controller.firstImagePaintedPages = pages
+                        parent.controller.firstImagePaintedMilliseconds = trace.firstVisibleMilliseconds
+                    }
                 case "scrollableBubbleRegions":
                     let values = body["regions"] as? [[String: Any]] ?? []
                     scrollableBubbleRegions = values.prefix(256).compactMap { value in

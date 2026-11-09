@@ -552,6 +552,51 @@ Physical latency is still unverified; no claim of instant physical opening is ma
 The owned disposable review simulator was shut down and deleted after preserving
 its traces. The user's existing `hoshi-perf` simulator was preserved.
 
+### Automated physical follow-up
+
+Added an explicitly selected, opt-in physical-library XCTest that opens the saved
+manga three times, records native first-image timing and current document/page
+identity, and attaches screenshots. It selects the existing book through a stable
+accessibility identifier; no fixture, preference reset, import, or page turn is
+used. Normal last-access, reading statistics and background sync still occur.
+Tracing alone enables the probes, so generic UI-testing launch behavior is not
+required. Trace-only probes update from state changes without a periodic refresh.
+The diagnostic process disables its idle timer while active; quitting restores
+normal system auto-lock behavior without changing a system preference.
+
+Three agents rechecked presentation, parsing/rendering and Android startup parity.
+No remaining fixed opening sleep was found. The 200 ms reader fade overlaps
+preparation; the two-second recovery timeout belongs to subsequent page turns.
+Position restoration and statistics still do synchronous work before the first
+HTML load, and speculative adjacent-page preparation can contend with the visible
+image. These remain data-dependent risks rather than demonstrated multi-second
+causes in the available evidence.
+
+Read-only copies from the actual selected volume allowed additional optimized
+Mac measurements without further manual interaction with the iPad:
+
+- OCR sidecar: 2,046,354 bytes, 232 pages and 1,333 boxes. The exact shipping
+  parser took 7.76 ms initially, a 4.50 ms fresh-parser median and a 0.037 ms
+  cached median. The previous coordinate-decoding implementation had a 9.46 ms
+  median in the separate decode/map harness.
+- Position journal: 89,472 bytes, 123 events and five heads. Ten fresh-process
+  opens of isolated copies took 2.14–2.79 ms, median 2.30 ms, and restored page
+  index 180 every time. Warm opens were approximately 0.12 ms.
+- The two statistics sidecars were only 7,694 and 1,557 bytes, with the migration
+  marker already present. These sizes do not establish their execution cost.
+
+These desktop measurements do not replace the physical first-paint trace. The
+signed optimized test build succeeded, but the physical test was blocked by
+`Unlock iPad to Continue` and then lost its pending runner connection before
+launch. No manga opening or physical startup metric was collected in that run.
+The test can perform all three openings automatically after a successful launch;
+the user does not need to repeat manual manga-opening steps.
+The final build with event-driven trace probes also passed optimized test-build
+compilation and strict/deep signature verification. It installed successfully over
+the existing iPad app, and all 31 previous library entries remained present.
+A fresh normal launch was again explicitly rejected with `Locked`; the diagnostic
+idle override has not run, and physical first-paint verification remains pending.
+
 Evidence (ignored): `build/codex-ocr-qol-native-final.log`,
 `build/codex-ocr-qol-performance-final.log`, `build/codex-ocr-qol-ui-final.log`,
 `build/codex-ocr-qol-ui-keyboard-go-final.log`, `build/codex-ocr-chrome-screens/`,
@@ -561,4 +606,12 @@ Evidence (ignored): `build/codex-ocr-qol-native-final.log`,
 `build/codex-manga-startup-python-final.log`,
 `build/codex-manga-startup-ui-final.log`,
 `build/codex-manga-startup-ui-final-startup.log`, and
-`build/codex-manga-startup-release-final-build.log`.
+`build/codex-manga-startup-release-final-build.log`,
+`build/codex-manga-physical-build-for-testing-final.log`,
+`build/codex-manga-physical-build-for-testing-no-poll.log`,
+`build/codex-manga-physical-release-run.log`,
+`build/codex-manga-physical-final-install.json`,
+`build/codex-manga-physical-final-books.json`,
+`build/codex-manga-physical-final-normal-launch.log`,
+`build/codex-startup-parser-audit/actual-production-parser.json`, and
+`build/startup-first-paint-audit/position-open/results.json`.

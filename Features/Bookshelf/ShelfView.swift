@@ -98,6 +98,7 @@ struct ShelfView: View {
                             BookCover(book: book, hasPretranslations: viewModel.pretranslatedBookIds.contains(book.id))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier(book.resolvedContentType == .mokuro ? "manga-book-\(book.id.uuidString.lowercased())" : "book-\(book.id.uuidString.lowercased())")
                     }
                 }
                 .onGeometryChange(for: Int.self) { proxy in
