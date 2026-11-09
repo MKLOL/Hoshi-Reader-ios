@@ -148,6 +148,23 @@ nonisolated final class UsageLog: @unchecked Sendable {
             }
         }
     }
+    /// A synchronized key and the day files it was unpacked into; `device` is nil for this device.
+    struct CachedDays: Sendable {
+        let key: String
+        let days: [String]
+        let device: String?
+    }
+    /// The keys whose day files are all still present, checked on the log's own queue.
+    func complete(_ entries: [CachedDays]) async -> Set<String> {
+        guard !entries.isEmpty else { return [] }
+        return await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                continuation.resume(returning: Set(entries.filter { entry in
+                    entry.device.map { hasDeviceDays(entry.days, device: $0) } ?? hasOwnDays(entry.days)
+                }.map(\.key)))
+            }
+        }
+    }
     func hasOwnDays(_ days: [String]) -> Bool {
         days.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0 + ".ndjson").path) }
     }

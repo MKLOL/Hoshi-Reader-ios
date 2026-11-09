@@ -485,7 +485,43 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
                     contentType: "application/json", body: JSONEncoder().encode(shard))
             }
         }
+        // Every statistics pass also walks the usage logs. Three other devices each publish a
+        // month of day files and a year of compacted months, and this device has a month of
+        // its own days: late in a month, that is what a reader with a few devices really has.
+        let usageLog = UsageLog.shared
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        func usageLines(_ instants: [Date]) -> Data {
+            Data(instants.map { #"{"at":\#(Int64($0.timeIntervalSince1970 * 1000)),"utcOffset":"Z","type":"page-turned"}"# + "\n" }.joined().utf8)
+        }
+        let usageInstants = (1...30).map { Date().addingTimeInterval(Double(-$0) * 86_400) }
+        let usageDays = usageInstants.map { ReadingDay.key($0, calendar: utc) }
+        let usagePeers = (0..<3).map { "usage-device-\($0)" }
+        try FileManager.default.createDirectory(at: usageLog.directory, withIntermediateDirectories: true)
+        defer {
+            for day in usageDays { try? FileManager.default.removeItem(at: usageLog.directory.appendingPathComponent(day + ".ndjson")) }
+            for peer in usagePeers { try? FileManager.default.removeItem(at: usageLog.directory.appendingPathComponent("devices").appendingPathComponent(peer)) }
+        }
+        for (day, instant) in zip(usageDays, usageInstants) {
+            try usageLines([instant]).write(to: usageLog.directory.appendingPathComponent(day + ".ndjson"))
+        }
+        var usageMonthDays: [String] = []
+        for peer in usagePeers {
+            for (day, instant) in zip(usageDays, usageInstants) {
+                _ = try await remote.put(key: HttpUsageLane.prefix + peer + "/" + day + HttpUsageLane.suffix,
+                    contentType: "application/gzip", body: UsageGzip.compress(usageLines([instant])))
+            }
+            for month in 1...12 {
+                let instants = try (1...28).map { try XCTUnwrap(utc.date(from: DateComponents(year: 2024, month: month, day: $0, hour: 12))) }
+                usageMonthDays = instants.map { ReadingDay.key($0, calendar: utc) }
+                _ = try await remote.put(key: HttpUsageLane.prefix + peer + "/" + String(format: "2024-%02d", month) + HttpUsageLane.suffix,
+                    contentType: "application/gzip", body: UsageGzip.compress(usageLines(instants)))
+            }
+        }
         await HttpStatisticsLane.shared.refresh(flush: false)
+        XCTAssertNil(HttpStatisticsLane.shared.problem)
+        for peer in usagePeers {
+            XCTAssertTrue(usageLog.hasDeviceDays(usageDays + usageMonthDays, device: peer), "the usage lane must have received \(peer)'s days and months")
+        }
         // The shelf draws and makes covers for the 80 books the first pass imported; that one-time
         // work after an import is not what this test measures.
         let settling = await mainThreadStalls { try? await Task.sleep(for: .seconds(3)) }

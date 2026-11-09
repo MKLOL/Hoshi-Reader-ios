@@ -31,7 +31,61 @@ nonisolated enum ReadingDay {
         formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
     }
+    /// Day and hour keys have a fixed ASCII grammar, and one sync pass reads a key for every
+    /// statistics row and every listed server key. Reading the grammar directly avoids building
+    /// an ICU formatter each time. Any other text, including dates before the Gregorian
+    /// calendar, is `unusual` and keeps the formatter's answer.
+    enum FixedKey {
+        case valid(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int)
+        /// The right shape, but not a real date or time.
+        case invalid
+        case unusual
+    }
+    static func fixedKey(_ key: String, time: Bool = false) -> FixedKey {
+        let bytes = Array(key.utf8)
+        func digits(_ range: Range<Int>) -> Int? {
+            var value = 0
+            for byte in bytes[range] {
+                guard (48...57).contains(byte) else { return nil }
+                value = value * 10 + Int(byte - 48)
+            }
+            return value
+        }
+        guard bytes.count == (time ? 16 : 10) || (time && bytes.count == 19), bytes[4] == 45, bytes[7] == 45,
+              let year = digits(0..<4), let month = digits(5..<7), let day = digits(8..<10), year >= 1583 else { return .unusual }
+        var hour = 0, minute = 0, second = 0
+        if time {
+            guard bytes[10] == 84, bytes[13] == 58, let hours = digits(11..<13), let minutes = digits(14..<16) else { return .unusual }
+            hour = hours; minute = minutes
+            if bytes.count == 19 {
+                guard bytes[16] == 58, let seconds = digits(17..<19) else { return .unusual }
+                second = seconds
+            }
+        }
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        guard (1...12).contains(month), day >= 1, day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1],
+              hour < 24, minute < 60, second < 60 else { return .invalid }
+        return .valid(year: year, month: month, day: day, hour: hour, minute: minute, second: second)
+    }
+    /// Whether the text names a real day, without needing its instant in any zone.
+    static func isDay(_ key: String) -> Bool {
+        switch fixedKey(key) {
+        case .valid: return true
+        case .invalid: return false
+        case .unusual: return parse(key) != nil
+        }
+    }
     static func parse(_ key: String, calendar: Calendar = StatisticsZone.calendar) -> Date? {
+        switch fixedKey(key) {
+        case let .valid(year, month, day, _, _, _):
+            // A zone whose DST change skips midnight has no 00:00 that day, but the day still
+            // begins at its first valid instant.
+            let zoned = gregorian(calendar)
+            return zoned.date(from: DateComponents(calendar: zoned, timeZone: calendar.timeZone, year: year, month: month, day: day))
+                .map(zoned.startOfDay(for:))
+        case .invalid: return nil
+        case .unusual: break
+        }
         // Validate the text in UTC: a zone whose DST change skips midnight has no 00:00 that day,
         // but the day still begins at its first valid instant.
         var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -46,6 +100,14 @@ nonisolated enum ReadingDay {
     }
     /// Hour keys deliberately have no zone: both clients interpret the reader's recorded local date/hour.
     static func hour(_ key: String, calendar: Calendar = StatisticsZone.calendar) -> (date: Date, hour: Int)? {
+        switch fixedKey(key, time: true) {
+        case let .valid(year, month, day, hour, _, _):
+            let zoned = gregorian(calendar)
+            return zoned.date(from: DateComponents(calendar: zoned, timeZone: calendar.timeZone, year: year, month: month, day: day))
+                .map { ($0, hour) }
+        case .invalid: return nil
+        case .unusual: break
+        }
         // Parse wall-clock text in UTC first so a historical hour survives a later timezone
         // change or a DST gap in the current zone; only its date and hour are significant.
         var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -275,9 +337,10 @@ nonisolated enum StatisticsMath {
         return (current, longest)
     }
     /// Clock-like, for playback positions; reading totals use `readingTime`.
+    /// Seconds stay past the hour, so neighbouring transcript lines keep distinct timestamps.
     static func duration(_ seconds: Double) -> String {
         let value = StatisticsNumbers.integer(seconds)
-        if value >= 3600 { return "\(value / 3600)h \(value % 3600 / 60)m" }
+        if value >= 3600 { return "\(value / 3600)h \(value % 3600 / 60)m \(value % 60)s" }
         return "\(value / 60)m \(value % 60)s"
     }
     /// Hours and minutes, with seconds only under a minute: "0m", "45s", "32m", "6h", "2h 14m".

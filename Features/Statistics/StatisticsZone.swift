@@ -20,6 +20,13 @@ nonisolated enum StatisticsZone {
         return formatter.string(from: date)
     }
     static func wallInstant(_ key: String) -> Date? {
+        switch ReadingDay.fixedKey(key, time: true) {
+        case let .valid(year, month, day, hour, minute, second):
+            let utc = calendar(zone: TimeZone(secondsFromGMT: 0)!)
+            return utc.date(from: DateComponents(calendar: utc, timeZone: utc.timeZone, year: year, month: month, day: day, hour: hour, minute: minute, second: second))
+        case .invalid: return nil
+        case .unusual: break
+        }
         let formatter = DateFormatter(); formatter.calendar = calendar(zone: TimeZone(secondsFromGMT: 0)!)
         formatter.timeZone = formatter.calendar.timeZone; formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.isLenient = false
         for format in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd'T'HH:mm:ss"] {

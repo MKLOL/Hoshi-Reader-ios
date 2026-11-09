@@ -624,4 +624,96 @@ nonisolated final class StatisticsPassSkipTests: XCTestCase {
         let restored = try await kv.get(key: key)
         XCTAssertNotNil(restored, "this device's month was never pushed again")
     }
+
+    /// Day and hour keys are read without an ICU formatter because a sync pass reads thousands of
+    /// them. The formatter-only readers below are the definition they must keep agreeing with.
+    func testFixedGrammarKeysAgreeWithTheFormatterInEveryZoneAndForMalformedText() throws {
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        func formatter(_ format: String) -> DateFormatter {
+            let formatter = DateFormatter()
+            formatter.calendar = utc; formatter.timeZone = utc.timeZone
+            formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = format; formatter.isLenient = false
+            return formatter
+        }
+        let dayFormat = formatter("yyyy-MM-dd"), hourFormats = [formatter("yyyy-MM-dd'T'HH:mm"), formatter("yyyy-MM-dd'T'HH:mm:ss")]
+        func zoned(_ zone: TimeZone) -> Calendar { var value = Calendar(identifier: .gregorian); value.timeZone = zone; return value }
+        func referenceDay(_ key: String, _ calendar: Calendar) -> Date? {
+            guard let parsed = dayFormat.date(from: key), dayFormat.string(from: parsed) == key else { return nil }
+            var components = utc.dateComponents([.year, .month, .day], from: parsed)
+            components.calendar = calendar; components.timeZone = calendar.timeZone
+            return calendar.date(from: components).map(calendar.startOfDay(for:))
+        }
+        func referenceHour(_ key: String, _ calendar: Calendar) -> (date: Date, hour: Int)? {
+            for format in hourFormats {
+                guard let parsed = format.date(from: key), format.string(from: parsed) == key else { continue }
+                var components = utc.dateComponents([.year, .month, .day], from: parsed)
+                components.calendar = calendar; components.timeZone = calendar.timeZone
+                if let date = calendar.date(from: components) { return (date, utc.component(.hour, from: parsed)) }
+            }
+            return nil
+        }
+        func referenceInstant(_ key: String) -> Date? {
+            hourFormats.lazy.compactMap { format in format.date(from: key).flatMap { format.string(from: $0) == key ? $0 : nil } }.first
+        }
+        // Zones whose daylight-saving changes have skipped or repeated midnight, beside ordinary ones.
+        let zones = try ["America/New_York", "Asia/Tokyo", "America/Sao_Paulo", "Asia/Beirut", "America/Havana", "Pacific/Apia", "UTC"]
+            .map { try XCTUnwrap(TimeZone(identifier: $0)) }
+        let first = try XCTUnwrap(utc.date(from: DateComponents(year: 1999, month: 12, day: 25, hour: 12)))
+        var days = 0
+        for offset in 0..<(42 * 366) {
+            let key = dayFormat.string(from: first.addingTimeInterval(Double(offset) * 86_400))
+            XCTAssertTrue(ReadingDay.isDay(key), key)
+            for zone in zones {
+                let calendar = zoned(zone)
+                guard ReadingDay.parse(key, calendar: calendar) == referenceDay(key, calendar) else { return XCTFail("\(key) in \(zone.identifier)") }
+            }
+            if offset % 97 == 0 {
+                for hour in 0..<24 {
+                    for text in [key + String(format: "T%02d:00", hour), key + String(format: "T%02d:59:59", hour)] {
+                        XCTAssertEqual(StatisticsZone.wallInstant(text), referenceInstant(text), text)
+                        for zone in zones {
+                            let calendar = zoned(zone), fast = ReadingDay.hour(text, calendar: calendar), reference = referenceHour(text, calendar)
+                            guard fast?.date == reference?.date, fast?.hour == reference?.hour, fast != nil else { return XCTFail("\(text) in \(zone.identifier)") }
+                        }
+                    }
+                }
+            }
+            days += 1
+        }
+        XCTAssertGreaterThan(days, 15_000)
+        let eastern = zoned(zones[0])
+        for key in ["2024-02-29", "2000-02-29", "2026-02-29", "1900-02-29", "2100-02-29", "2026-04-31", "2026-13-01", "2026-00-10",
+                    "2026-01-00", "2026-01-32", "2026-1-05", "2026-01-5", "２０２６-01-01", "", " 2026-01-01", "2026-01-01 ", "2026/01/01",
+                    "abcd-ef-gh", "1582-10-04", "1582-10-10", "1582-10-15", "1583-01-01", "1500-02-29", "0001-01-01", "0000-01-01",
+                    "10000-01-01", "9999-12-31", "2026-01-01T00:00", "+026-01-01", "2026-01-0१"] {
+            XCTAssertEqual(ReadingDay.parse(key, calendar: eastern), referenceDay(key, eastern), "day \(key.debugDescription)")
+            XCTAssertEqual(ReadingDay.isDay(key), referenceDay(key, StatisticsZone.calendar) != nil, "validity of \(key.debugDescription)")
+        }
+        for key in ["2026-03-08T02:30", "2026-03-08T24:00", "2026-03-08T23:60", "2026-03-08T23:59:60", "2026-03-08T2:00", "2026-03-08 02:00",
+                    "2026-03-08T02:00:0", "2026-03-08T02:00:00Z", "2026-02-30T10:00", "2026-03-08T02", "2026-03-08", "", "1500-02-29T10:00",
+                    "2026-03-08t02:00", "2026-03-08T02-00", "2026-03-08T0２:00"] {
+            let fast = ReadingDay.hour(key, calendar: eastern), reference = referenceHour(key, eastern)
+            XCTAssertEqual(fast?.date, reference?.date, "hour \(key.debugDescription)")
+            XCTAssertEqual(fast?.hour, reference?.hour, "hour \(key.debugDescription)")
+            XCTAssertEqual(StatisticsZone.wallInstant(key), referenceInstant(key), "instant \(key.debugDescription)")
+        }
+    }
+
+    /// The usage lane reads every listed key on each pass; none of them may need a formatter.
+    @MainActor func testUsageKeysParseWithoutAFormatterAndRejectWhatTheServerMustNotSend() {
+        let prefix = HttpUsageLane.prefix + "tablet-1/", suffix = HttpUsageLane.suffix
+        XCTAssertEqual(HttpUsageLane.parse(prefix + "2026-11-09" + suffix)?.day, "2026-11-09")
+        XCTAssertEqual(HttpUsageLane.parse(prefix + "2026-11-09" + suffix)?.month, "2026-11")
+        XCTAssertNil(HttpUsageLane.parse(prefix + "2026-11" + suffix)?.day)
+        XCTAssertEqual(HttpUsageLane.parse(prefix + "2026-11" + suffix)?.month, "2026-11")
+        for date in ["2026-11-31", "2026-13", "2026-00", "2026-1-09", "2026-11-9", "2026", "2026-11-09T10", "../2026-11", ""] {
+            XCTAssertNil(HttpUsageLane.parse(prefix + date + suffix), date)
+        }
+        XCTAssertNil(HttpUsageLane.parse(HttpUsageLane.prefix + "../2026-11-09" + suffix))
+        XCTAssertNil(HttpUsageLane.parse(prefix + "2026-11-09.json"))
+        let started = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<20_000 { _ = HttpUsageLane.parse(prefix + "2026-11-09" + suffix) }
+        // The formatter took about 165 µs a key, which is over three seconds here.
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1)
+    }
 }

@@ -27,8 +27,8 @@ import CryptoKit
         let parts = key.dropFirst(prefix.count).dropLast(suffix.count).split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 2, StatisticsHistory.validID(parts[0]) else { return nil }
         let date = parts[1]
-        if date.count == 10, ReadingDay.parse(date) != nil { return Key(device: parts[0], day: date, month: String(date.prefix(7))) }
-        if date.count == 7, ReadingDay.parse(date + "-01") != nil { return Key(device: parts[0], day: nil, month: date) }
+        if date.count == 10, ReadingDay.isDay(date) { return Key(device: parts[0], day: date, month: String(date.prefix(7))) }
+        if date.count == 7, ReadingDay.isDay(date + "-01") { return Key(device: parts[0], day: nil, month: date) }
         return nil
     }
     nonisolated private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
@@ -72,7 +72,15 @@ import CryptoKit
                 try checkCurrent()
                 index = Index(scope: scope); failures = [:]; lastPush = .distantPast
             }
-            let metas = listing.filter { Self.parse($0.key) != nil }
+            // Every pass, including one that finds nothing to do, runs on the main actor between
+            // frames. Each key is parsed once here and never inside another loop.
+            var keys: [String: Key] = [:], ownKeysByMonth: [String: [String]] = [:]
+            for key in listing.keys {
+                guard let parsed = Self.parse(key) else { continue }
+                keys[key] = parsed
+                if parsed.device == deviceID { ownKeysByMonth[parsed.month, default: []].append(key) }
+            }
+            let metas = listing.filter { keys[$0.key] != nil }
             func blocked(_ key: String, _ etag: String?) -> Bool {
                 guard !retryFailed, let failure = failures[key] else { return false }
                 return failure.etag == etag && failure.retry > now
@@ -84,11 +92,19 @@ import CryptoKit
                 if let message { errors.append(message) }
             }
             var readThisPass = Set<String>()
+            let sorted = metas.sorted(by: { $0.key < $1.key })
+            // An applied key is read again only when one of its cached day files is missing. That
+            // is a file check per day and key, so it is made once, off the main actor.
+            let applied = sorted.compactMap { key, meta -> UsageLog.CachedDays? in
+                guard let etag = meta.etag, index.applied[key] == etag, let parsed = keys[key] else { return nil }
+                return UsageLog.CachedDays(key: key, days: index.days[key] ?? [], device: parsed.device == deviceID ? nil : parsed.device)
+            }
+            let cached = await log.complete(applied)
+            try checkCurrent()
             // Day records sort before the corresponding compacted month. The month is authoritative.
-            for (key, meta) in metas.sorted(by: { $0.key < $1.key }) {
-                let parsed = Self.parse(key)!, own = parsed.device == deviceID
-                let cached = own ? log.hasOwnDays(index.days[key] ?? []) : log.hasDeviceDays(index.days[key] ?? [], device: parsed.device)
-                if let etag = meta.etag, index.applied[key] == etag, cached { continue }
+            for (key, meta) in sorted {
+                let parsed = keys[key]!, own = parsed.device == deviceID
+                if cached.contains(key) { continue }
                 if blocked(key, meta.etag) { continue }
                 do {
                     try checkCurrent()
@@ -122,8 +138,8 @@ import CryptoKit
                 guard unit.finished || flush || now.timeIntervalSince(lastPush) >= 120, !blocked(unit.key, metas[unit.key]?.etag) else { continue }
                 let parsed = Self.parse(unit.key)!
                 // Merge every server copy for the month before a compaction or restore can replace it.
-                let unread = metas.contains { key, meta in
-                    guard let remote = Self.parse(key), remote.device == deviceID, remote.month == parsed.month, parsed.day == nil || key == unit.key else { return false }
+                let unread = (ownKeysByMonth[parsed.month] ?? []).contains { key in
+                    guard parsed.day == nil || key == unit.key, let meta = metas[key] else { return false }
                     return !readThisPass.contains(key) && (meta.etag == nil || index.applied[key] != meta.etag)
                 }
                 guard !unread else { continue }
@@ -146,7 +162,7 @@ import CryptoKit
             }
             // Only own past-day keys are removed, after their complete month was confirmed.
             for (key, meta) in metas {
-                guard let parsed = Self.parse(key), parsed.device == deviceID, parsed.day != nil, parsed.month < currentMonth,
+                guard let parsed = keys[key], parsed.device == deviceID, parsed.day != nil, parsed.month < currentMonth,
                       confirmed.contains(Self.prefix + deviceID + "/" + parsed.month + Self.suffix), !blocked(key, meta.etag),
                       readThisPass.contains(key) || (meta.etag != nil && index.applied[key] == meta.etag) else { continue }
                 do { try checkCurrent(); try await transport.delete(key: key); try checkCurrent(); index.applied.removeValue(forKey: key); index.hashes.removeValue(forKey: key); failures.removeValue(forKey: key) }
