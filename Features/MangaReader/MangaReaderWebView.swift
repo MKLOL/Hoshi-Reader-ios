@@ -67,6 +67,13 @@ final class MangaWebViewController {
         return loadToken
     }
 
+    /// Loads the current page again after its document was lost: WebKit ended the page's
+    /// process, or the navigation failed before anything was shown.
+    fileprivate func reissueCurrentPage() {
+        guard let pendingHtml else { return }
+        load(html: pendingHtml, allowedImagePaths: allowedImagePaths)
+    }
+
     func setPredecodeScript(_ script: String, for token: Int) {
         guard token == loadToken else { return }
         pendingPredecode = (token, script)
@@ -391,6 +398,8 @@ struct MangaReaderWebView: UIViewRepresentable {
         weak var swipeRightRecognizer: UISwipeGestureRecognizer?
         var parent: MangaReaderWebView
         var lastLoadToken = 0
+        /// Reloads of a lost page since the last one that finished loading.
+        private var recoveries = 0
         var allowedImagePaths: Set<String> = []
         private var scrollableBubbleRegions: [CGRect] = []
         /// Native trackpad debounce — held here so it survives the per-page HTML reload a turn
@@ -442,6 +451,7 @@ struct MangaReaderWebView: UIViewRepresentable {
                 return
             }
             guard finishedLoadToken == parent.controller.loadToken else { return }
+            recoveries = 0
             parent.controller.startupTrace?.mark("document_finished")
             webView.isHidden = false
             // WebKit can restore the previous document's viewport during navigation. Reset only
@@ -462,15 +472,32 @@ struct MangaReaderWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-            if let navigation {
-                navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation))
-            }
+            navigationFailed(navigation)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            if let navigation {
-                navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation))
-            }
+            navigationFailed(navigation)
+        }
+
+        /// iOS can discard the page's process while the app is in the background; the page is
+        /// then blank until something loads it again.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            recoverCurrentPage()
+        }
+
+        /// A newer page replacing this one also ends its navigation; only the page still
+        /// wanted is loaded again.
+        private func navigationFailed(_ navigation: WKNavigation?) {
+            guard let navigation, let token = navigationLoadTokens.removeValue(forKey: ObjectIdentifier(navigation)),
+                  token == parent.controller.loadToken else { return }
+            recoverCurrentPage()
+        }
+
+        private func recoverCurrentPage() {
+            // A page that cannot survive its own load must not be loaded forever.
+            guard recoveries < 3 else { return }
+            recoveries += 1
+            parent.controller.reissueCurrentPage()
         }
 
         // MARK: Script messages

@@ -26,6 +26,7 @@ struct WebViewState: Hashable {
 
 struct ReaderLoader: View {
     @Environment(UserConfig.self) private var userConfig
+    @Environment(\.dismissReader) private var dismissReader
     @State private var viewModel: ReaderLoaderViewModel
     private let isMokuro: Bool
 
@@ -50,6 +51,18 @@ struct ReaderLoader: View {
                 MangaReaderView(metadata: viewModel.book)
             } else if let readerModel = viewModel.readerModel {
                 ReaderView(viewModel: readerModel)
+            } else if viewModel.loadFailed {
+                // The reader covers the whole screen and has no controls of its own yet.
+                ContentUnavailableView {
+                    Label("This book could not be opened", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text("Its files may be missing or damaged. Importing the book again usually fixes this.")
+                } actions: {
+                    Button("Close") { dismissReader?() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.systemBackground))
             } else {
                 ProgressView()
             }
@@ -608,7 +621,7 @@ struct ReaderView: View {
         }
         .overlay {
             // Same popup the manga reader uses — a cached sentence reply is the same shape as a
-            // cached bubble reply, including the "Ask ChatGPT instead" escape hatch.
+            // cached bubble reply, including the "Get a fresh translation" escape hatch.
             if aiController.isPresented {
                 MangaAiPopupView(
                     controller: aiController,

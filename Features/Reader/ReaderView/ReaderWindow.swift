@@ -50,7 +50,11 @@ final class ReaderWindow {
         guard hostController == nil,
               let presenter = topPresenter() else { return }
         
-        let dismiss: () -> Void = { [weak self] in self?.dismiss(onDismiss: onDismiss) }
+        // The shelf section that owns this window can leave the screen while its reader is open:
+        // its last book was finished, moved or removed by a sync. The reader must still be able
+        // to close, so its own back action keeps the window alive. Nothing here retains that
+        // action in return; the host is held weakly.
+        let dismiss: () -> Void = { self.dismiss(onDismiss: onDismiss) }
         let lifetime = ReaderWindowLifetime()
         self.lifetime = lifetime
         let host = UIHostingController(rootView: AnyView(content()

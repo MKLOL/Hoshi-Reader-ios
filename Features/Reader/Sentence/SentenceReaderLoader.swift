@@ -46,7 +46,12 @@ nonisolated enum SentenceReaderLoader {
     /// Every spine slot keeps its index so a reader bookmark maps onto it; a navigation document
     /// or a non-linear item is simply left empty.
     static func chapterSources(document: EPUBDocument) -> [SentenceChapterSource] {
-        let titles = tocTitles(document.tableOfContents.subTable ?? [])
+        // Each resolution follows symbolic links on disk, so every contents entry is resolved
+        // once here instead of once for every chapter.
+        var titleByURL: [URL: String] = [:]
+        for title in tocTitles(document.tableOfContents.subTable ?? []) {
+            if let url = document.resourceURL(for: title.href), titleByURL[url] == nil { titleByURL[url] = title.label }
+        }
         let guideTocHrefs = Set(
             document.guide?.references
                 .filter { $0.type.lowercased() == "toc" }
@@ -64,7 +69,7 @@ nonisolated enum SentenceReaderLoader {
             return SentenceChapterSource(
                 spineIndex: index,
                 url: readable ? document.resourceURL(for: path) : nil,
-                tocTitle: titles.first(where: { document.resourceURL(for: $0.href) == document.resourceURL(for: path) })?.label
+                tocTitle: document.resourceURL(for: path).flatMap { titleByURL[$0] }
             )
         }
     }

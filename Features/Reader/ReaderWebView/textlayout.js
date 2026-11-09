@@ -26,6 +26,13 @@
   // Each pass costs one chapter layout; the model normally settles within a few. The exact
   // fallback costs a layout per page, so it gets a hard budget and leaves the rest unbroken.
   var MAX_PASSES = 12, FALLBACK_LAYOUTS = 24, FALLBACK_MILLIS = 200;
+  // The reader shows a spinner until the breaks are placed, and a layout grows slower with the
+  // chapter. Past this budget the breaks already confirmed stay and the rest of the chapter
+  // reads in its natural flow.
+  var BUDGET_MILLIS = 800;
+  // A whole book in one file takes seconds for every layout, whatever is done to it. It is left
+  // exactly as the publisher wrote it: no word boxes and no sentence breaks.
+  var MAX_CHARACTERS = 120000;
   function runs() {
     var out = [], current = null, blocks = new WeakMap();
     function blockFor(element) {
@@ -756,14 +763,20 @@
       var following = sentences[index + 1];
       sentence.endInset = !following || following.block !== sentence.block ? blockInset(sentence.block, true, context.vertical) : 0;
     });
+    var started = Date.now();
     var natural = naturalFlow(sentences, context, geometry, media);
     var passes = 0, resume = { index: 0, page: -1, pageTop: 0, nextMedia: 0, rewrap: null };
-    while (passes < MAX_PASSES && (resume = planPass(sentences, context, geometry, natural, media, resume))) passes++;
+    while (passes < MAX_PASSES && (resume = planPass(sentences, context, geometry, natural, media, resume))) {
+      passes++;
+      if (Date.now() - started > BUDGET_MILLIS) break;
+    }
+    window.hoshiTextLayout.unfinished = !!resume && Date.now() - started > BUDGET_MILLIS;
     if (resume) {
-      // The estimate kept disagreeing with the layout. Finish exactly, one page at a time from
-      // where it last changed: drop its later estimates, then break at each crossing sentence.
+      // The estimate kept disagreeing with the layout, or ran out of time. Finish exactly, one
+      // page at a time from where it last changed: drop its later estimates, then break at each
+      // crossing sentence for as long as the budget allows.
       var scroll = context.vertical ? context.scrollEl.scrollTop : context.scrollEl.scrollLeft;
-      var deadline = Date.now() + FALLBACK_MILLIS;
+      var deadline = Math.min(Date.now() + FALLBACK_MILLIS, started + BUDGET_MILLIS);
       for (var index = resume.index; index < sentences.length; index++) setBreak(sentences[index], false);
       for (var guard = 0, from = resume.index; from >= 0 && guard < FALLBACK_LAYOUTS && Date.now() < deadline; guard++) {
         var settled = -1, previousLast = -1, blank = false, illustrated = mediaPages(media, context, geometry);
@@ -858,7 +871,13 @@
       if (this.prepared) return;
       this.prepared = true;
       this.paginated = paginated;
+      this.sentences = [];
       textBefore = visibleText();
+      if (textBefore.length > MAX_CHARACTERS) {
+        this.paginated = false;
+        this.buttons = translationButtons();
+        return;
+      }
       wrapWords();
       this.sentences = paginated ? sentenceAnchors() : [];
       this.buttons = translationButtons();

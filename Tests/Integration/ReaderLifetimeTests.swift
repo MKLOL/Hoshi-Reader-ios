@@ -1,5 +1,6 @@
 import EPUBKit
 import SwiftUI
+import WebKit
 import XCTest
 @testable import Hoshi_Reader
 
@@ -132,6 +133,102 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
         XCTAssertEqual(ReaderDateFormatting.utcOffset(for: date.addingTimeInterval(180 * 86400), timeZone: eastern), "-04:00")
         XCTAssertEqual(ReaderDateFormatting.utcOffset(for: date, timeZone: TimeZone(secondsFromGMT: 19800)!), "+05:30")
         XCTAssertEqual(ReaderDateFormatting.utcOffset(for: date, timeZone: TimeZone(secondsFromGMT: 0)!), "+00:00")
+    }
+
+    @MainActor private final class PagedReaderEvents {
+        var restores = 0, saved: [Double] = [], chapterTurns = 0
+    }
+
+    /// iOS discards a page's process while the app waits in the background. The paged reader must
+    /// come back at the reader's last saved page, and a swipe on the page that is gone or still
+    /// loading must never count as the end of the chapter: that saved the next chapter as the
+    /// reading position.
+    @MainActor func testPagedReaderReturnsToItsPageWhenThePageProcessEndsAndADeadPageCannotTurnTheChapter() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("reader-process-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paragraph = "<p>\n  私は<ruby>日本語<rt>にほんご</rt></ruby>の本を毎日少しずつ読みます。次の文章もみんなで一緒に楽しく読みましょう。今日はとても良い天気ですね。\n</p>\n"
+        let chapter = root.appendingPathComponent("chapter.xhtml")
+        // An EPUB chapter is XHTML: without its namespace WebKit reads plain XML, which has no head or body.
+        try ("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Chapter</title></head><body>\n"
+            + String(repeating: paragraph, count: 120) + "</body></html>").write(to: chapter, atomically: true, encoding: .utf8)
+
+        // Either writing mode will do; the host's own preference is left as it is.
+        let config = UserConfig(), events = PagedReaderEvents(), bridge = WebViewBridge()
+        bridge.updateState(url: chapter, progress: 0.5)
+        let size = CGSize(width: 390, height: 700), vertical = config.verticalWriting
+        let pageSize = Double(vertical ? size.height : size.width)
+        let reader = ReaderWebView(userConfig: config, viewSize: size, bridge: bridge, readAccessRoot: root, textColor: nil,
+            sasayakiTextColor: .yellow, sasayakiBackgroundColor: .black,
+            onNextChapter: { events.chapterTurns += 1; return false },
+            onPreviousChapter: { events.chapterTurns += 1; return false },
+            // As the reader's model does: the saved place is where a lost page is loaded again.
+            onSaveBookmark: { events.saved.append($0); bridge.updateProgress($0) },
+            onInternalLink: { _ in false }, onInternalJump: { _ in }, onTextSelected: { _ in nil },
+            onTapOutside: {}, onPageTurn: {}, onRestoreCompleted: { events.restores += 1 },
+            onHighlightCreated: { _, _ in })
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: AnyView(reader.frame(width: size.width, height: size.height)))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            host.rootView = AnyView(EmptyView())
+            window.isHidden = true
+            previous?.makeKeyAndVisible()
+        }
+        func webView(in view: UIView) -> WKWebView? {
+            (view as? WKWebView) ?? view.subviews.lazy.compactMap(webView(in:)).first
+        }
+        func settle(_ description: String, _ condition: @escaping @MainActor () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                if condition() { return }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            XCTFail("Timed out waiting for " + description)
+        }
+        try await settle("the chapter to be shown") { events.restores == 1 }
+        let page = try XCTUnwrap(webView(in: host.view))
+        let coordinator = try XCTUnwrap(page.navigationDelegate as? ReaderWebView.Coordinator)
+        func offset() async throws -> Double {
+            let value = try await page.evaluateJavaScript(vertical ? "document.body.scrollTop" : "document.body.scrollLeft")
+            return try XCTUnwrap(value as? Double)
+        }
+        func swipeForward() {
+            if vertical { coordinator.handleSwipeRight(UISwipeGestureRecognizer()) } else { coordinator.handleSwipeLeft(UISwipeGestureRecognizer()) }
+        }
+
+        let opened = try await offset()
+        XCTAssertGreaterThan(opened, 0, "half-way through a chapter is not its first page")
+        XCTAssertEqual(opened.truncatingRemainder(dividingBy: pageSize), 0)
+        swipeForward()
+        try await settle("the page turn to be saved") { events.saved.count == 1 }
+        let turned = try await offset()
+        XCTAssertEqual(turned, opened + pageSize)
+
+        // What WebKit calls when the page's process has ended.
+        coordinator.webViewWebContentProcessDidTerminate(page)
+        try await settle("the chapter to be loaded again") { events.restores == 2 }
+        let reloaded = try await offset()
+        XCTAssertEqual(reloaded, turned, "the page read last, not the one the chapter was opened at")
+        XCTAssertEqual(events.chapterTurns, 0)
+
+        // The same with the process really gone, where WebKit's test-only switch exists. A swipe
+        // meanwhile gets no answer from the page.
+        let end = NSSelectorFromString("_killWebContentProcessAndResetState")
+        if page.responds(to: end) {
+            page.perform(end)
+            swipeForward()
+            try await settle("the chapter to come back after its process ended") { events.restores == 3 }
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(events.chapterTurns, 0, "a page that cannot answer is not the end of its chapter")
+            let recovered = try await offset()
+            XCTAssertEqual(recovered, turned + pageSize * Double(events.saved.count - 1))
+        } else {
+            print("no test switch for ending the page process; only the reload was exercised")
+        }
     }
 
     @MainActor private func waitUntil(_ condition: @escaping @MainActor () async -> Bool) async throws {

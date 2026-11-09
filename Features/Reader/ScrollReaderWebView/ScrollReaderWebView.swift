@@ -173,6 +173,8 @@ struct ScrollReaderWebView: UIViewRepresentable {
         var shouldSyncProgressAfterRestore = false
         var lastProgressUpdate: CFTimeInterval = 0
         var isRestoring = true
+        /// Reloads after the page's process ended, since the last chapter that finished restoring.
+        var processReloads = 0
         
         init(_ parent: ScrollReaderWebView) {
             self.parent = parent
@@ -193,6 +195,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 return
             }
             if message.name == "restoreCompleted" {
+                processReloads = 0
                 if shouldSyncProgressAfterRestore {
                     shouldSyncProgressAfterRestore = false
                     syncLinkJumpProgress()
@@ -277,6 +280,24 @@ struct ScrollReaderWebView: UIViewRepresentable {
             return js
         }
         
+        /// iOS can discard the page's process while the app is in the background, leaving a blank
+        /// page whose overscroll would turn the chapter. Load the chapter again at the reader's
+        /// last saved place.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            // A chapter that cannot survive its own layout must not reload forever.
+            guard let url = currentURL, processReloads < 3 else { return }
+            processReloads += 1
+            pendingProgress = parent.bridge.progress
+            pendingFragment = nil
+            pendingSasayakiCues = parent.bridge.sasayakiCues
+            pendingHighlights = parent.bridge.highlights
+            pendingSentenceAnchors = parent.bridge.sentenceAnchors
+            isRestoring = true
+            webView.scrollView.delegate = nil
+            webView.alpha = 0
+            webView.loadFileURL(url, allowingReadAccessTo: parent.readAccessRoot)
+        }
+        
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             webView.scrollView.subviews.forEach { subview in
                 subview.gestureRecognizers?.forEach { recognizer in
@@ -337,9 +358,7 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 --hoshi-sasayaki-text-color: \(UIColor(parent.sasayakiTextColor).hexString);
                 --hoshi-sasayaki-background-color: \(UIColor(parent.sasayakiBackgroundColor).hexString);
             }
-            html {
-                -webkit-line-box-contain: block glyphs replaced;
-            }
+            \(ReaderTextStyle.lineBoxCSS)
             html, body {
                 margin: 0 !important;
                 padding: 0 !important;

@@ -110,9 +110,9 @@ struct MangaReaderView: View {
         return "\(model.pageIndex + 1) / \(model.pageCount)"
     }
 
-    private var uiTestingEnabled: Bool {
-        ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1"
-    }
+    /// Read once: the environment cannot change, and the view's body asks on every pass.
+    private static let uiTestingRequested = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING"] == "1"
+    private var uiTestingEnabled: Bool { Self.uiTestingRequested }
 
     private var uiTestingAiStubEnabled: Bool {
 #if DEBUG

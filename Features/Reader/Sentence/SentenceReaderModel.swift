@@ -187,6 +187,12 @@ nonisolated struct SentenceReadingProgress: Sendable {
            abs(point.progress - progress) < 0.00000001 { return cursor }
         if let chapter = book.chapters.firstIndex(where: { $0.chapterIndex == bookmark.chapterIndex }),
            !book.chapters[chapter].sentences.isEmpty {
+            // Without the chapter's character counts no sentence can be placed by progress, and
+            // every one of them would compare as reached. The place saved on this device, or the
+            // chapter's opening sentence, is the best one left.
+            guard metrics[bookmark.chapterIndex] != nil else {
+                return cursor.flatMap { $0.chapter == chapter ? $0 : nil } ?? SentencePosition(chapter: chapter, sentence: 0)
+            }
             let sentence = book.chapters[chapter].sentences.indices.last { index in
                 (at(SentencePosition(chapter: chapter, sentence: index))?.progress ?? 0) <= progress + 0.00000001
             } ?? 0

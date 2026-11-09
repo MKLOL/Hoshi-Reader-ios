@@ -27,6 +27,16 @@ class ChapterListViewModel {
     private let document: EPUBDocument
     private let bookInfo: BookInfo
     private let currentIndex: Int
+    /// The first spine position of each chapter file. Resolving a path follows symbolic links
+    /// on disk, so it is done once per chapter instead of once per contents entry and chapter.
+    @ObservationIgnored private lazy var spineIndexByURL: [URL: Int] = {
+        var result: [URL: Int] = [:]
+        for (index, spineItem) in document.spine.items.enumerated() {
+            if let manifestItem = document.manifest.items[spineItem.idref],
+               let url = document.resourceURL(for: manifestItem.path), result[url] == nil { result[url] = index }
+        }
+        return result
+    }()
     
     init(document: EPUBDocument, bookInfo: BookInfo, currentIndex: Int) {
         self.document = document
@@ -72,14 +82,6 @@ class ChapterListViewModel {
         guard let tocPath = item.item, let target = document.resourceURL(for: tocPath) else {
             return nil
         }
-        
-        for (index, spineItem) in document.spine.items.enumerated() {
-            if let manifestItem = document.manifest.items[spineItem.idref] {
-                if document.resourceURL(for: manifestItem.path) == target {
-                    return index
-                }
-            }
-        }
-        return nil
+        return spineIndexByURL[target]
     }
 }

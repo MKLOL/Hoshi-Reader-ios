@@ -44,6 +44,8 @@ class ReaderLoaderViewModel {
     private(set) var readerModel: ReaderViewModel?
     let book: BookMetadata
     private(set) var reservedSyncId: String?
+    /// The book's files are missing or cannot be parsed; the loader offers a way back.
+    private(set) var loadFailed = false
     private var didAttemptLoad = false
     private let usageLog: UsageLog
     
@@ -68,11 +70,9 @@ class ReaderLoaderViewModel {
         // Keep the loading view non-interactive until map/legacy bookmark migration has applied.
         // ReaderViewModel must never capture a stale sidecar and then timestamp it as a new turn.
         await HttpSyncManager.shared.syncBookmarksBeforeReading(book: book)
-        guard !Task.isCancelled, let root = rootURL else {
-            return
-        }
-        
-        guard let doc = try? BookStorage.loadEpub(root) else {
+        guard !Task.isCancelled else { return }
+        guard let root = rootURL, let doc = try? BookStorage.loadEpub(root) else {
+            loadFailed = true
             return
         }
         
@@ -774,6 +774,8 @@ class ReaderViewModel {
         index = bookmark.chapterIndex
         currentProgress = bookmark.progress
         sentenceCharacter = nil
+        // A lookup left open would point at text this jump replaces.
+        closePopups()
         if !sentenceModeActive { loadCurrentChapter() }
         resetTrackingBaseline()
     }

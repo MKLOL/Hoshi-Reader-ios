@@ -321,6 +321,8 @@ struct ReaderWebView: UIViewRepresentable {
         var pendingSasayakiCues: String?
         var pendingHighlights: String?
         var shouldSyncProgressAfterRestore = false
+        /// Reloads after the page's process ended, since the last chapter that finished restoring.
+        var processReloads = 0
         
         init(_ parent: ReaderWebView) {
             self.parent = parent
@@ -341,6 +343,7 @@ struct ReaderWebView: UIViewRepresentable {
                 return
             }
             if message.name == "restoreCompleted" {
+                processReloads = 0
                 if shouldSyncProgressAfterRestore {
                     shouldSyncProgressAfterRestore = false
                     syncLinkJumpProgress()
@@ -420,6 +423,21 @@ struct ReaderWebView: UIViewRepresentable {
             return js
         }
         
+        /// iOS can discard the page's process while the app is in the background, leaving a blank
+        /// page that answers nothing. Load the chapter again at the reader's last saved place.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            // A chapter that cannot survive its own layout must not reload forever.
+            guard let url = currentURL, processReloads < 3 else { return }
+            processReloads += 1
+            pendingProgress = parent.bridge.progress
+            pendingFragment = nil
+            pendingSasayakiCues = parent.bridge.sasayakiCues
+            pendingHighlights = parent.bridge.highlights
+            pendingSentenceAnchors = parent.bridge.sentenceAnchors
+            webView.alpha = 0
+            webView.loadFileURL(url, allowingReadAccessTo: parent.readAccessRoot)
+        }
+        
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             let bottomOverlap = parent.userConfig.verticalWriting ? parent.userConfig.fontSize : 0
             let pageHeight = Int(parent.viewSize.height)
@@ -494,9 +512,7 @@ struct ReaderWebView: UIViewRepresentable {
                 --hoshi-sasayaki-text-color: \(UIColor(parent.sasayakiTextColor).hexString);
                 --hoshi-sasayaki-background-color: \(UIColor(parent.sasayakiBackgroundColor).hexString);
             }
-            html {
-                -webkit-line-box-contain: block glyphs replaced;
-            }
+            \(ReaderTextStyle.lineBoxCSS)
             html, body {
                 overflow: hidden !important;
                 height: var(--page-height, 100vh) !important;
@@ -724,13 +740,18 @@ struct ReaderWebView: UIViewRepresentable {
             webView.evaluateJavaScript(script) { [weak self] result, _ in
                 guard let self = self else { return }
                 
-                if let res = result as? String, res == "scrolled" {
+                switch result as? String {
+                case "scrolled":
                     self.saveBookmark()
-                } else {
+                case "limit":
                     let chapterChanged = direction == .forward ? self.parent.onNextChapter() : self.parent.onPreviousChapter()
                     if chapterChanged {
                         webView.alpha = 0
                     }
+                default:
+                    // No answer: the page's process is gone or the chapter is still loading.
+                    // Turning the chapter here would save a place the reader never chose.
+                    break
                 }
             }
         }

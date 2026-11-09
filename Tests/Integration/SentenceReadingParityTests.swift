@@ -174,4 +174,166 @@ nonisolated final class SentenceReadingParityTests: XCTestCase {
             XCTAssertEqual(values["ruby"] as? Int, 30)
         }
     }
+
+    /// Publishers often print one paragraph per line with its text indented, so every text node
+    /// opens with white space that the layout collapses. Such a character has no box; in vertical
+    /// text a range over it read as the origin, and every saved place reopened on the first page.
+    @MainActor func testVerticalRestoreFindsItsPageWhenParagraphsOpenWithALineBreak() async throws {
+        var connected: UIWindowScene?
+        for _ in 0..<200 {
+            connected = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            if connected != nil { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let scene = try XCTUnwrap(connected)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        let configuration = WKWebViewConfiguration()
+        // The reader reports a finished restore to its host.
+        configuration.userContentController.add(IgnoredMessages(), name: "restoreCompleted")
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240), configuration: configuration)
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        controller.view.addSubview(webView)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previous?.makeKeyAndVisible() }
+        let readerURL = try XCTUnwrap(Bundle.main.url(forResource: "reader", withExtension: "js"))
+        let reader = try String(contentsOf: readerURL, encoding: .utf8)
+        // Lines that open with kana: a word box would otherwise take the kanji and leave the
+        // white space before it in a text node of its own, which holds no counted character.
+        let paragraphs = String(repeating: "<p>\n  これは<ruby>日本語<rt>にほんご</rt></ruby>の本です。\n  まいにち少しずつ読みます。\n  「つぎの文章もみんなで読みましょう」と彼は言った。\n</p>\n", count: 40)
+        let html = """
+        <!doctype html><html lang="ja"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+        html,body { margin:0; padding:0; width:320px; height:240px; overflow:hidden; writing-mode:vertical-rl; }
+        body { box-sizing:border-box; font:22px serif; line-height:1.5; column-width:240px; column-gap:0; }
+        p { margin:0; } \(ReaderTextStyle.wordLayoutCSS) \(ReaderTextStyle.lineBoxCSS)
+        </style><script>\(reader)\n\(ReaderTextStyle.textLayoutScript)
+        window.hoshiReader.pageWidth=320;window.hoshiReader.pageHeight=240;</script></head><body>
+        \(paragraphs)</body></html>
+        """
+        // The scripts stay out of the body: the reader counts every text node there as the
+        // chapter's text, and in the app they are never part of the document.
+        webView.loadHTMLString(html, baseURL: nil)
+        for _ in 0..<300 {
+            if !webView.isLoading, (try? await webView.evaluateJavaScript("!!window.hoshiTextLayout")) as? Bool == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let result = try await webView.callAsyncJavaScript("""
+            await document.fonts.ready;
+            window.hoshiTextLayout.prepare(window.hoshiReader, true);
+            const frames = () => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const places = [];
+            for (const progress of [0.25, 0.5, 0.75]) {
+              await window.hoshiReader.restoreProgress(progress);
+              await frames();
+              places.push(document.body.scrollTop / 240);
+            }
+            return {places, pages: Math.round(document.body.scrollHeight / 240)};
+            """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+        let values = try XCTUnwrap(result)
+        let pages = try XCTUnwrap(values["pages"] as? Int), places = try XCTUnwrap(values["places"] as? [Double])
+        XCTAssertGreaterThan(pages, 8)
+        XCTAssertEqual(places.count, 3)
+        for (place, progress) in zip(places, [0.25, 0.5, 0.75]) {
+            XCTAssertEqual(place, place.rounded(), "a restored place is a whole page")
+            XCTAssertEqual(place, progress * Double(pages), accuracy: 1.5, "\(Int(progress * 100))% of \(pages) pages")
+        }
+        XCTAssertLessThan(places[0], places[1]); XCTAssertLessThan(places[1], places[2])
+    }
+
+    /// The reader shows a spinner until a chapter's breaks are placed. With the reader's own line
+    /// rules, a long vertical chapter must be ready in well under the many seconds it once took,
+    /// and a whole book in one file is left alone.
+    @MainActor func testLongChaptersPaginateQuicklyAndASingleFileBookIsLeftAlone() async throws {
+        var connected: UIWindowScene?
+        for _ in 0..<200 {
+            connected = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            if connected != nil { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let scene = try XCTUnwrap(connected)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = UIViewController()
+        // An iPad mini page in portrait.
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 744, height: 1000))
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        controller.view.addSubview(webView)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previous?.makeKeyAndVisible() }
+        let readerURL = try XCTUnwrap(Bundle.main.url(forResource: "reader", withExtension: "js"))
+        let reader = try String(contentsOf: readerURL, encoding: .utf8)
+        let pieces = [
+            "<ruby>吾輩<rt>わがはい</rt></ruby>は<ruby>猫<rt>ねこ</rt></ruby>である。名前はまだ無い。",
+            "どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。",
+            "「そうですか」と彼は静かに言った。「それなら、明日の朝いちばんに出発しましょう」",
+            "彼女は<em>決して</em>振り返らなかった。窓の外では雨が降り続いている……。",
+            "<ruby>東京<rt>とうきょう</rt></ruby>の<ruby>夜景<rt>やけい</rt></ruby>は美しい！本当に？それとも錯覚だろうか。",
+            "国際連合安全保障理事会常任理事国の代表者会議が開催された。参加者は百人以上だった。",
+            "12月25日、私達は図書館で勉強していた。",
+        ]
+        func chapter(paragraphs: Int) -> String {
+            (0..<paragraphs).map { index in
+                "<p>　" + (0..<(2 + index * 7 % 5)).map { pieces[(index * 3 + $0) % pieces.count] }.joined() + "</p>"
+            }.joined(separator: "\n")
+        }
+        func prepare(_ body: String) async throws -> [String: Any] {
+            let html = """
+            <!doctype html><html lang="ja"><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>
+            \(ReaderTextStyle.wordLayoutCSS)
+            \(ReaderTextStyle.lineBoxCSS)
+            html,body { margin:0 !important; padding:0 !important; width:744px !important; height:1000px !important; overflow:hidden !important; writing-mode:vertical-rl !important; }
+            body { \(ReaderTextStyle.typographyDeclarations(font: "Hiragino Mincho ProN", size: 22))
+              box-sizing:border-box !important; column-width:744px !important; column-gap:72px; padding:25px 18px 47px !important;
+              text-align:start !important; hanging-punctuation:allow-end !important; line-break:strict !important; }
+            p { margin:0; }
+            </style></head><body>\(body)<script>\(reader)\n\(ReaderTextStyle.textLayoutScript)
+            window.hoshiReader.pageWidth=744;window.hoshiReader.pageHeight=1000;</script></body></html>
+            """
+            webView.loadHTMLString(html, baseURL: nil)
+            for _ in 0..<600 {
+                if !webView.isLoading, (try? await webView.evaluateJavaScript("!!window.hoshiTextLayout")) as? Bool == true { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let result = try await webView.callAsyncJavaScript("""
+                await document.fonts.ready;
+                const started = performance.now();
+                window.hoshiTextLayout.prepare(window.hoshiReader, true);
+                const context = window.hoshiReader.getScrollContext();
+                return {milliseconds: performance.now() - started, paginated: window.hoshiTextLayout.paginated,
+                  unfinished: !!window.hoshiTextLayout.unfinished, preserved: window.hoshiTextLayout.textPreserved,
+                  words: document.querySelectorAll('.hoshi-word').length,
+                  breaks: document.querySelectorAll('.hoshi-sentence-page-break,.hoshi-sentence-block-break').length,
+                  pages: Math.round(document.body.scrollHeight / context.pageSize), characters: document.body.textContent.length};
+                """, arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+            return try XCTUnwrap(result)
+        }
+
+        // About sixty pages. With `-webkit-line-box-contain: block glyphs replaced` this took thirteen seconds.
+        let long = try await prepare(chapter(paragraphs: 300))
+        print("300-paragraph vertical chapter: \(Int(long["milliseconds"] as? Double ?? -1)) ms, \(long["pages"] ?? "?") pages, \(long["breaks"] ?? "?") breaks, \(long["words"] ?? "?") word boxes")
+        XCTAssertEqual(long["preserved"] as? Bool, true)
+        XCTAssertEqual(long["paginated"] as? Bool, true)
+        XCTAssertEqual(long["unfinished"] as? Bool, false, "an ordinary long chapter must get all of its sentence breaks")
+        XCTAssertGreaterThan(long["pages"] as? Int ?? 0, 40)
+        XCTAssertGreaterThan(long["breaks"] as? Int ?? 0, 20)
+        XCTAssertLessThan(long["milliseconds"] as? Double ?? .infinity, 3_000)
+
+        // A whole book in one file keeps the publisher's layout: no word boxes, no breaks, no wait.
+        let book = try await prepare(chapter(paragraphs: 1_500))
+        print("single-file book: \(Int(book["milliseconds"] as? Double ?? -1)) ms for \(book["characters"] ?? "?") characters")
+        XCTAssertGreaterThan(book["characters"] as? Int ?? 0, 150_000)
+        XCTAssertEqual(book["paginated"] as? Bool, false)
+        XCTAssertEqual(book["words"] as? Int, 0)
+        XCTAssertEqual(book["breaks"] as? Int, 0)
+        XCTAssertEqual(book["preserved"] as? Bool, true)
+        XCTAssertLessThan(book["milliseconds"] as? Double ?? .infinity, 1_000)
+    }
+}
+
+/// Receives the messages a reader page posts to a host that these layout tests do not have.
+private final class IgnoredMessages: NSObject, WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {}
 }

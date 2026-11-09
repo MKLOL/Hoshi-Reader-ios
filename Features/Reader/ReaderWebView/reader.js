@@ -529,10 +529,25 @@ window.hoshiReader = {
         }
         
         if (targetNode) {
+            // A node can open with whitespace that the layout collapsed. It has no box, so a range
+            // over it reads as the origin and would restore the position to the first page.
+            var text = targetNode.textContent;
             var range = document.createRange();
-            range.setStart(targetNode, 0);
-            range.setEnd(targetNode, 1);
-            var rect = this.getRect(range);
+            var rect = null;
+            // The first counted character is nearly always drawn. A node that is not displayed at
+            // all has no box anywhere, so only its first few characters are tried.
+            for (var offset = this.textOffsetForCharCount(targetNode, 0), tries = 0; offset < text.length && tries < 16 && !rect; tries++) {
+                var length = String.fromCodePoint(text.codePointAt(offset)).length;
+                range.setStart(targetNode, offset);
+                range.setEnd(targetNode, offset + length);
+                var box = range.getClientRects()[0];
+                if (box && (box.width > 0 || box.height > 0)) rect = box;
+                offset += length;
+            }
+            if (!rect) {
+                range.selectNodeContents(targetNode);
+                rect = this.getRect(range);
+            }
             var anchor = (context.vertical ? rect.top : rect.left) + (context.vertical ? context.scrollEl.scrollTop : context.scrollEl.scrollLeft);
             var targetScroll = this.alignToPage(context, anchor);
             

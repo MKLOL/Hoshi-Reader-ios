@@ -57,7 +57,11 @@ actor MangaImageLoader {
         for key in Array(bytes.keys) where !wantedPaths.contains(key.path) {
             retainedBytes -= bytes.removeValue(forKey: key)?.count ?? 0
         }
-        for (key, read) in reading where !wantedPaths.contains(key.path) { read.task.cancel() }
+        for (key, read) in reading where !wantedPaths.contains(key.path) {
+            read.task.cancel()
+            // A page that is turned back to starts its own read instead of joining this one.
+            reading.removeValue(forKey: key)
+        }
     }
 
     func source(relativePath: String) -> MangaImageSource? {

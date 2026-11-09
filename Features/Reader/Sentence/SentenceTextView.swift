@@ -158,6 +158,9 @@ struct SentenceTextView: UIViewRepresentable {
                   !view.text.isEmpty else { return nil }
             let container = view.textContainer
             layoutManager.ensureLayout(for: container)
+            // A reading is drawn in the leading above its word, inside the used rectangle of the
+            // line before. Checked first, or a tap on it would look up a word in that line.
+            if let reading = (view as? CenteringTextView)?.rubyBaseTap(at: location) { return reading }
             var point = location
             point.x -= view.textContainerInset.left
             point.y -= view.textContainerInset.top

@@ -50,7 +50,7 @@ struct SentenceReaderView: View {
     /// The reader's Appearance sheet allows 16...40; `fontSize` is shared, so the steppers here
     /// must not push the web reader to a size that sheet cannot produce.
     private static let fontSizeRange = 16...40
-    private static let rootSpace = "sentenceReaderRoot"
+    nonisolated private static let rootSpace = "sentenceReaderRoot"
 
     private enum LoadState {
         case loading
@@ -79,14 +79,10 @@ struct SentenceReaderView: View {
             if let new { SentenceReaderPositionStore.save(new, bookKey: bookKey) } // queued off the main actor
         }
         .onChange(of: readerModel?.index) { _, _ in refreshFromBookmark() }
+        // The reader underneath stays in place and synchronizes after a long absence. Its new
+        // place arrives through the two observers above; a second sync from here on every return
+        // to the app would only run beside it.
         .onChange(of: readerModel?.currentProgress) { _, _ in refreshFromBookmark() }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
-            guard let readerModel else { return }
-            Task {
-                await readerModel.syncAfterForeground()
-                refreshFromBookmark()
-            }
-        }
         .sheet(isPresented: $showAppearance) {
             AppearanceView(userConfig: userConfig, showDismiss: true)
                 .presentationDetents([.medium, .large])
