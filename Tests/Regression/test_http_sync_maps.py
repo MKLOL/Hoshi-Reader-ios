@@ -98,7 +98,7 @@ class HttpSyncMapRegressionTests(unittest.TestCase):
 
     def test_full_reconcile_does_not_block_the_five_second_map_lane(self):
         manager = self.source("Features/HttpSync/HttpSyncManager.swift")
-        start = manager.index("private func performMapExchange() async")
+        start = manager.index("private func performMapExchange(")
         end = manager.index("func onShelfPlacementChanged", start)
         exchange = manager[start:end]
         self.assertIn("beginReconcile(preflight: changes, expectedConfig: config)", exchange)

@@ -159,8 +159,17 @@ nonisolated final class ReadingPositionRemoteTests: XCTestCase {
 
     @MainActor func testColdOwnHistoryIndexOf80BooksDecodesAwayFromMain() async throws {
         let (directory, _, _) = try fixture()
-        let journals = directory.appendingPathComponent("positions"), encoder = JSONEncoder()
-        for index in 0..<80 {
+        let journals = directory.appendingPathComponent("positions")
+        try writeOwnHistories(80, in: journals)
+        let fresh = ReadingPositionRepository(directory: journals, device: ReadingDevice(id: "local", name: "Local"))
+        try await responsive { try await fresh.prepareForSync() }
+        XCTAssertEqual(fresh.ownHistories().count, 80)
+        XCTAssertEqual(fresh.snapshot(bookId: "book-79").events.count, 50)
+    }
+
+    private func writeOwnHistories(_ count: Int, in journals: URL) throws {
+        let encoder = JSONEncoder()
+        for index in 0..<count {
             let id = "book-\(index)"
             let events = (0..<50).map { number in
                 var value = event(number); value.bookId = id; value.deviceId = "local"
@@ -169,10 +178,61 @@ nonisolated final class ReadingPositionRemoteTests: XCTestCase {
             let state = ReadingPositionState(bookId: id, heads: ["remote-origin": events.last!], events: events, pending: [events.last!.id])
             try encoder.encode(state).write(to: ReadingPositionRepository.journalURL(id, in: journals), options: .atomic)
         }
+    }
+
+    @MainActor func testColdHistoryWarmupKeepsNavigationBetweenCommitBatchesAndRelaunch() async throws {
+        let (directory, root, _) = try fixture()
+        let journals = directory.appendingPathComponent("positions")
+        try writeOwnHistories(24, in: journals)
         let fresh = ReadingPositionRepository(directory: journals, device: ReadingDevice(id: "local", name: "Local"))
-        try await responsive { try await fresh.prepareForSync() }
-        XCTAssertEqual(fresh.ownHistories().count, 80)
-        XCTAssertEqual(fresh.snapshot(bookId: "book-79").events.count, 50)
+        let session = fresh.open(bookId: "book-0", root: root)
+        let local = try XCTUnwrap(session.navigate(bookmark: Bookmark(chapterIndex: 600, progress: 0.6,
+            characterCount: 6000, lastModified: Date(timeIntervalSinceReferenceDate: 10_000))))
+        var checks = 0
+        try await fresh.prepareForSync(stillCurrent: {
+            checks += 1
+            if checks == 3 { _ = fresh.record(root: root, event: local) }
+            return true
+        })
+        XCTAssertGreaterThan(checks, 3, "a cold library must yield between commit batches")
+        XCTAssertEqual(fresh.ownHistories().count, 24)
+        XCTAssertTrue(fresh.ownHistories()["book-0"]?.contains(local.id) == true)
+        XCTAssertEqual(fresh.snapshot(bookId: "book-0").winner?.id, local.id)
+        let restored = ReadingPositionRepository(directory: journals, device: ReadingDevice(id: "local", name: "Local"))
+        XCTAssertEqual(restored.open(bookId: "book-0", root: root).initialBookmark?.chapterIndex, 600)
+        XCTAssertTrue(restored.snapshot(bookId: "book-0").pending.contains(local.id))
+    }
+
+    @MainActor func testAccountChangeBetweenColdHistoryCommitBatchesCancelsWarmup() async throws {
+        let (directory, _, _) = try fixture()
+        let journals = directory.appendingPathComponent("positions")
+        try writeOwnHistories(24, in: journals)
+        let fresh = ReadingPositionRepository(directory: journals, device: ReadingDevice(id: "local", name: "Local"))
+        var checks = 0
+        do {
+            try await fresh.prepareForSync(stillCurrent: { checks += 1; return checks < 3 })
+            XCTFail("the old account completed its history warmup")
+        } catch is CancellationError { }
+        XCTAssertEqual(checks, 3)
+        try await fresh.prepareForSync()
+        XCTAssertEqual(fresh.ownHistories().count, 24)
+    }
+
+    @MainActor func testHistoryResetBetweenColdCommitBatchesDoesNotRestoreDeletedJournals() async throws {
+        let (directory, _, _) = try fixture()
+        let journals = directory.appendingPathComponent("positions")
+        try writeOwnHistories(24, in: journals)
+        let fresh = ReadingPositionRepository(directory: journals, device: ReadingDevice(id: "local", name: "Local"))
+        var checks = 0
+        try await fresh.prepareForSync(stillCurrent: {
+            checks += 1
+            if checks == 3 { fresh.removeAllHistory() }
+            return true
+        })
+        XCTAssertGreaterThan(checks, 3)
+        XCTAssertTrue(fresh.ownHistories().isEmpty)
+        XCTAssertTrue(fresh.snapshot(bookId: "book-0").events.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ReadingPositionRepository.journalURL("book-0", in: journals).path))
     }
 
     @MainActor func testDurableLocalTurnAfterLargeCausalImportStaysWithinAFrameAndNoopsKeepBytes() async throws {

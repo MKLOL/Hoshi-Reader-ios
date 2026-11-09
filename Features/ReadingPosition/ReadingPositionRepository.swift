@@ -201,14 +201,25 @@ final class ReadingPositionRepository {
     func prepareForSync(stillCurrent: @MainActor () -> Bool = { true }) async throws {
         try Task.checkCancellation()
         guard stillCurrent() else { throw CancellationError() }
-        while ownIndex == nil {
+        preparing: while ownIndex == nil {
             let generation = indexGeneration, captured = revisions
             let loaded = await DiskHistory.all(in: directory, ownDevice: device.id)
             try Task.checkCancellation()
             guard stillCurrent() else { throw CancellationError() }
             guard generation == indexGeneration else { continue }
+            guard ownIndex == nil else { return }
             var own: [String: Set<String>] = [:], retry = false
-            for history in loaded {
+            for (offset, history) in loaded.enumerated() {
+                // Validation still checks the live file before adopting its decoded state.
+                // Even these small stat/cache operations become a visible pause when a cold
+                // library has many journals, so do not commit the whole library in one turn.
+                if offset > 0, offset.isMultiple(of: 8) {
+                    await Task.yield()
+                    try Task.checkCancellation()
+                    guard stillCurrent() else { throw CancellationError() }
+                    guard generation == indexGeneration else { continue preparing }
+                    guard ownIndex == nil else { return }
+                }
                 guard let state = history.state else { continue } // `read` handles corruption on demand.
                 let id = state.bookId
                 if revisions[id] != captured[id] { continue }

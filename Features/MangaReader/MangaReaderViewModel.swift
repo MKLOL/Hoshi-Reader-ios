@@ -86,7 +86,6 @@ final class MangaReaderViewModel {
 
     func load(controller: MangaWebViewController, userConfig: UserConfig) async {
         guard !isReady, errorMessage == nil else { return }
-        await HttpSyncManager.shared.syncBookmarksBeforeReading(book: metadata)
         guard let booksDir = try? BookStorage.getBooksDirectory(), let folder = metadata.folder else {
             errorMessage = "Could not locate the manga book."
             return
@@ -95,10 +94,15 @@ final class MangaReaderViewModel {
         // Parse off the main actor; return a Sendable tuple (the error reduced to its message so
         // no non-Sendable `Error` existential crosses the task boundary; `String` can't be a
         // `Result.Failure` since it isn't `Error`).
-        let parsed: (book: MokuroBook?, error: String?) = await Task.detached(priority: .userInitiated) {
+        let parsing = Task.detached(priority: .userInitiated) { () -> (book: MokuroBook?, error: String?) in
             do { return (try MokuroBookParser.shared.parse(bookRoot: root), nil) }
             catch { return (nil, error.localizedDescription) }
-        }.value
+        }
+        // Local decoding can run while the bounded bookmark-map refresh is in flight. Only
+        // restoring the initial position needs the map result, not reading the local sidecar.
+        await HttpSyncManager.shared.syncBookmarksBeforeReading(book: metadata)
+        let parsed = await parsing.value
+        guard !Task.isCancelled else { return }
 
         if let parsedBook = parsed.book {
             book = parsedBook

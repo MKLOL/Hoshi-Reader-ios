@@ -51,7 +51,9 @@ final class HttpSyncManager {
     private var readerPreferencesTask: Task<Void, Never>?
 
     private let settings: HttpSyncSettingsStore
-    private let batchState = HttpSyncBatchState.shared
+    private let batchState: HttpSyncBatchState
+    private let mapTransportFactory: @MainActor (HttpSyncConfig) -> HttpSyncKvTransport
+    private let positionHistoryExchange: (@MainActor (HttpSyncKvTransport, [String: HttpSyncKvKeyMeta], String, HttpSyncConfig) async -> Void)?
     /// Agent C makes `AiChatSettingsStore` conform to `AiSettingsSyncing` in Phase 2 and assigns
     /// it here (or via the initializer). Until then this is nil and the AI-settings sync path is
     /// skipped — every other sync path is unaffected.
@@ -66,11 +68,18 @@ final class HttpSyncManager {
     private var foreground = true
     private var mapExchangeTask: Task<HttpSyncMapChanges?, Never>?
     private var mapExchangeTaskId: UUID?
+    private var mapExchangeReady: MapExchangeReady?
     private var fullRetryDeferredForReader = false
     private var fullRetryAfter: Date?
 
-    init(settings: HttpSyncSettingsStore? = nil, aiSettings: AiSettingsSyncing? = nil) {
+    init(settings: HttpSyncSettingsStore? = nil, aiSettings: AiSettingsSyncing? = nil,
+         batchState: HttpSyncBatchState? = nil,
+         mapTransportFactory: (@MainActor (HttpSyncConfig) -> HttpSyncKvTransport)? = nil,
+         positionHistoryExchange: (@MainActor (HttpSyncKvTransport, [String: HttpSyncKvKeyMeta], String, HttpSyncConfig) async -> Void)? = nil) {
         self.settings = settings ?? HttpSyncSettingsStore.shared
+        self.batchState = batchState ?? HttpSyncBatchState.shared
+        self.mapTransportFactory = mapTransportFactory ?? { HttpSyncKvClient(baseURL: $0.baseURL, bearerToken: $0.token) }
+        self.positionHistoryExchange = positionHistoryExchange
         // Default to the app's ChatGPT settings store so model/prompt sync works out of the box;
         // tests can inject a stub.
         self.aiSettings = aiSettings ?? AiChatSettingsStore.shared
@@ -522,7 +531,7 @@ final class HttpSyncManager {
 
     private func pullBookmarksBeforeReading(book: BookMetadata) async {
         guard settings.enabled, settings.isConfigured else { return }
-        let changes = await exchangeMapsOnly()
+        let changes = await exchangeMapsOnly(waitForHistories: false)
         guard changes?.needsBootstrap == true else { return }
         do {
             let config = settings.currentConfig()
@@ -534,7 +543,9 @@ final class HttpSyncManager {
 
     /// Reader-close fast path: do not leave the final page waiting on the timer.
     func flushBookmarkSync() async {
-        guard settings.enabled, settings.isConfigured, batchState.hasPending else { return }
+        // Maps may already have acknowledged the final turn while its position history is
+        // still transferring. Keep the active-book lease until that existing flight finishes.
+        guard settings.enabled, settings.isConfigured, batchState.hasPending || mapExchangeTask != nil else { return }
         let before = batchState.pendingGeneration
         let joinedExistingFlight = mapExchangeTask != nil
         _ = await exchangeMapsOnly()
@@ -563,37 +574,78 @@ final class HttpSyncManager {
     /// The reader-hot path: upload every queued bookmark and conditionally read
     /// the logical maps in one metadata request. A changed book or non-map ETag launches the
     /// larger binary/metadata reconcile, and that work remains in the background.
-    private func exchangeMapsOnly() async -> HttpSyncMapChanges? {
+    private func exchangeMapsOnly(waitForHistories: Bool = true) async -> HttpSyncMapChanges? {
         if let mapExchangeTask {
+            if !waitForHistories, let mapExchangeReady {
+                let result = await mapExchangeReady.wait()
+                return mapExchangeReady.config == settings.currentConfig() ? result : nil
+            }
             return await mapExchangeTask.value
         }
         let taskId = UUID()
+        let ready = MapExchangeReady(config: settings.currentConfig())
         let task: Task<HttpSyncMapChanges?, Never> = Task { @MainActor [weak self] in
-            guard let self else { return nil }
-            return await self.performMapExchange()
+            guard let self else { ready.finish(nil); return nil }
+            let result = await self.performMapExchange { ready.finish($0) }
+            ready.finish(result)
+            // A reader can stop waiting as soon as maps finish. Keep the flight registered
+            // until its histories finish so close-flush and manual sync still join that work.
+            if self.mapExchangeTaskId == taskId {
+                self.mapExchangeTask = nil
+                self.mapExchangeTaskId = nil
+                self.mapExchangeReady = nil
+            }
+            return result
         }
         mapExchangeTaskId = taskId
         mapExchangeTask = task
-        let result = await task.value
-        if mapExchangeTaskId == taskId {
-            mapExchangeTask = nil
-            mapExchangeTaskId = nil
+        mapExchangeReady = ready
+        if !waitForHistories {
+            let result = await ready.wait()
+            return ready.config == settings.currentConfig() ? result : nil
         }
-        return result
+        return await task.value
     }
 
-    private func performMapExchange() async -> HttpSyncMapChanges? {
+    private final class MapExchangeReady {
+        let config: HttpSyncConfig
+        private var finished = false
+        private var result: HttpSyncMapChanges?
+        private var waiters: [CheckedContinuation<HttpSyncMapChanges?, Never>] = []
+        init(config: HttpSyncConfig) { self.config = config }
+        func wait() async -> HttpSyncMapChanges? {
+            if finished { return result }
+            return await withCheckedContinuation { waiters.append($0) }
+        }
+        func finish(_ result: HttpSyncMapChanges?) {
+            guard !finished else { return }
+            finished = true
+            self.result = result
+            let pending = waiters
+            waiters = []
+            for waiter in pending { waiter.resume(returning: result) }
+        }
+    }
+
+    private func performMapExchange(onMapsReady: (HttpSyncMapChanges) -> Void) async -> HttpSyncMapChanges? {
         guard settings.enabled, settings.isConfigured else { return nil }
         let config = settings.currentConfig()
         do {
             HttpSyncCloudBooks.shared.activateScope(config: config)
             let ready = HttpSyncCloudBooks.shared.readySyncIds
-            let transport = HttpSyncKvClient(baseURL: config.baseURL, bearerToken: config.token)
+            let transport = mapTransportFactory(config)
             let changes = try await batchState.syncMaps(transport: transport, scope: statisticsScope(config), stillCurrent: { self.settings.currentConfig() == config })
             guard settings.currentConfig() == config, !Task.isCancelled else { return nil }
-            _ = await HttpReadingPositionLane.shared.run(
-                transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)
-            ) { self.settings.currentConfig() == config }
+            // Both readers can use the freshly applied map now. Like Android, slower position
+            // histories continue in this coalesced flight and notify readers of any late winner.
+            onMapsReady(changes)
+            if let positionHistoryExchange {
+                await positionHistoryExchange(transport, changes.statisticsMetadata, statisticsScope(config), config)
+            } else {
+                _ = await HttpReadingPositionLane.shared.run(
+                    transport: transport, listing: changes.statisticsMetadata, scope: statisticsScope(config)
+                ) { self.settings.currentConfig() == config }
+            }
             guard settings.currentConfig() == config, !Task.isCancelled else { return nil }
             // A manga left waiting by a stopped or failed pass is shown once its maps were exchanged.
             if !ready.isEmpty, settings.currentConfig() == config { HttpSyncCloudBooks.shared.reveal(ready) }
