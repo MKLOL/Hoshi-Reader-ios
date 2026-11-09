@@ -45,14 +45,16 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
         tap.delaysTouchesEnded = false
         webView.addGestureRecognizer(tap)
         context.coordinator.webView = webView
-        webView.loadHTMLString("""
-            <!doctype html><html lang="ja"><head>
-            <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-            <style id="reader-style"></style>
-            </head><body><main id="transcript"></main></body></html>
-            """, baseURL: nil)
+        webView.loadHTMLString(Self.skeleton, baseURL: nil)
         return webView
     }
+
+    fileprivate static let skeleton = """
+        <!doctype html><html lang="ja"><head>
+        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+        <style id="reader-style"></style>
+        </head><body><main id="transcript"></main></body></html>
+        """
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
@@ -88,6 +90,15 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
             update()
         }
 
+        /// iOS can discard the page's process during long background listening. The page came
+        /// from a string, so WebKit's own reload would leave a blank `about:blank`; load the
+        /// skeleton again and let `update()` resend the document, style and playback state.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            cancel()
+            ready = false; document = nil; style = ""; styleInputs = nil; stateSignature = ""
+            webView.loadHTMLString(PodcastTranscriptWebView.skeleton, baseURL: nil)
+        }
+
         func update() {
             guard ready, let webView else { return }
             if document != parent.transcript {
@@ -117,7 +128,11 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
                     self.webView?.callAsyncJavaScript("window.hoshiTranscript.setReadings(readings)", arguments: ["readings": readings], in: nil, in: .page) { _ in }
                 }
             }
-            let css = stylesheet(for: webView)
+            // Playback redraws this view five times a second. Build the stylesheet, which checks
+            // the font file on disk, only when one of its inputs changed.
+            let inputs = StyleInputs(config: parent.config, color: UIColor.label.resolvedColor(with: webView.traitCollection).hexString)
+            let css = inputs == styleInputs && !awaitingFontFile ? style : stylesheet(inputs)
+            styleInputs = inputs
             if style != css {
                 style = css
                 clearSelection()
@@ -142,26 +157,48 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
             }
         }
 
-        private func stylesheet(for webView: WKWebView) -> String {
-            let config = parent.config
-            let color = UIColor.label.resolvedColor(with: webView.traitCollection).hexString
+        /// Everything the stylesheet is built from.
+        private struct StyleInputs: Equatable {
+            let font: String
+            let size: Int
+            let lineHeight: Double?
+            let characterSpacing: Double?
+            let hideFurigana: Bool
+            let color: String
+
+            init(config: UserConfig, color: String) {
+                font = config.selectedFont; size = config.fontSize
+                lineHeight = config.layoutAdvanced ? config.lineHeight : nil
+                characterSpacing = config.layoutAdvanced ? config.characterSpacing : nil
+                hideFurigana = config.readerHideFurigana
+                self.color = color
+            }
+        }
+        private var styleInputs: StyleInputs?
+        /// A selected font that is still downloading has no file yet; keep looking until it arrives.
+        private var awaitingFontFile = false
+
+        private func stylesheet(_ inputs: StyleInputs) -> String {
+            let fontFace = ReaderTextStyle.fontFaceCSS(font: inputs.font, verticalWriting: false)
+            awaitingFontFile = fontFace.isEmpty && !FontManager.defaultFonts.contains(inputs.font)
+            // The negative margin gives the timestamp a comfortable touch height without
+            // moving the sentence below it.
             return """
-                \(ReaderTextStyle.fontFaceCSS(font: config.selectedFont, verticalWriting: false))
-                html { -webkit-line-box-contain: block glyphs replaced; }
+                \(fontFace)
+                \(ReaderTextStyle.lineBoxCSS)
                 body {
-                    \(ReaderTextStyle.typographyDeclarations(font: config.selectedFont, size: config.fontSize,
-                        lineHeight: config.layoutAdvanced ? config.lineHeight : nil,
-                        characterSpacing: config.layoutAdvanced ? config.characterSpacing : nil, color: color))
+                    \(ReaderTextStyle.typographyDeclarations(font: inputs.font, size: inputs.size,
+                        lineHeight: inputs.lineHeight, characterSpacing: inputs.characterSpacing, color: inputs.color))
                     margin: 0; padding: 16px; writing-mode: horizontal-tb; overflow-wrap: break-word;
                 }
                 article { padding: 12px; margin-bottom: 12px; border-radius: 12px; background: rgba(128,128,128,.06); }
                 article.current { background: rgba(0,122,255,.12); }
                 p.japanese { margin: 8px 0 0; }
-                button { border: 0; background: none; padding: 0; color: #007aff; font: 13px -apple-system; }
+                button { border: 0; background: none; padding: 12px 12px 12px 0; margin: -12px 0; color: #007aff; font: 13px -apple-system; }
                 .english { display: none; margin-top: 8px; font: 17px -apple-system; opacity: .65; }
                 .show-english .english { display: block; }
                 ::highlight(hoshi-selection) { background-color: rgba(160,160,160,.4); color: inherit; }
-                \(ReaderTextStyle.rubyCSS(hidden: config.readerHideFurigana))
+                \(ReaderTextStyle.rubyCSS(hidden: inputs.hideFurigana))
                 """
         }
 

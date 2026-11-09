@@ -150,6 +150,12 @@ class SasayakiPlayer {
         rate = playback.rate
         lastUpdate = Int(currentTime.rounded(.down))
         isRestoring = false
+        // A player that is already loaded would otherwise resume from its old place and save
+        // that over the position that was just imported.
+        if player != nil {
+            player?.defaultRate = rate
+            seek(seconds: currentTime, updateCue: false)
+        }
     }
     
     func importAudio(from url: URL) throws {

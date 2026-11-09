@@ -77,8 +77,10 @@ struct PodcastsView: View {
             }
             .refreshable { await store.refresh() }
             .toolbar { if store.loading { ProgressView() } }
-            .task(id: appeared && scenePhase == .active) {
-                let visible = appeared && scenePhase == .active
+            // A full-screen transcript covers this list without making it disappear; the listing
+            // is not polled underneath it.
+            .task(id: appeared && scenePhase == .active && transcriptEpisode == nil) {
+                let visible = appeared && scenePhase == .active && transcriptEpisode == nil
                 store.setVisible(visible)
                 guard visible else { return }
                 while !Task.isCancelled, store.enabled, store.screenVisible {

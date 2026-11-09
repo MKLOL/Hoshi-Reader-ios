@@ -82,6 +82,10 @@ struct MangaAiPopupView: View {
             guard previewEntry == nil else { return }
             reloadHistory()
         }
+        .onChange(of: controller.state == .browsingHistory) { _, browsing in
+            guard previewEntry == nil, browsing else { return }
+            reloadHistory()
+        }
     }
 
     // MARK: - Card
@@ -186,7 +190,7 @@ struct MangaAiPopupView: View {
             EmptyView()
         case .loading(let bubbleText, let onDevice):
             bubbleHeader(bubbleText)
-            loadingBody(onDevice: onDevice)
+            loadingBody(bubbleText: bubbleText, onDevice: onDevice)
         case .result(let entry):
             entryView(entry)
             // A pre-translated reply is instant and free, so it is what a tap shows. Offer the
@@ -195,7 +199,7 @@ struct MangaAiPopupView: View {
                 Button {
                     controller.askLive()
                 } label: {
-                    Label("Ask ChatGPT instead", systemImage: "sparkles")
+                    Label("Get a fresh translation", systemImage: "sparkles")
                         .modifier(CardFont(style: .subheadline))
                 }
                 .buttonStyle(.bordered)
@@ -216,13 +220,17 @@ struct MangaAiPopupView: View {
     /// forming + a live tok/s counter (observed from `OfflineLlmManager.generationProgress`). The
     /// cloud path names the provider actually receiving the request.
     @ViewBuilder
-    private func loadingBody(onDevice: Bool) -> some View {
-        let progress = onDevice ? OfflineLlmManager.shared.generationProgress : nil
+    private func loadingBody(bubbleText: String, onDevice: Bool) -> some View {
+        // The model translates one bubble at a time. Its progress belongs to this popup only
+        // while it is working on this bubble; until then this request is waiting its turn.
+        let running = onDevice ? OfflineLlmManager.shared.generationProgress : nil
+        let progress = running?.source == bubbleText ? running : nil
+        let waiting = onDevice && running != nil && progress == nil
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 ProgressView()
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(onDevice ? "Translating on-device…" : "Asking \(controller.activeBackendName)…")
+                    Text(waiting ? "Waiting for an earlier translation…" : onDevice ? "Translating on-device…" : "Asking \(controller.activeBackendName)…")
                         .modifier(CardFont(style: .subheadline))
                         .foregroundStyle(.secondary)
                     // Live tok/s while the on-device model generates, including hidden thinking
@@ -306,7 +314,7 @@ struct MangaAiPopupView: View {
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
         }
         if historyEntries.isEmpty && pendingRequests.isEmpty {
-            Text("No translation history for this manga yet.")
+            Text("No translation history for this book yet.")
                 .modifier(CardFont(style: .subheadline))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -366,11 +374,12 @@ struct MangaAiPopupView: View {
     // MARK: - Helpers
 
     private func reloadHistory() {
-        guard let folder = book.folder else { return }
+        // Only the history list shows the saved exchanges. The log holds every one of the book,
+        // screenshots included, and is decoded on the main thread: a translation popup that
+        // never opens its history does not read it.
+        guard let folder = book.folder, showHistory || controller.state == .browsingHistory else { return }
         historyEntries = AiChatHistoryStore.shared.load(folder: folder).entries
-        if showHistory || controller.state == .browsingHistory {
-            for request in AiChatRequests.shared.forBook(book) where !request.isRunning { request.seen = true }
-        }
+        for request in AiChatRequests.shared.forBook(book) where !request.isRunning { request.seen = true }
     }
 
     private func dismiss() {

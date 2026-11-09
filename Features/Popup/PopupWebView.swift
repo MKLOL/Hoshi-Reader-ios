@@ -349,7 +349,7 @@ struct PopupWebView: UIViewRepresentable {
                 selectionTask?.cancel()
                 selectionTask = Task {
                     if let count = await parent.onTextSelected?(selectionData), !Task.isCancelled {
-                        message.webView?.evaluateJavaScript("window.hoshiSelection.highlightSelection(\(count))", completionHandler: nil)
+                        _ = try? await message.webView?.evaluateJavaScript("window.hoshiSelection.highlightSelection(\(count))")
                     }
                 }
             }

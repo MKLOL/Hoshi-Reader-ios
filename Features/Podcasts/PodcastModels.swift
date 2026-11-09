@@ -92,6 +92,10 @@ nonisolated struct PodcastCatalogue: Codable, Sendable {
     var generating: PodcastGeneration?
 
     var withoutTelemetry: Self { var copy = self; copy.worker = nil; copy.generating = nil; return copy }
+    /// Whether everything that is saved matches; worker and generation telemetry change on every poll.
+    func sameListing(as other: Self) -> Bool {
+        episodes == other.episodes && shows == other.shows && feedStale == other.feedStale && maxFailures == other.maxFailures
+    }
     func retaining(_ saved: Self, downloaded: Set<String>) -> Self {
         var copy = self
         var ids = Set<String>()

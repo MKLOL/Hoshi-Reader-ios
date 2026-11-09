@@ -7,6 +7,8 @@
 const KANJI_RANGE = '\u4E00-\u9FFF\u3400-\u4DBF\uF900-\uFAFF\u3005';
 const KANJI_PATTERN = new RegExp(`[${KANJI_RANGE}]`);
 const KANJI_SEGMENT_PATTERN = new RegExp(`[${KANJI_RANGE}]+|[^${KANJI_RANGE}]+`, 'g');
+// Built once: constructing a segmenter per word dominated the cost of annotating a transcript.
+const GRAPHEME_SEGMENTER = new Intl.Segmenter('ja', {granularity: 'grapheme'});
 
 function toHiragana(text) {
     return text.replace(/[\u30A1-\u30F6]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60));
@@ -152,7 +154,7 @@ function segmentKanjiFurigana(expression, reading) {
     // Built-in grapheme segmentation maps NFC boundaries back to the original UTF-16 offsets.
     let normalizedExpression = '';
     const originalOffsets = new Map([[0, 0]]);
-    for (const {segment, index} of new Intl.Segmenter('ja', {granularity: 'grapheme'}).segment(expression)) {
+    for (const {segment, index} of GRAPHEME_SEGMENTER.segment(expression)) {
         normalizedExpression += segment.normalize('NFC');
         originalOffsets.set(normalizedExpression.length, index + segment.length);
     }

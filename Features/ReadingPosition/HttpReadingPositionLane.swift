@@ -153,7 +153,12 @@ final class HttpReadingPositionLane {
             catch let error as HttpSyncError where error.message.contains("size limit") {
                 index.unusable[meta.key] = stamp(meta); index.applied[meta.key] = nil
                 return true
-            } catch { failed(meta.key, stamp(meta)); return false }
+            } catch {
+                // A sync the reader cancelled, or one for an account since replaced, is not a
+                // failure of this key: backing off would hold its own journal back for no reason.
+                if stillCurrent(), !Task.isCancelled, (error as? URLError)?.code != .cancelled { failed(meta.key, stamp(meta)) }
+                return false
+            }
         }
         func activeFirst(_ lhs: (HttpSyncKvKeyMeta, String, String), _ rhs: (HttpSyncKvKeyMeta, String, String)) -> Bool {
             let left = HttpSyncActiveBooks.contains(lhs.1), right = HttpSyncActiveBooks.contains(rhs.1)

@@ -19,6 +19,9 @@ import Foundation
     private var refreshTask: Task<Void, Never>?
     private var generation = 0
     private var screenGeneration = 0
+    /// The listing last merged with the saved files. An identical poll skips that merge, which
+    /// decodes and rewrites both listing files; any local change clears it.
+    private var savedListing: (account: String, listing: PodcastCatalogue)?
     private(set) var screenVisible = false
     var revision = 0
     var configID: String {
@@ -54,7 +57,7 @@ import Foundation
             generation += 1
             cancelRefresh()
             if selectedConfigID != nil { PodcastPlayback.shared.stop(); PodcastDownloads.shared.cancelAll() }
-            selectedConfigID = id; account = nil; catalogue = PodcastCatalogue(); preparing = []; downloads = [:]; downloadErrors = [:]; transcriptDownloads = [:]; transcriptDownloadErrors = [:]; error = nil
+            selectedConfigID = id; account = nil; catalogue = PodcastCatalogue(); preparing = []; downloads = [:]; downloadErrors = [:]; transcriptDownloads = [:]; transcriptDownloadErrors = [:]; error = nil; savedListing = nil
             if !id.isEmpty, files.validatedAccount == id { account = id; catalogue = files.load(id) }
             PodcastDownloads.shared.restore()
         }
@@ -71,7 +74,7 @@ import Foundation
                         PodcastDownloads.shared.restore()
                         validatedInSession = true
                     }
-                    if account != id { account = id; catalogue = files.load(id) }
+                    if account != id { account = id; catalogue = files.load(id); savedListing = nil }
                 } else { validatedInSession = false; invalidate() }
             } catch {
                 guard !Task.isCancelled, id == configID else { return }
@@ -83,7 +86,7 @@ import Foundation
     func invalidate() {
         PodcastPlayback.shared.stop(); PodcastDownloads.shared.cancelAll()
         generation += 1; cancelRefresh()
-        account = nil; files.validatedAccount = nil; preparing = []; downloads = [:]; transcriptDownloads = [:]; downloadErrors = [:]; transcriptDownloadErrors = [:]; clearLiveStatus()
+        account = nil; files.validatedAccount = nil; preparing = []; downloads = [:]; transcriptDownloads = [:]; downloadErrors = [:]; transcriptDownloadErrors = [:]; savedListing = nil; clearLiveStatus()
     }
     func clearLiveStatus() { catalogue.worker = nil; catalogue.generating = nil; receivedUptime = nil }
     func refresh() async {
@@ -97,7 +100,12 @@ import Foundation
                 guard !Task.isCancelled, self.account == account, configID == account, generation == version,
                       screenVisible, screenGeneration == screenVersion else { return }
                 // Save only a successful listing; a failed refresh never replaces the offline cache.
-                catalogue = try files.save(fresh, account: account)
+                if let savedListing, savedListing.account == account, savedListing.listing.sameListing(as: fresh) {
+                    catalogue.worker = fresh.worker; catalogue.generating = fresh.generating
+                } else {
+                    catalogue = try files.save(fresh, account: account)
+                    savedListing = (account, fresh.withoutTelemetry)
+                }
                 receivedUptime = ProcessInfo.processInfo.systemUptime
                 error = nil; revision += 1
             } catch {
@@ -120,6 +128,7 @@ import Foundation
             let updated = try await api.prepare(config: config, id: episode.id)
             guard self.account == account, configID == account, generation == version else { return }
             if let index = catalogue.episodes.firstIndex(where: { $0.id == updated.id }) { catalogue.episodes[index] = updated }
+            savedListing = nil
             await refresh()
         } catch { if self.account == account, configID == account, generation == version { handle(error) } }
     }
@@ -164,6 +173,7 @@ import Foundation
         if transcript { transcriptDownloads[id] = nil; transcriptDownloadErrors[id] = failure }
         else { downloads[id] = nil; downloadErrors[id] = failure }
         revision += 1
+        savedListing = nil
         // Includes episodes whose show was archived while either media transfer ran.
         let cached = files.load(account)
         catalogue = catalogue.retaining(cached, downloaded: Set(cached.episodes.filter { files.hasSavedMedia(account: account, id: $0.id) }.map(\.id)))

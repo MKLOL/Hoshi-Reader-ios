@@ -53,9 +53,20 @@ final class AiChatHistoryStore {
         if existing.entries.contains(where: { Self.matchesEntry($0, entry) }) {
             return (existing, false)
         }
+        preserveUnreadableLog(folder: folder)
         let updated = AiChatLog(entries: existing.entries + [entry])
         save(updated, folder: folder)
         return (updated, true)
+    }
+
+    /// A log that exists but cannot be decoded reads as empty. Saving the new one-entry history
+    /// over it would discard everything it still holds, so the file is kept beside the new log.
+    private func preserveUnreadableLog(folder: String) {
+        guard let url = logURL(folder: folder), let data = try? Data(contentsOf: url), !data.isEmpty,
+              (try? JSONDecoder().decode(AiChatLog.self, from: data)) == nil else { return }
+        let kept = url.deletingLastPathComponent().appendingPathComponent("\(FileNames.aiChatLog).unreadable")
+        guard !FileManager.default.fileExists(atPath: kept.path(percentEncoded: false)) else { return }
+        try? FileManager.default.copyItem(at: url, to: kept)
     }
 
     /// Content equality used for dedupe — mirrors the Android sync content key (bubble text +
@@ -71,7 +82,9 @@ final class AiChatHistoryStore {
     private func save(_ log: AiChatLog, folder: String) {
         guard let bookRoot = bookRootURL(folder: folder),
               let payload = try? encoder.encode(log) else { return }
-        try? FileManager.default.createDirectory(at: bookRoot, withIntermediateDirectories: true)
+        // A reply can arrive after its book was deleted here or by another device. Saving it
+        // would recreate the folder as an empty shell, which then blocks importing the book again.
+        guard FileManager.default.fileExists(atPath: bookRoot.appendingPathComponent(FileNames.metadata).path(percentEncoded: false)) else { return }
         let target = bookRoot.appendingPathComponent(FileNames.aiChatLog)
         let temp = bookRoot.appendingPathComponent("\(FileNames.aiChatLog).tmp")
         // Write to a sibling temp file then atomically replace, so a crash mid-write cannot

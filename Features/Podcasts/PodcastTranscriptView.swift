@@ -33,7 +33,9 @@ struct PodcastTranscriptView: View {
                     VStack(spacing: 0) {
                         lines(transcript)
                         if lookup.missingWord {
-                            Text("No dictionary match. Install a dictionary in Settings to look up words.")
+                            Text(DictionaryManager.shared.termDictionaries.contains(where: \.isEnabled)
+                                 ? "No dictionary match for this word."
+                                 : "No dictionary match. Install a dictionary in Settings to look up words.")
                                 .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
                         }
                         if let error = playback.error { Text(error).foregroundStyle(.red).font(.caption).padding(.horizontal) }

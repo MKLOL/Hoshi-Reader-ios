@@ -94,8 +94,17 @@ nonisolated struct StatisticsRoot: Sendable {
     }
     static func retain(root: URL) throws {
         guard let book = BookStorage.loadMetadata(root: root), let id = syncId(for: book) else { return }
-        try ReadingStatisticsStore.migrate(root: root)
-        let reading = try ReadingStatisticsStore.strictReading(root: root), text = try ReadingStatisticsStore.strictText(root: root)
+        // Retaining runs before every deletion. A sidecar that cannot be decoded must not make
+        // its book impossible to delete, here or when another device removed it: the file is
+        // copied aside for recovery and the history that can be read is kept.
+        do { try ReadingStatisticsStore.migrate(root: root) } catch is DecodingError {}
+        var unreadable = false
+        let reading = try ReadingStatisticsStore.preserveUnreadable(root: root, filename: FileNames.statistics, recovered: &unreadable) {
+            try ReadingStatisticsStore.strictReading(root: root)
+        }
+        let text = try ReadingStatisticsStore.preserveUnreadable(root: root, filename: FileNames.mangaStatistics, recovered: &unreadable) {
+            try ReadingStatisticsStore.strictText(root: root)
+        }
         guard !reading.isEmpty || !text.isEmpty else { return }
         let kept = try historyRoot(id, title: book.title, type: book.resolvedContentType)
         try BookStorage.save(Statistics.merged(try ReadingStatisticsStore.strictReading(root: kept) + reading), inside: kept, as: FileNames.statistics)

@@ -246,6 +246,9 @@ struct HttpSyncReconciler {
         let rest = String(key.dropFirst(SyncKeys.allBooksPrefix.count))
         guard let slash = rest.firstIndex(of: "/"), slash != rest.startIndex else { return nil }
         let syncId = String(rest[rest.startIndex..<slash])
+        // The ID becomes a folder name. Every ID a client derives fits this grammar; a listed
+        // key such as `books/../epub.manifest` must not unpack a book beside the library.
+        guard StatisticsHistory.validID(syncId) else { return nil }
         let suffix = String(rest[rest.index(after: slash)...])
         let kind: BookKeyKind
         switch suffix {

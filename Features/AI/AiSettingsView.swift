@@ -132,7 +132,10 @@ struct AiSettingsView: View {
         // A manual sync can change the selected model while this screen is open. Keep the picker
         // aligned with the store that MangaAiController actually reads.
         .onChange(of: store.model) { _, _ in
-            loadModelSelection()
+            // The custom field saves as it is typed. An id that passes through a listed one on the
+            // way, such as "gpt-5-mini" through "gpt-5", must not jump to that row and take the
+            // field away; only a change from elsewhere moves the selection.
+            if !(isCustom && customModel == store.model) { loadModelSelection() }
             reloadKey()
         }
     }

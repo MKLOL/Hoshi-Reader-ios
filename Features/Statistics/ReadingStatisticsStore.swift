@@ -136,7 +136,7 @@ extension Notification.Name {
         try BookStorage.save(merged, inside: root, as: FileNames.mangaStatistics)
         changed(root: root, scheduleSync: scheduleSync, origin: origin)
     }
-    private static func preserveUnreadable<T>(root: URL, filename: String, recovered: inout Bool, load: () throws -> [T]) throws -> [T] {
+    static func preserveUnreadable<T>(root: URL, filename: String, recovered: inout Bool, load: () throws -> [T]) throws -> [T] {
         do { return try load() }
         catch is DecodingError {
             recovered = true

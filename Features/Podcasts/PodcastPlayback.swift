@@ -10,7 +10,14 @@ import Observation
     private var store: PodcastStore { suppliedStore ?? .shared }
     private var lastSavedPosition: Double?
 
-    init(store: PodcastStore? = nil) { suppliedStore = store }
+    static let speeds: [Float] = [0.75, 1, 1.25, 1.5, 2]
+    private static let speedKey = "podcastPlaybackSpeed"
+
+    init(store: PodcastStore? = nil) {
+        suppliedStore = store
+        // Only the app's own player remembers its speed; an injected one starts at 1×.
+        if store == nil, let saved = UserDefaults.standard.object(forKey: Self.speedKey) as? Float, Self.speeds.contains(saved) { speed = saved }
+    }
     private let audioOwner = UUID()
     private(set) var playing = false {
         didSet { if !playing { LongFormAudioCoordinator.shared.end(owner: audioOwner) } }
@@ -18,7 +25,12 @@ import Observation
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
     private(set) var error: String?
-    var speed: Float = 1 { didSet { if playing { player?.rate = speed }; updateNowPlaying() } }
+    var speed: Float = 1 {
+        didSet {
+            if playing { player?.rate = speed }; updateNowPlaying()
+            if suppliedStore == nil, speed != oldValue { UserDefaults.standard.set(speed, forKey: Self.speedKey) }
+        }
+    }
     private var player: AVPlayer?
     private var account: String?
     private var ticker: Any?
@@ -63,7 +75,11 @@ import Observation
             let audio = AVAudioSession.sharedInstance()
             try audio.setCategory(.playback, mode: .spokenAudio)
             if autoplay { try audio.setActive(true) }
-            let item = AVPlayerItem(url: url)
+            // Transcript times are measured on the decoded original, which may be variable bit
+            // rate; estimated timing would let the highlighted line drift from the sound.
+            let item = original
+                ? AVPlayerItem(asset: AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]))
+                : AVPlayerItem(url: url)
             let player = AVPlayer(playerItem: item)
             self.player = player
             duration = max(0, original ? (store.transcript(episode.id)?.duration ?? Double(episode.durationSeconds)) : (episode.lessonDurationSeconds ?? 0))
@@ -81,8 +97,11 @@ import Observation
                 Task { @MainActor in
                     guard let self, self.player === player, !self.seeking, !self.ended, time.seconds.isFinite else { return }
                     self.position = max(0, time.seconds)
+                    let previousDuration = self.duration
                     if item.duration.seconds.isFinite { self.duration = max(0, item.duration.seconds) }
-                    self.savePosition(periodic: true); self.updateNowPlaying()
+                    // The system advances the elapsed time from the rate by itself; republish
+                    // it with each saved position rather than five times a second.
+                    if self.savePosition(periodic: true) || self.duration != previousDuration { self.updateNowPlaying() }
                 }
             }
             finished = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
@@ -132,7 +151,11 @@ import Observation
             if let episode, error != nil || ended { load(episode, original: original, autoplay: true); return }
             guard player != nil, store.enabled, store.account == account else { return }
             LongFormAudioCoordinator.shared.begin(owner: audioOwner) { [weak self] in self?.pause() }
-            try? AVAudioSession.sharedInstance().setActive(true)
+            // Dictionary audio played while paused can leave the shared session mixable, which
+            // would resume this recording without lock-screen controls.
+            let audio = AVAudioSession.sharedInstance()
+            try? audio.setCategory(.playback, mode: .spokenAudio)
+            try? audio.setActive(true)
             nowPlayingSession?.becomeActiveIfPossible()
             playing = true; player?.playImmediately(atRate: speed); updateNowPlaying()
         }
@@ -166,12 +189,14 @@ import Observation
         nowPlayingSession?.nowPlayingInfoCenter.nowPlayingInfo = nil
         nowPlayingSession = nil; seeking = false; ended = false; resumeAfterInterruption = false; seekGeneration += 1
     }
-    private func savePosition(periodic: Bool = false) {
-        guard let account, let episode else { return }
+    /// Returns whether the position was written.
+    @discardableResult private func savePosition(periodic: Bool = false) -> Bool {
+        guard let account, let episode else { return false }
         // Highlight at word cadence without rewriting positions.json five times per second.
-        if periodic, let lastSavedPosition, abs(position - lastSavedPosition) < 5 { return }
+        if periodic, let lastSavedPosition, abs(position - lastSavedPosition) < 5 { return false }
         store.files.savePosition(position, account: account, id: episode.id, original: original)
         lastSavedPosition = position
+        return true
     }
     private func updateNowPlaying() {
         guard let episode else { return }
@@ -181,6 +206,8 @@ import Observation
         guard let center = nowPlayingSession?.remoteCommandCenter else { return }
         commands.append((center.playCommand, center.playCommand.addTarget { [weak self] _ in Task { @MainActor in if self?.playing == false { self?.toggle() } }; return .success }))
         commands.append((center.pauseCommand, center.pauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.pause() }; return .success }))
+        // Some headsets send only the combined command.
+        commands.append((center.togglePlayPauseCommand, center.togglePlayPauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.toggle() }; return .success }))
         for (command, delta) in [(center.skipForwardCommand, 15.0), (center.skipBackwardCommand, -15.0)] {
             command.preferredIntervals = [15]
             commands.append((command, command.addTarget { [weak self] _ in Task { @MainActor in guard let self else { return }; self.seek(to: self.position + delta) }; return .success }))

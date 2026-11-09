@@ -30,7 +30,9 @@ nonisolated struct PodcastAPI: PodcastServing {
         if post { request.httpMethod = "POST"; request.httpBody = Data() }
         return request
     }
-    func get<T: Decodable & Sendable>(_ type: T.Type, config: HttpSyncConfig, suffix: String = "", post: Bool = false) async throws -> T {
+    /// Off the caller's actor: the visible Podcasts tab polls the listing every five seconds, and
+    /// reading and decoding it must not run on the main thread.
+    @concurrent func get<T: Decodable & Sendable>(_ type: T.Type, config: HttpSyncConfig, suffix: String = "", post: Bool = false) async throws -> T {
         let (bytes, response) = try await Self.session.bytes(for: Self.request(config: config, suffix: suffix, post: post))
         guard let http = response as? HTTPURLResponse else { throw PodcastHTTPError(status: 0, message: "Invalid server response.") }
         var data = Data()

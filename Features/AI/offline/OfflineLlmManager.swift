@@ -52,6 +52,9 @@ final class OfflineLlmManager {
     /// streamed token delta so the popup can show the reply forming + a live tok/s counter. Mirrors
     /// Android `OfflineLlmManager.GenerationProgress` (a `StateFlow<GenerationProgress?>`).
     struct GenerationProgress: Equatable {
+        /// The Japanese text being translated. Requests run one at a time, so a popup waiting
+        /// its turn must not show the reply forming for another bubble as its own.
+        let source: String
         /// The reply text accumulated so far (raw, before final stop-sequence cleanup).
         let partialText: String
         /// Approximate visible answer token count so far.
@@ -316,7 +319,7 @@ final class OfflineLlmManager {
 
         status = .generating(modelId: model.id)
         tokensPerSecond = nil
-        generationProgress = .init(partialText: "", tokens: 0, thinkingTokens: 0, tokensPerSecond: 0)
+        generationProgress = .init(source: japaneseText, partialText: "", tokens: 0, thinkingTokens: 0, tokensPerSecond: 0)
         defer {
             status = loadedModelId.map { .ready(modelId: $0) } ?? .idle
             tokensPerSecond = nil
@@ -369,6 +372,7 @@ final class OfflineLlmManager {
                 let tps = Self.throughput(tokens: snapshot.totalTokens, since: start, until: now)
                 await MainActor.run {
                     self.generationProgress = .init(
+                        source: japaneseText,
                         partialText: stableVisible,
                         tokens: snapshot.tokens,
                         thinkingTokens: snapshot.thinkingTokens,

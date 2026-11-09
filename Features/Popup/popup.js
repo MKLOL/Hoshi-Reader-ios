@@ -19,6 +19,8 @@ let lastSelection = '';
 let currentDictionaryMedia = null;
 let selectedDictionaries = {};
 let renderGeneration = 0;
+const STRUCTURED_CONTENT_TAGS = new Set(['br', 'ruby', 'rt', 'rp', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+    'span', 'div', 'ol', 'ul', 'li', 'details', 'summary', 'a']);
 
 function el(tag, props = {}, children = []) {
     const element = document.createElement(tag);
@@ -789,7 +791,9 @@ function renderStructuredContent(parent, node, language = null, dictName = null,
         return;
     }
     
-    const tagName = node.tag || 'span';
+    // A dictionary is imported data. Only the elements Yomitan's structured content defines are
+    // created; any other tag, such as a script, becomes plain inline content.
+    const tagName = STRUCTURED_CONTENT_TAGS.has(node.tag) ? node.tag : 'span';
     const element = document.createElement(tagName);
     element.classList.add(`gloss-sc-${tagName}`);
     let nextLanguage = language;
@@ -1332,6 +1336,8 @@ function snapshot() {
 }
 
 function restore(snap) {
+    // Entries of the page being left may still be rendering; they must not be added to this one.
+    ++renderGeneration;
     const container = document.getElementById('entries-container');
     container.replaceChildren(...snap.nodes);
     window.lookupEntries = snap.lookupEntries;
@@ -1417,14 +1423,17 @@ window.renderPopup = function() {
     }
     const generation = ++renderGeneration;
 
+    // Back and forward replace `window.lookupEntries`; this render keeps filling its own list.
+    const entries = (window.lookupEntries ??= []);
+    const entryCount = window.entryCount;
+
     (async () => {
-        for (let idx = 0; idx < window.entryCount; idx++) {
-            const entry = window.lookupEntries?.[idx] ?? await webkit.messageHandlers.getEntry.postMessage(idx);
+        for (let idx = 0; idx < entryCount; idx++) {
+            const entry = entries[idx] ?? await webkit.messageHandlers.getEntry.postMessage(idx);
             if (generation !== renderGeneration) return;
             if (!entry) continue;
 
-            window.lookupEntries ??= [];
-            window.lookupEntries[idx] = entry;
+            entries[idx] = entry;
 
             if (idx > 0) {
                 container.appendChild(document.createElement('hr'));
