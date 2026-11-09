@@ -314,3 +314,113 @@ These measurements use programmatic native scrolling of the real screens on a
 Simulator. Physical hardware and one-time legacy migration/retained-history
 absorption were not performance-profiled. No confirmed findings from this
 expanded review remain open.
+
+---
+
+## iPad mini setup and navigation follow-up — November 9, 2026
+
+The earlier review did not catch fresh dictionary setup or the five-tab iPad mini
+layout. This follow-up reproduces and fixes the three reported problems.
+
+- The official JMdict browser download URLs returned HTTP 504 on both the host
+  and the mini Simulator. GitHub's official release-asset API served the same
+  archive successfully. Dictionary downloads now retry transient errors once,
+  bypass stale signed redirects, and fall back to that API for recognized GitHub
+  release URLs. Asset IDs are resolved from release metadata, not hardcoded.
+  HTTP error pages are rejected before native import and temporary failures are
+  removed. This uses URLSession, Codable and the existing native dictionary backend.
+- A partial native import writes `index.json` before its completion marker. It
+  previously appeared installed and prevented retry despite producing no lookup
+  results. Storage scans now require the marker and nonempty native data files.
+  Recommended imports and updates build in a hidden sibling directory and publish
+  only completed output, preserving an existing dictionary when import fails.
+  The native low-memory mode limits concurrent bank processing to two workers.
+  Setup displays the actual failing stage and error.
+- The iPad's top tab strip shared width with six Bookshelf actions. With all five
+  tabs enabled, Settings was clipped behind a Next Page control and Add Manga
+  could disappear into toolbar overflow. iPad tabs now have their own bottom bar;
+  every tab content root restores its real size class for tablet layouts.
+- Add Manga is a compact, accessible plus button that opens Files directly.
+  Sort, selection, shelf management and EPUB import remain in Bookshelf options.
+  Dictionary popup placement now reads the actual tab-bar location.
+
+Two independent source reviews found no introduced actionable defects in the
+dictionary and iPad navigation changes. The native importer's existing handling
+of untrusted archive titles was not changed; the staging directory is not a
+sandbox for arbitrary ZIP archives.
+
+### Focused verification
+
+- **17/17** native tests passed on a disposable iPad mini: ten deterministic
+  download/import cases, five setup cases and two opt-in live tests.
+- The live tests downloaded both real default dictionaries, imported them with
+  the C++ backend, and verified definitions and frequency results for `猫`.
+  The public DictionaryManager setup path recovered an index-only interrupted
+  installation, rebuilt the shared lookup query and completed an idempotent retry.
+- Native fixture tests also verified failed-update preservation, completed-update
+  replacement, HTTP/HTML rejection, temporary-file cleanup, release API headers,
+  tagged releases and exclusion of unrelated URLs from fallback routing.
+- The final two mini navigation cases passed, including actual selection of every
+  tab, Manga settings, compact plus dimensions, both file pickers, and manga import
+  open/cancel in portrait and landscape. Dictionary intentionally opens its keyboard;
+  the test submits an empty search before checking navigation to the next tab.
+  Full-screen portrait and landscape captures were inspected visually.
+
+The regression gate now accepts an explicitly selected disposable iPad mini and
+requires the new navigation/import UI cases. Opt-in live network tests are run
+separately so the normal gate retains its no-skipped-scenarios check without
+depending on public dictionary hosting. User devices and the existing `hoshi-perf`
+Simulator are preserved.
+
+The final mini stress case also passed: first-poll main-thread CPU **1.88 ms**,
+later polls **2.27 ms**, statistics pass **1.89 ms**, and the pass after a reader
+save **2.41 ms**. Maximum heartbeat gap was **4 ms**; unchanged polls wrote or
+uploaded nothing. Bookshelf scrolling ran through four real polls with **924**
+display callbacks and a maximum gap of **66 ms**. A **999,263-byte** incoming
+position import peaked at **59 ms** while scrolling; the complete **2,400-row**
+Statistics import peaked at **52 ms**. A real manga turn used **7.47 ms** CPU /
+**8.12 ms** wall time and preserved its position through reopening. These are
+Simulator measurements, with occasional missed frames; they do not establish
+zero lag on physical hardware.
+
+The final mini run passed **20** real-server tests, **108** Python regressions
+and **308** hosted XCTest cases with zero failures or skipped scenarios. The two
+live network cases above ran separately with explicit opt-in.
+
+The mini UI run passed cloud manga download, both podcast scenarios, Statistics
+and thin manga actions. Together with the corrected navigation rerun, **7/8** of
+the gate's distinct UI cases passed on the mini. A fresh iPhone run passed all
+**four** focused cases: the two navigation cases, zoomed selection, and page-jump
+zoom reset followed by forward/backward swipes.
+
+### Remaining independently reproduced reader issue
+
+The complete mini UI gate is **not green**. The zoomed-selection case failed
+because native zoom remained at `1.000`. A second explicit pinch/page-jump check
+also failed. Repeating the checks with the original top-tab layout produced the
+same failure, excluding the new bottom-tab adaptation as its cause.
+
+The strengthened tests now verify that native zoom actually changed before
+checking selection geometry; page-jump tests seed their own synthetic fixture.
+Both cases pass on iPhone. On the iOS 27 mini Simulator, a temporary programmatic
+probe could set zoom and the content transform to 2, but WebKit's
+`_updateScrollViewForTransaction:` restored both to 1 on the following layer-tree
+commit. The document load token stayed at 1 and `didFinish` did not run again.
+The observed recognizer was the current native pinch recognizer.
+
+Controlled checks of viewport-scale policy, root overflow, the external scroll
+delegate, tab traits, a minimal document/native setup, and the document base URL
+did not establish a working public fix. All temporary product changes and forced
+zoom probes were removed. No reader scaling rewrite or private API was shipped.
+The exact platform/app-shell cause remains unconfirmed; this is an open issue,
+not a claim that reader zoom has been fixed or that the app is bug-free.
+
+Evidence: `build/codex-mini-dictionaries-fallback.log`,
+`build/codex-mini-full-gate-final.log`, `build/ios-sync-integration.log`,
+`build/ios-parity-ui.log`, `build/codex-mini-navigation-reviewed.log`,
+`build/mini-navigation-reviewed-screens/`, `build/codex-phone-navigation-final.log`
+and the ignored `build/mini-zoom-reset-trace-diagnostics/` export.
+
+Product fixes: `70d755a` (default dictionaries) and `7fe181f` (compact navigation).
+The tested changes are committed locally; they require a new app build to reach
+an installed iPad. No physical-device installation or profiling was performed.

@@ -63,7 +63,7 @@ final class ZoomPopupUITests: XCTestCase {
 
     func testPageJumpResetsZoomAndAllowsTheNextSwipe() throws {
         continueAfterFailure = false
-        let app = try launchZoomFixture()
+        let app = try launchZoomFixture(syntheticFixture: true)
         let webView = app.webViews.firstMatch
         let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
         XCTAssertTrue(probe.waitForExistence(timeout: 5))
@@ -237,12 +237,27 @@ final class ZoomPopupUITests: XCTestCase {
         let japaneseBox = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "日本語")).firstMatch
         XCTAssertTrue(japaneseBox.waitForExistence(timeout: 5))
         let initialFrame = japaneseBox.frame
-        japaneseBox.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        sleep(1)
 
         let webView = app.webViews.firstMatch
         XCTAssertTrue(webView.waitForExistence(timeout: 3))
+        let viewport = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+        XCTAssertTrue(viewport.waitForExistence(timeout: 3))
+        // Establish zoom on the artwork before revealing selectable OCR text, then verify the
+        // native viewport before testing where a lookup selection anchors its popup.
         webView.pinch(withScale: 1.6, velocity: 1.0)
+        let didZoom = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            guard let zoom = self.labelParts(viewport.label)["zoom"].flatMap(Double.init) else { return false }
+            return zoom > 1.01
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [didZoom], timeout: 5), .completed, viewport.label)
+        let nativeZoom = try XCTUnwrap(labelParts(viewport.label)["zoom"].flatMap(Double.init), viewport.label)
+        XCTAssertGreaterThan(nativeZoom, 1.01, viewport.label)
+
+        let revealFrame = try visibleSwitchFrame(app: app, textContains: "日本語", in: webView)
+        let revealPoint = hitSlopPoint(for: revealFrame, in: webView.frame)
+        app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: revealPoint.x, dy: revealPoint.y))
+            .tap()
         sleep(1)
 
         let zoomedFrame = try visibleSwitchFrame(app: app, textContains: "日本語", in: webView)
