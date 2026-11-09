@@ -33,7 +33,9 @@ struct FirstLaunchSetupView: View {
                             Text(dictionaries.currentImport).font(.subheadline)
                         }
                         if setup.installFailed {
-                            Text("Could not finish installing the dictionaries. Check your connection and tap Download dictionaries to retry.")
+                            Text(dictionaries.errorMessage.isEmpty
+                                 ? "Could not finish installing the dictionaries. Check your connection and tap Download dictionaries to retry."
+                                 : dictionaries.errorMessage)
                                 .foregroundStyle(.red)
                         }
                         Button("Download dictionaries") { setup.downloadDictionaries() }

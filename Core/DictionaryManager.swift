@@ -117,7 +117,8 @@ class DictionaryManager {
                 try? BookStorage.delete(at: $0)
                 return nil
             }
-            guard let index = BookStorage.load(DictionaryIndex.self, from: $0.appendingPathComponent("index.json")) else {
+            guard let index = BookStorage.load(DictionaryIndex.self, from: $0.appendingPathComponent("index.json")),
+                  DictionaryDownloads.isImportedDictionary(at: $0) else {
                 try? BookStorage.delete(at: $0)
                 return nil
             }
@@ -190,6 +191,7 @@ class DictionaryManager {
     func importRecommendedDictionaries(completion: (@MainActor (Bool) -> Void)? = nil) {
         guard !isImporting, !isUpdating else { completion?(false); return }
         shouldShowError = false
+        errorMessage = ""
         let recommendedDictionaries: [(name: String, url: String, type: DictionaryType)] = [
             ("JMdict", "https://github.com/yomidevs/jmdict-yomitan/releases/latest/download/JMdict_english.json", .term),
             ("Jiten", "https://api.jiten.moe/api/frequency-list/index", .frequency),
@@ -212,8 +214,7 @@ class DictionaryManager {
                     }
                     
                     guard let indexURL = URL(string: url) else { throw URLError(.badURL) }
-                    let (data, _) = try await URLSession.shared.data(from: indexURL)
-                    let remoteIndex = try JSONDecoder().decode(DictionaryIndex.self, from: data)
+                    let remoteIndex = try await DictionaryDownloads.index(from: indexURL)
 
                     // A retry keeps the dictionaries an earlier attempt already installed.
                     let installed = await MainActor.run {
@@ -227,24 +228,15 @@ class DictionaryManager {
                     }
 
                     guard let downloadURL = URL(string: remoteIndex.downloadUrl) else { throw URLError(.badURL) }
-                    let (temp, _) = try await URLSession.shared.download(from: downloadURL)
+                    let temp = try await DictionaryDownloads.archive(from: downloadURL)
                     tempFiles.append(temp)
                     
                     await MainActor.run {
                         self.currentImport = "Importing \(remoteIndex.title)"
                     }
                     
-                    let destinationPath = try await Self.getDictionariesDirectory()
-                        .appendingPathComponent(type.rawValue).path(percentEncoded: false)
-                    
-                    let importResult = dictionary_importer.import(
-                        std.string(temp.path(percentEncoded: false)),
-                        std.string(destinationPath)
-                    )
-                    
-                    if !importResult.success {
-                        throw URLError(.cannotParseResponse)
-                    }
+                    let destination = try await Self.getDictionariesDirectory().appendingPathComponent(type.rawValue)
+                    try DictionaryDownloads.importArchive(at: temp, to: destination)
                     await MainActor.run {
                         self.loadDictionaries()
                         self.saveDictionaryConfig()
@@ -262,7 +254,7 @@ class DictionaryManager {
             } catch {
                 await MainActor.run {
                     self.isImporting = false
-                    let message = "failed to download dictionaries: \(error.localizedDescription)"
+                    let message = "\(self.currentImport): \(error.localizedDescription)"
                     if completion == nil { self.showError(message) }
                     else { self.errorMessage = message }
                     completion?(false)
@@ -348,8 +340,7 @@ class DictionaryManager {
                     }
                     
                     guard let indexURL = URL(string: index.indexUrl) else { continue }
-                    let (data, _) = try await URLSession.shared.data(from: indexURL)
-                    let remoteIndex = try JSONDecoder().decode(DictionaryIndex.self, from: data)
+                    let remoteIndex = try await DictionaryDownloads.index(from: indexURL)
 
                     if index.revision == remoteIndex.revision {
                         continue
@@ -360,29 +351,20 @@ class DictionaryManager {
                     }
 
                     guard let downloadURL = URL(string: remoteIndex.downloadUrl) else { continue }
-                    let (temp, _) = try await URLSession.shared.download(from: downloadURL)
+                    let temp = try await DictionaryDownloads.archive(from: downloadURL)
                     tempFiles.append(temp)
                     
                     await MainActor.run {
                         self.currentImport = "Importing \(remoteIndex.title)"
                     }
                     
-                    let destinationPath = try await Self.getDictionariesDirectory()
-                        .appendingPathComponent(type.rawValue).path(percentEncoded: false)
-                    
-                    let importResult = dictionary_importer.import(
-                        std.string(temp.path(percentEncoded: false)),
-                        std.string(destinationPath)
-                    )
-                    
-                    if !importResult.success {
-                        continue
-                    }
+                    let destination = try await Self.getDictionariesDirectory().appendingPathComponent(type.rawValue)
+                    let importedTitle = try DictionaryDownloads.importArchive(at: temp, to: destination)
                     
                     await MainActor.run {
                         self.loadDictionaries()
                         let old = dictionary.index.title
-                        let new = cxxStringToSwift(importResult.title)
+                        let new = importedTitle
                         if old != new {
                             if let currentIndex = self.getDictionaryIndex(title: old, type: type) {
                                 let wasEnabled = self.isDictionaryEnabled(at: currentIndex, type: type)
