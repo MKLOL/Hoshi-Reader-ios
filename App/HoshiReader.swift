@@ -438,9 +438,14 @@ private enum OfflineLlmLaunchSelfTest {
         try FileManager.default.createDirectory(at: root.appendingPathComponent("images"), withIntermediateDirectories: true)
         // The chrome fixture fills the mini's portrait viewport with white artwork, making
         // the History/options backgrounds visible in the interaction screenshots.
-        let width = 1179
-        let height = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_CHROME"] == "1" ? 1796 : 2556
-        let blocks: [[String: Any]] = [
+        let textPreview = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_TEXT_SIZE"] == "1"
+        let width = textPreview ? 400 : 1179
+        let height = textPreview ? 600 : (ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_CHROME"] == "1" ? 1796 : 2556)
+        let blocks: [[String: Any]] = textPreview ? [
+            ["box": [85, 65, 285, 105], "vertical": false, "font_size": 12, "lines": ["学校で本を読む"]],
+            ["box": [85, 180, 285, 225], "vertical": false, "font_size": 20, "lines": ["こんにちは"]],
+            ["box": [85, 400, 295, 465], "vertical": false, "font_size": 40, "lines": ["大きな文字"]]
+        ] : [
             ["box": [200, 900, 760, 1050], "vertical": false, "font_size": 72,
              "lines": ["日本語のテキスト"], "lines_coords": [[[200, 900], [760, 900], [760, 1050], [200, 1050]]]],
             ["box": [200, 1700, 700, 1850], "vertical": false, "font_size": 72,
@@ -450,15 +455,25 @@ private enum OfflineLlmLaunchSelfTest {
         let format = UIGraphicsImageRendererFormat(); format.scale = 1; format.opaque = true
         let image = UIGraphicsImageRenderer(size: CGSize(width: CGFloat(width), height: CGFloat(height)), format: format).image { context in
             UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
-            UIColor.lightGray.setFill()
-            context.fill(CGRect(x: 200, y: 900, width: 560, height: 150))
-            context.fill(CGRect(x: 200, y: 1700, width: 500, height: 150))
+            if textPreview {
+                UIColor.darkGray.setStroke()
+                for rect in [CGRect(x: 8, y: 8, width: 384, height: 284), CGRect(x: 8, y: 306, width: 384, height: 286)] {
+                    let path = UIBezierPath(rect: rect); path.lineWidth = 2; path.stroke()
+                }
+                for rect in [CGRect(x: 45, y: 40, width: 285, height: 235), CGRect(x: 45, y: 350, width: 305, height: 190)] {
+                    let path = UIBezierPath(ovalIn: rect); path.lineWidth = 2; path.stroke()
+                }
+            } else {
+                UIColor.lightGray.setFill()
+                context.fill(CGRect(x: 200, y: 900, width: 560, height: 150))
+                context.fill(CGRect(x: 200, y: 1700, width: 500, height: 150))
+            }
         }
         guard let data = image.pngData() else { throw CocoaError(.fileWriteUnknown) }
         for index in 0..<3 {
             let path = "images/page\(index).png"
             try data.write(to: root.appendingPathComponent(path))
-            pages.append(["img_width": width, "img_height": height, "img_path": path, "blocks": index == 0 ? blocks : []])
+            pages.append(["img_width": width, "img_height": height, "img_path": path, "blocks": textPreview || index == 0 ? blocks : []])
         }
         try JSONSerialization.data(withJSONObject: ["title": title, "pages": pages])
             .write(to: root.appendingPathComponent(FileNames.mokuro))

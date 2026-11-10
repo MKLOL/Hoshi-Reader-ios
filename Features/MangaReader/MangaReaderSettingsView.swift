@@ -6,6 +6,8 @@ import SwiftUI
 /// Format-specific controls share the same persisted preferences as the live reader.
 struct MangaReaderSettingsView: View {
     @Environment(UserConfig.self) private var userConfig
+    var previewSource: MangaTextPreviewSource? = nil
+    @State private var showPagePreview = false
 
     var body: some View {
         @Bindable var userConfig = userConfig
@@ -18,6 +20,11 @@ struct MangaReaderSettingsView: View {
                 Text("Generate readings offline for revealed Japanese text.")
             }
 
+            Section {
+                Button("Preview on a manga page") { showPagePreview = true }
+                    .accessibilityIdentifier("manga-open-page-preview")
+                Text("Smaller text can match, but never overtake, larger text.").font(.caption).foregroundStyle(.secondary)
+            }
             MangaTextEnlargementControls(settings: $userConfig.mangaTextEnlargement)
 
             Section {
@@ -38,6 +45,7 @@ struct MangaReaderSettingsView: View {
                 NavigationLink("Popup Cards") { PopupCardsView(userConfig: userConfig) }
             }
         }
+        .fullScreenCover(isPresented: $showPagePreview) { MangaTextPreviewLauncher(source: previewSource).environment(userConfig) }
         .navigationTitle("Manga")
         .accessibilityIdentifier("manga-settings")
     }

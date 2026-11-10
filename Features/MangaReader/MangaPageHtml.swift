@@ -65,6 +65,7 @@ nonisolated enum MangaPageHtml {
         textEnlargementAmount: Int = 50,
         smallTextThreshold: Int = 30,
         showFurigana: Bool = true,
+        textSizePreview: Bool = false,
         imageSources: [String: String] = [:]
     ) -> String {
         // Each page is fitted with `object-fit: contain` into its share of the viewport, baked into
@@ -130,7 +131,16 @@ nonisolated enum MangaPageHtml {
         \(mangaTapHandlerScript)
         window.hoshiManga && window.hoshiManga.applyFurigana();
         window.hoshiManga && window.hoshiManga.setSingleTapLookup(\(singleTapLookup));
-        window.hoshiManga && window.hoshiManga.installTapListener(\(mangaMaxSelectionLength));
+        if (\(textSizePreview)) {
+          document.querySelectorAll('[data-hoshi-ui-test]').forEach(function(box) { box.remove(); });
+          document.querySelectorAll('.ocr-box').forEach(function(box) {
+            box.classList.add('revealed');
+            window.hoshiManga.tryWrapFallback(box);
+            window.hoshiManga.fitFurigana(box);
+          });
+        } else {
+          window.hoshiManga && window.hoshiManga.installTapListener(\(mangaMaxSelectionLength));
+        }
         </script>
         </body>
         </html>

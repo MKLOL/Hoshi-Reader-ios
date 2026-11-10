@@ -15,6 +15,8 @@ nonisolated struct MangaTextEnlargement: Codable, Hashable, Sendable {
         let original = max(1, original)
         guard enabled else { return original }
         let settings = normalized
+        // Bounded amount makes this nondecreasing in original: small text may tie a larger
+        // size, but never overtake it. Integer arithmetic keeps that guarantee at every step.
         return original + max(0, settings.threshold - original) * settings.amount / 100
     }
 }

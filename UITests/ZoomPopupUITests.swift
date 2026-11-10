@@ -210,6 +210,47 @@ final class ZoomPopupUITests: XCTestCase {
         }
     }
 
+    @MainActor func testMangaTextSizePreviewStartsAtCurrentPageAndDoesNotMoveBookmark() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture(syntheticFixture: true, textSizePreview: true)
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["Go to page"].tap()
+        let field = app.textFields["manga-go-to-page-field"]
+        field.tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: (field.value as? String ?? "").count) + "2")
+        app.buttons["manga-go-to-page-confirm"].tap()
+        let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;"))
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["manga-preview-text-size"].tap()
+        let page = app.staticTexts["manga-preview-page"]
+        XCTAssertTrue(page.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(page.label.contains("Page 2"), page.label)
+        app.buttons["Previous page"].tap()
+        app.buttons["Strong"].tap()
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+            object: app.descendants(matching: .any)["manga-preview-loading"].firstMatch)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+        saveScreenshot(app, name: "ios-manga-page-adjusted")
+        app.segmentedControls.buttons["Original"].tap()
+        let originalReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
+            object: app.descendants(matching: .any)["manga-preview-loading"].firstMatch)
+        XCTAssertEqual(XCTWaiter.wait(for: [originalReady], timeout: 10), .completed)
+        saveScreenshot(app, name: "ios-manga-page-original")
+        app.buttons["Next page"].tap()
+        app.buttons["Next page"].tap()
+        XCTAssertTrue(page.label.contains("Page 3"), page.label)
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;"), probe.label)
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["manga-preview-text-size"].tap()
+        XCTAssertTrue(page.waitForExistence(timeout: 5))
+        XCTAssertTrue(page.label.contains("Page 2"))
+        app.buttons["Strong"].tap()
+        app.buttons["manga-preview-apply"].tap()
+        XCTAssertTrue(waitForViewport(probe, containing: "page=2;"), probe.label)
+    }
+
     func testPageJumpSubmitsWithKeyboardGo() throws {
         continueAfterFailure = false
         let app = try launchZoomFixture(syntheticFixture: true)
@@ -795,7 +836,7 @@ final class ZoomPopupUITests: XCTestCase {
         add(attachment)
     }
 
-    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false, chromeFixture: Bool = false) throws -> XCUIApplication {
+    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false, chromeFixture: Bool = false, textSizePreview: Bool = false) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
         app.launchArguments += ["-mangaShowCopyButton", showCopy ? "YES" : "NO"]
@@ -804,6 +845,7 @@ final class ZoomPopupUITests: XCTestCase {
             app.launchArguments += ["-mangaSingleTapLookup", "NO", "-mangaShowFurigana", "NO"]
         }
         if chromeFixture { app.launchEnvironment["HOSHI_UI_TESTING_CHROME"] = "1" }
+        if textSizePreview { app.launchEnvironment["HOSHI_UI_TESTING_TEXT_SIZE"] = "1" }
         if aiStub {
             app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"
         }

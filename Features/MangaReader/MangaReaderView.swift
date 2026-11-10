@@ -41,6 +41,7 @@ struct MangaReaderView: View {
     @State private var showGoToPageDialog = false
     @State private var screenshotCropMode = false
     @State private var showMangaSettings = false
+    @State private var showTextPreview = false
     @State private var showStatisticsSheet = false
     @State private var goToPageText = ""
     @FocusState private var goToPageFieldFocused: Bool
@@ -92,6 +93,11 @@ struct MangaReaderView: View {
         controller.startupTrace = model.startupTrace
         _model = State(initialValue: model)
         _controller = State(initialValue: controller)
+    }
+
+    private var textPreviewSource: MangaTextPreviewSource? {
+        guard let book = model.book, let root = model.bookRoot else { return nil }
+        return MangaTextPreviewSource(book: book, root: root, pageIndex: model.pageIndex)
     }
 
     private let backgroundColor: Color = .black
@@ -215,10 +221,13 @@ struct MangaReaderView: View {
         }
         .sheet(isPresented: $showMangaSettings) {
             NavigationStack {
-                MangaReaderSettingsView()
+                MangaReaderSettingsView(previewSource: textPreviewSource)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showMangaSettings = false } } }
             }
             .environment(userConfig)
+        }
+        .fullScreenCover(isPresented: $showTextPreview) {
+            MangaTextPreviewLauncher(source: textPreviewSource).environment(userConfig)
         }
         .sheet(isPresented: $showStatisticsSheet) {
             MangaStatisticsView(model: model, userConfig: userConfig)
@@ -689,6 +698,12 @@ struct MangaReaderView: View {
                 // A real Menu anchors the dropdown to this button. The old `.confirmationDialog`
                 // presented detached (mid-screen / bottom), which is what looked wrong.
                 Menu {
+                    Button {
+                        model.closePopups()
+                        showTextPreview = true
+                    } label: { Label("Preview text size", systemImage: "textformat.size") }
+                    .disabled(textPreviewSource == nil)
+                    .accessibilityIdentifier("manga-preview-text-size")
                     Button {
                         model.closePopups()
                         goToPageText = "\(model.pageIndex + 1)"

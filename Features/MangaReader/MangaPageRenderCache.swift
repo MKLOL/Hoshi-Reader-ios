@@ -27,6 +27,7 @@ nonisolated struct MangaPageRenderConfig: Hashable, Sendable {
     var textEnlargementAmount: Int = 50
     var smallTextThreshold: Int = 30
     var showFurigana: Bool = true
+    var textSizePreview: Bool = false
 }
 
 /// LRU cache of generated manga-page HTML, keyed by current image versions.
@@ -84,6 +85,7 @@ actor MangaPageRenderCache {
             textEnlargementAmount: config.textEnlargementAmount,
             smallTextThreshold: config.smallTextThreshold,
             showFurigana: config.showFurigana,
+            textSizePreview: config.textSizePreview,
             imageSources: imageSources
         )
         if !Task.isCancelled { insert(html, for: key) }

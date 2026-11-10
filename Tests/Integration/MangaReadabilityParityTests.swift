@@ -92,6 +92,43 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(oldBox.originalFontSize, oldBox.fontSize)
     }
 
+    func testEveryEnlargementSettingPreservesSourceSizeOrder() {
+        for threshold in 10...60 {
+            for amount in 0...100 {
+                let settings = MangaTextEnlargement(amount: amount, threshold: threshold)
+                var previous = settings.fontSize(original: 1)
+                for original in 2...120 {
+                    let result = settings.fontSize(original: original)
+                    if result < previous || result < original || (original >= threshold && result != original) {
+                        XCTFail("Size order changed at source \(original), amount \(amount), cutoff \(threshold)")
+                        return
+                    }
+                    previous = result
+                }
+            }
+        }
+    }
+
+    @MainActor func testPagePreviewRevealsEveryBubbleWithoutLookupAndKeepsOriginalComparison() async throws {
+        let cache = MangaPageRenderCache()
+        let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
+        defer { browser.close() }
+        var preview = config(amount: 75, threshold: 40)
+        preview.textSizePreview = true
+        try await load(await cache.htmlFor(page: page, config: preview), in: browser)
+        let result = try await browser.web.evaluateJavaScript("""
+            (() => { const boxes = [...document.querySelectorAll('.ocr-box')];
+              return [boxes.every(b => b.classList.contains('revealed')), parseFloat(getComputedStyle(boxes[0]).fontSize)]; })()
+            """)
+        let values = try XCTUnwrap(result as? [NSNumber])
+        XCTAssertTrue(values[0].boolValue)
+        XCTAssertEqual(values[1].doubleValue, 32, accuracy: 0.1)
+        preview.enlargeSmallText = false
+        try await load(await cache.htmlFor(page: page, config: preview), in: browser)
+        let original = try await browser.web.evaluateJavaScript("parseFloat(getComputedStyle(document.querySelector('.ocr-box')).fontSize)")
+        XCTAssertEqual(try XCTUnwrap(original as? Double), 8, accuracy: 0.1)
+    }
+
     func testAdjustableEnlargementUsesTheSameCurveAsThePreview() {
         XCTAssertEqual([12, 20, 30, 40].map { MangaTextEnlargement().fontSize(original: $0) }, [21, 25, 30, 40])
         XCTAssertEqual([12, 20, 30, 40].map { MangaTextEnlargement(amount: 75, threshold: 40).fontSize(original: $0) }, [33, 35, 37, 40])
