@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Settings → Diagnostics** shows what went wrong on this device: crash, hang and exit reports from iOS, times the app stopped while open, and reader pages that had to be loaded again. Nothing is sent anywhere; the report can be shared as a text file.
+- **Settings → Advanced → Storage Cleanup** finds and removes files left behind by imports, backups, restores and syncs that did not finish. Books, dictionaries, history and settings are never touched.
+- **Keep Screen On** in **Settings → App & reading** stops the screen dimming while a book or manga is open.
+- EPUB appearance gains **Blur Images** (tap a picture to uncover it), **Paragraph Spacing** under Advanced, and **Always Show Progress**, which keeps the progress line visible in focus mode. These follow your Android settings over sync.
+- Tap a picture in an EPUB to view it full screen, zoom in and share it.
+- **Collapse Dictionaries** replaces Auto-collapse: expand all, collapse all, or choose per dictionary, with an option to keep the first one open. **Compact Pitch Accents** lists pitch accents on one line and is on by default.
+- The EPUB importer accepts a folder and imports every EPUB inside it.
 - First-launch setup can save a shared sync token and install the recommended JMdict and Jiten dictionaries. Missing setup is offered again after a restore.
 - Manga available on your sync server appear under **Not downloaded**. Tap covers to download them one after another: each shows Waiting, a filling ring and Finishing, then moves onto its shelf as soon as its own download is done. Downloads can be cancelled individually and retried; interrupted downloads resume, and the reading position arrives before the manga opens. Chats, translations or statistics that cannot be read never block the download; they follow with a later sync.
 - Manga OCR bubbles show offline furigana by default. Long text scrolls inside its bubble, and nearby pages prepare three ahead and two behind for faster turns.

@@ -1,3 +1,36 @@
+# November 10 feature-surface audit
+
+The audits below follow Android commits from September 2026 on, so features older than that were never compared. This pass compared what each app offers instead: every label in Android's `app/src/main/res/values/strings.xml` at `3e95b0fd` was looked for in the iOS sources, and every name in `ReaderPreferencesProtocol.validValue` was checked against the fields `ReaderPreferencesStore` applies. A setting iOS accepted over sync and then ignored counted as missing.
+
+Most of what was missing exists in upstream Hoshi Reader for iOS (`Manhhao/Hoshi-Reader`), which Android ported and which this fork left before those changes reached upstream's `main`. Those were taken as cherry-picks with their author kept; the rest is new code.
+
+| Android feature | iOS now |
+| --- | --- |
+| Diagnostics (Settings) | **Settings → Diagnostics**: the crash, hang, CPU, disk-write and exit reports iOS collects (MetricKit), uncaught Objective-C exceptions, runs that ended while the app was in front, and reader pages whose WebKit process ended. Kept on the device, bounded per kind, shared as a text file. Android's per-exit history has no iOS counterpart; exits arrive as daily counts. |
+| Storage Cleanup (About) | **Settings → Advanced → Storage Cleanup**: the app's own leftovers in the temporary directory, partly unpacked manga and dictionaries, and day-old copies in the inbox. Android's audiobook and Anki media categories do not apply: iOS links audiobooks instead of copying them and keeps card media in memory. |
+| Keep Screen On | **Settings → App & reading**. Applies while a book or manga is open; Android applies it in the EPUB reader only. |
+| Blur Images, Paragraph Spacing | Upstream `f286108`, `ebf5423`. |
+| Always Show Progress | New; EPUB reader. |
+| Fullscreen image viewer | Upstream `a0989ac`: tap a picture to view, zoom and share it. Sharing covers Android's copy and save. |
+| Collapse Dictionaries modes, Expand First, Compact Pitch Accents | Upstream `2bef599`, `14fae39`. The earlier "Auto-collapse Dictionaries" switch carries over as Collapse All with the first dictionary open. |
+| EPUB folder import | The EPUB importer accepts folders and imports every EPUB inside. |
+
+Still different, on purpose:
+
+- **Show Back Button** stays an unapplied wire record. iOS has no system back gesture and the reader menu has no close action, so hiding the button would leave no way out of a book.
+- **Volume keys, e-ink mode, reduced-motion popup scrolling, the APK updater, AnkiDroid and low-memory dictionary import** are Android hardware or platform features.
+
+Still missing:
+
+- **Pinned audiobook controls** (rewind, play, skip in the reader's bottom area, with a choice of skip length). The bottom area also holds the progress and statistics lines, and the layout needs to be seen on a device before it is built.
+- **Popup action bar** (upstream `095e91a`). It rewrites popup navigation that this fork has since changed for popup cards.
+- **Simplified Chinese** and the language picker (upstream `147e3b9`). The fork's own screens have no translations.
+- The first version of this audit also listed jump back and forward. That was wrong: `ReaderViewModel.backTarget` and `forwardTarget` already provide them.
+
+Tests added with these changes are listed in `imp.md` under November 10.
+
+---
+
 # November 7 follow-up
 
 Android target: `3e95b0fd` (1.0.1 and the unreleased redraw fix). iOS starting point: `58ddd70`, whose hosted XCTest and UI suites had never executed. Three independent reviewers audited Android parity, statistics/streak behavior and the October 31 port; three more reviewed every change below.

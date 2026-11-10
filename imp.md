@@ -1019,3 +1019,73 @@ over the app on the iPad mini. All **31** library entries listed before the inst
 after it. The launch was again refused with `Locked`, so this build has not been started or seen
 running on the device either.
 
+
+## Android feature gaps — November 10, 2026 (Claude)
+
+Asked what iOS still lacked next to Android, then to add "diagnostics and stuff". The commit-by-commit
+audits in `docs/ANDROID_PARITY.md` start in September 2026, so this pass compared the two apps'
+surfaces instead: Android's whole string table against the iOS sources, and the synced-preference
+names iOS validates against the ones it applies. Work is on branch `claude/android-gap-features`.
+
+### Added
+
+- **Diagnostics** (`Features/Diagnostics`). `DiagnosticsCollector` subscribes to MetricKit for
+  crash, hang, CPU, disk-write and exit reports, installs an uncaught-exception handler that
+  chains to the previous one, and marks each run as in front or not so the next launch can report
+  a run that ended while open. The four WebKit page-process handlers record each lost page and
+  whether it was loaded again at once. `DiagnosticsLog` keeps a bounded number of each kind in
+  Application Support, excluded from backups. `DiagnosticsReport` builds the text; long traces
+  keep their first and last halves, as on Android. Settings → Diagnostics shows it and shares it
+  as a file. MetricKit delivers nothing in the simulator, so the conversion from its payloads is
+  not exercised by any test; everything after that conversion is.
+- **Storage Cleanup** (Settings → Advanced). Offers only names the app is known to create in the
+  temporary directory, `.MokuroImport-` and `.import-` staging, and inbox copies older than a day;
+  nothing modified in the last ten minutes; and removes only what still qualifies when confirmed.
+- **Keep Screen On** (Settings → App & reading), Android's `keepScreenOnWhileReading`. `ScreenAwake`
+  is now the only code that sets the idle timer. The audiobook player and the startup trace set it
+  directly before, so either could have dimmed the screen under the other.
+- **Blur Images**, **Paragraph Spacing**, **fullscreen images**, **Collapse Dictionaries** and
+  **Compact Pitch Accents** are upstream Hoshi Reader commits `f286108`, `ebf5423`, `a0989ac`,
+  `2bef599` and `14fae39`, cherry-picked with their author and adapted where this fork differs.
+  Each commit message says what was adapted.
+- **Always Show Progress** for the EPUB reader, Android's `alwaysShowProgress`.
+- **EPUB folder import**.
+
+### Behaviour worth knowing
+
+- With Advanced layout on, Paragraph Spacing sets the gap between paragraphs even at 0, which
+  removes a book's own paragraph margins. Upstream and Android do the same.
+- Compact Pitch Accents defaults to on, as upstream and on Android, so pitch accents now share a
+  line where they were stacked.
+- A reader who had Auto-collapse Dictionaries on gets Collapse All with Expand First Dictionary.
+- Tapping a picture in an EPUB now opens it instead of toggling the reader's bars.
+- An unexpected exit is also recorded when a build is installed over the running app, or the
+  debugger stops it. The report says so.
+
+### Not done
+
+- Android's **Show Back Button** is left unapplied on purpose: iOS has no system back gesture and
+  the reader menu has no close action.
+- **Pinned audiobook controls**, the **popup action bar** and **Simplified Chinese** remain; the
+  reasons are in `docs/ANDROID_PARITY.md`.
+- The first list given to the owner included jump back and forward. iOS already had them.
+
+### Tests
+
+New, in existing files: `RuntimeRegressionTests` (three: the diagnostics log and session marker,
+the report and captured crashes, Storage Cleanup), `ReaderPreferencesParityTests` (three: Keep
+Screen On through the real store and idle timer, settings first chosen on Android, the collapse
+carry-over), `ReaderLifetimeTests` (one, in the real paged reader: blur, the tap that uncovers,
+the tap that opens a stored picture and not an inline one, paragraph gaps), `RecentParitySafetyTests`
+(one: the folder scan) and `test_furigana.py` (one, under Node: which dictionary sections start
+open). The three `RuntimeRegressionTests` were mutation-checked together: reporting every previous
+session, taking the first thread instead of the blamed one, and deleting without re-checking each
+failed its test.
+
+### Verification
+
+`tools/test_ios_parity.py` on the branch, on its own freshly created simulator with the machine
+otherwise idle: 20 KV-server tests, **109** Python regressions, **350** hosted XCTest cases and the
+8 UI cases, with no failures. Log: `build/claude-gap-gate.log`. None of this has been run on a
+device: the screens were not looked at, MetricKit has delivered no real report, and Keep Screen On
+was checked through the idle-timer flag, not by watching a screen stay lit.
