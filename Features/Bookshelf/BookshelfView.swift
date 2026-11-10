@@ -194,6 +194,11 @@ struct BookshelfView: View {
                             Link(destination: URL(string: "https://github.com/Manhhao/Hoshi-Reader/issues")!) {
                                 Label("Report an Issue", systemImage: "exclamationmark.bubble")
                             }
+                            NavigationLink {
+                                DiagnosticsView()
+                            } label: {
+                                Label("Diagnostics", systemImage: "stethoscope")
+                            }.accessibilityIdentifier("settings-diagnostics")
                             Button {
                                 showAbout = true
                             } label: {

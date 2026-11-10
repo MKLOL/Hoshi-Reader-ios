@@ -19,6 +19,8 @@ Your data stays on your device unless you use the features below.
 
 **Anonymous usage statistics** - Enabled by default, this feature sends a random installation ID, app/iOS versions, hardware family, screen dimensions, language, book/dictionary counts and a few reading/sync switches to the Hoshi statistics service at `dragos.games`. Reports contain no book titles, reading text, looked-up words, sync server address, tokens, device name or vendor identifier. The first report waits at least 20 hours; later reports are separated by at least 20 hours. You can turn this off in Settings → Advanced → Share anonymous usage statistics before the first report. Turning it off deletes the local installation ID and cancels a pending report. Debug builds, simulators and automated tests do not send reports.
 
+**Diagnostics** - The app keeps a record on your device of crashes, unresponsive periods and exits that iOS reports for it, of reader pages that had to be loaded again, and of times it stopped while open. The record holds app and iOS versions, the hardware family, times and call stacks; it holds no book titles, reading text, account or sync token. It is never sent anywhere by the app and leaves the device only if you share it from Settings → Diagnostics.
+
 No advertising or cross-app tracking is used.
 
 For questions, open an issue on [GitHub](https://github.com/Manhhao/Hoshi-Reader/issues).

@@ -4,6 +4,168 @@ import WebKit
 @testable import Hoshi_Reader
 
 nonisolated final class RuntimeRegressionTests: XCTestCase {
+    /// Settings → Diagnostics keeps a bounded record on the device, and reports a run that was
+    /// still in front when it ended: iOS moves an app to the background before it quits it.
+    func testDiagnosticsKeepTheNewestOfEachKindAndReportARunThatEndedInFront() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("diagnostics-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let log = DiagnosticsLog(directory: directory)
+        for index in 0..<12 {
+            log.record(DiagnosticEvent(kind: .crash, time: start.addingTimeInterval(Double(index)), version: "1.0 (1)", title: "crash \(index)"))
+        }
+        log.record(DiagnosticEvent(kind: .hang, time: start, version: "1.0 (1)", title: "hang"))
+        var events = await log.events()
+        XCTAssertEqual(events.filter { $0.kind == .crash }.map(\.title), (2..<12).reversed().map { "crash \($0)" })
+        XCTAssertEqual(events.filter { $0.kind == .hang }.count, 1)
+
+        // Opened, brought to the front, and never seen leaving it.
+        log.beginSession(version: "1.0 (1)", now: start.addingTimeInterval(100))
+        log.sessionMoved(foreground: true, now: start.addingTimeInterval(101))
+        _ = await log.events() // Each launch has its own writer; let this one finish first.
+        let relaunched = DiagnosticsLog(directory: directory)
+        relaunched.beginSession(version: "1.1 (2)", now: start.addingTimeInterval(500))
+        events = await relaunched.events()
+        let exit = try XCTUnwrap(events.first { $0.kind == .unexpectedExit })
+        XCTAssertEqual(exit.version, "1.0 (1)")
+        XCTAssertEqual(exit.time, start.addingTimeInterval(101))
+        XCTAssertTrue(exit.details.contains("Next opened: \(DiagnosticsReport.stamp(start.addingTimeInterval(500)))"))
+
+        // Locked, switched away from or closed from the app switcher: an ordinary ending.
+        relaunched.sessionMoved(foreground: true, now: start.addingTimeInterval(501))
+        relaunched.sessionMoved(foreground: false, now: start.addingTimeInterval(502))
+        _ = await relaunched.events()
+        let third = DiagnosticsLog(directory: directory)
+        third.beginSession(version: "1.1 (2)", now: start.addingTimeInterval(900))
+        events = await third.events()
+        XCTAssertEqual(events.filter { $0.kind == .unexpectedExit }.count, 1)
+    }
+
+    func testDiagnosticsReportNamesTheBlamedThreadAndBoundsLongTraces() async throws {
+        let tree = Data("""
+        {"callStackPerThread": true, "callStacks": [
+          {"threadAttributed": false, "callStackRootFrames": [{"binaryName": "other", "address": 1, "offsetIntoBinaryTextSegment": 1, "binaryUUID": "A"}]},
+          {"threadAttributed": true, "callStackRootFrames": [
+            {"binaryName": "libswiftCore.dylib", "address": 6917529027641081856, "offsetIntoBinaryTextSegment": 123, "binaryUUID": "B",
+             "subFrames": [{"binaryName": "Hoshi Reader", "address": 4096, "offsetIntoBinaryTextSegment": 45, "binaryUUID": "C",
+                            "subFrames": [{"binaryName": "dyld", "address": 16, "offsetIntoBinaryTextSegment": 6, "binaryUUID": "D"}]}]}]}]}
+        """.utf8)
+        XCTAssertEqual(DiagnosticsReport.trace(fromCallStackTree: tree), """
+        0  libswiftCore.dylib  0x6000000000000000  +123  B
+        1  Hoshi Reader  0x1000  +45  C
+        2  dyld  0x10  +6  D
+        """)
+        XCTAssertEqual(DiagnosticsReport.trace(fromCallStackTree: tree, frameLimit: 2)?.components(separatedBy: "\n").count, 2)
+        XCTAssertNil(DiagnosticsReport.trace(fromCallStackTree: Data("not json".utf8)))
+        XCTAssertEqual(DiagnosticsReport.crashTitle(exceptionType: 1, signal: 11), "EXC_BAD_ACCESS (SIGSEGV)")
+        XCTAssertEqual(DiagnosticsReport.crashTitle(exceptionType: nil, signal: 6), "SIGABRT")
+        XCTAssertEqual(DiagnosticsReport.crashTitle(exceptionType: 99, signal: nil), "Exception 99")
+        XCTAssertEqual(DiagnosticsReport.exitLines(foreground: [("closed normally", 3), ("memory limit", 0)], background: [("memory needed by other apps", 2)]),
+                       ["Open, closed normally: 3", "In the background, memory needed by other apps: 2"])
+
+        let long = String(repeating: "a", count: 20_000) + String(repeating: "z", count: 20_000)
+        let bounded = DiagnosticsReport.bounded(long)
+        XCTAssertTrue(bounded.hasPrefix(String(repeating: "a", count: 6_000) + "\n[trace truncated"))
+        XCTAssertTrue(bounded.hasSuffix(String(repeating: "z", count: 6_000)))
+        XCTAssertEqual(DiagnosticsReport.bounded("short"), "short")
+
+        // An uncaught exception is written as the app goes down; only the newest five are kept.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("crashes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        for index in 0..<7 {
+            XCTAssertNotNil(DiagnosticsLog.saveCapturedCrash(name: "NSRangeException", reason: "index \(index) beyond bounds", symbols: ["0 CoreFoundation", "1 Hoshi Reader"],
+                                                             header: ["Version: 1.0 (1)"], time: start.addingTimeInterval(Double(index)), in: directory))
+        }
+        let captured = DiagnosticsLog.capturedCrashes(in: directory)
+        XCTAssertEqual(captured.map(\.time), (2..<7).reversed().map { start.addingTimeInterval(Double($0)) })
+        XCTAssertTrue(try XCTUnwrap(captured.first).text.contains("Reason: index 6 beyond bounds\n\n0 CoreFoundation\n1 Hoshi Reader"))
+
+        let app = DiagnosticsReport.App(bundle: "com.example.hoshi", version: "1.0 (1)", system: "27.0.0", device: "iPad14,1")
+        XCTAssertTrue(DiagnosticsReport(app: app).text.contains("Nothing has been recorded."))
+        let report = DiagnosticsReport(app: app, capturedCrashes: Array(captured.prefix(1)), events: [
+            DiagnosticEvent(kind: .pageProcess, time: start, version: "1.0 (1)", title: "Manga page process ended", details: ["On screen: yes"]),
+            DiagnosticEvent(kind: .crash, time: start, version: "1.0 (1)", title: "EXC_CRASH (SIGABRT)", details: ["iOS: 27.0"], trace: long)])
+        XCTAssertEqual(report.sections.map { String($0.prefix(while: { $0 != "\n" })) },
+                       ["Hoshi Reader Diagnostics", "Captured Crash 1", "Crash 1", "Page Restart 1"])
+        XCTAssertTrue(report.sections[0].hasSuffix("Bundle: com.example.hoshi\nVersion: 1.0 (1)\niOS: 27.0.0\nDevice: iPad14,1"))
+        XCTAssertTrue(report.sections[2].contains("Time: 2027-01-15T08:00:00Z\nVersion: 1.0 (1)\nEXC_CRASH (SIGABRT)\niOS: 27.0\nTrace:\naaaa"))
+        XCTAssertTrue(report.sections[2].contains("[trace truncated"))
+        XCTAssertFalse(report.text.contains("Nothing has been recorded."))
+        XCTAssertEqual(DiagnosticsReport.fileName(now: start), "hoshi-diagnostics-20270115-080000.txt")
+    }
+
+    /// Storage Cleanup offers only files the app is known to leave behind, never one written
+    /// recently enough to belong to running work, and removes only what still qualifies.
+    func testStorageCleanupOffersOnlyTheAppsOwnIdleLeftovers() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("cleanup-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let temporary = root.appendingPathComponent("tmp"), books = root.appendingPathComponent("Books")
+        let dictionaries = root.appendingPathComponent("Dictionaries"), received = root.appendingPathComponent("Inbox")
+        let now = Date(), old = now.addingTimeInterval(-3600)
+        func make(_ url: URL, bytes: Int = 10, modified: Date) throws {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(count: bytes).write(to: url)
+            try fm.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+        }
+        let restore = temporary.appendingPathComponent("hoshi-restore-1")
+        try make(restore.appendingPathComponent("Books/a/metadata.json"), bytes: 100, modified: old)
+        try make(restore.appendingPathComponent("Books/a/cover.jpg"), bytes: 200, modified: old)
+        for folder in [restore, restore.appendingPathComponent("Books"), restore.appendingPathComponent("Books/a")] {
+            try fm.setAttributes([.modificationDate: old], ofItemAtPath: folder.path)
+        }
+        let export = temporary.appendingPathComponent("Books_2026-11-10_10-00-00.hoshi")
+        try make(export, bytes: 1000, modified: old)
+        let copy = temporary.appendingPathComponent("\(UUID().uuidString).epub")
+        try make(copy, bytes: 50, modified: old)
+        let running = temporary.appendingPathComponent("hoshi-sync-stage-2")
+        try make(running.appendingPathComponent("page.jpg"), modified: now.addingTimeInterval(-30))
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: running.path)
+        let foreign = temporary.appendingPathComponent("WebKit/MediaCache/clip")
+        try make(foreign, modified: old)
+        let system = temporary.appendingPathComponent("CFNetworkDownload_abc.tmp")
+        try make(system, modified: old)
+        let manga = books.appendingPathComponent(".MokuroImport-1/pages/1.jpg")
+        try make(manga, bytes: 300, modified: old)
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: manga.deletingLastPathComponent().path)
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: manga.deletingLastPathComponent().deletingLastPathComponent().path)
+        let book = books.appendingPathComponent("A Book/metadata.json")
+        try make(book, modified: old)
+        let hidden = books.appendingPathComponent(".hack/metadata.json")
+        try make(hidden, modified: old)
+        let dictionary = dictionaries.appendingPathComponent("Term/.import-1/index.json")
+        try make(dictionary, bytes: 40, modified: old)
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: dictionary.deletingLastPathComponent().path)
+        let installed = dictionaries.appendingPathComponent("Term/JMdict/index.json")
+        try make(installed, modified: old)
+        let waiting = received.appendingPathComponent("volume.cbz")
+        try make(waiting, modified: old)
+        let stale = received.appendingPathComponent("old.epub")
+        try make(stale, bytes: 70, modified: now.addingTimeInterval(-2 * 86_400))
+
+        let cleanup = StorageCleanup(temporary: temporary, books: books, dictionaries: dictionaries, received: received, now: now)
+        let shown = cleanup.scan()
+        XCTAssertEqual(shown.map(\.id), [.temporary, .imports, .received])
+        XCTAssertEqual(Set(shown[0].targets.map(\.lastPathComponent)), [restore.lastPathComponent, export.lastPathComponent, copy.lastPathComponent])
+        XCTAssertEqual(shown[0].size, 1350)
+        XCTAssertEqual(shown[0].count, 4)
+        XCTAssertEqual(shown[1].size, 340)
+        XCTAssertEqual(shown[1].count, 2)
+        XCTAssertEqual(shown[2].targets.map(\.lastPathComponent), ["old.epub"])
+
+        // An import picked the export up again while the list was on screen.
+        try fm.setAttributes([.modificationDate: now], ofItemAtPath: export.path)
+        let after = cleanup.clean(shown)
+        XCTAssertEqual(after, [])
+        for kept in [export, running.appendingPathComponent("page.jpg"), foreign, system, book, hidden, installed, waiting] {
+            XCTAssertTrue(fm.fileExists(atPath: kept.path), kept.lastPathComponent)
+        }
+        for removed in [restore, copy, manga.deletingLastPathComponent().deletingLastPathComponent(), dictionary.deletingLastPathComponent(), stale] {
+            XCTAssertFalse(fm.fileExists(atPath: removed.path), removed.lastPathComponent)
+        }
+    }
+
     /// AnkiMobile and the app's own pages fetch a card's cover and audio through localhost. The
     /// server listens on the loopback interface only and must still answer there.
     @MainActor func testLocalFileServerAnswersOnLocalhost() async throws {

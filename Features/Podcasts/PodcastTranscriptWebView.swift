@@ -102,7 +102,9 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             cancel()
             ready = false; document = nil; style = ""; styleInputs = nil; stateSignature = ""
-            guard recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+            let visible = LostPageRecovery.isVisible(webView), reload = recovery.shouldReload(visible: visible)
+            DiagnosticsCollector.shared.pageProcessEnded("Podcast transcript", visible: visible, reloaded: reload)
+            guard reload else { return }
             webView.loadHTMLString(PodcastTranscriptWebView.skeleton, baseURL: nil)
         }
 

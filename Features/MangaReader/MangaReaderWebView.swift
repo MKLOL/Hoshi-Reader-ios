@@ -482,7 +482,8 @@ struct MangaReaderWebView: UIViewRepresentable {
         /// iOS can discard the page's process while the app is in the background; the page is
         /// then blank until something loads it again.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            recoverCurrentPage()
+            let reloaded = recoverCurrentPage()
+            DiagnosticsCollector.shared.pageProcessEnded("Manga", visible: LostPageRecovery.isVisible(webView), reloaded: reloaded)
         }
 
         /// A newer page replacing this one also ends its navigation; only the page still
@@ -493,10 +494,12 @@ struct MangaReaderWebView: UIViewRepresentable {
             recoverCurrentPage()
         }
 
-        private func recoverCurrentPage() {
+        @discardableResult
+        private func recoverCurrentPage() -> Bool {
             guard let webView = parent.controller.webView,
-                  recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+                  recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return false }
             parent.controller.reissueCurrentPage()
+            return true
         }
 
         @objc private func readerBecameVisible() {

@@ -89,6 +89,13 @@ struct AdvancedView: View {
                     Label("Backup", systemImage: "externaldrive")
                 }
                 .foregroundStyle(.primary)
+
+                NavigationLink {
+                    StorageCleanupView()
+                } label: {
+                    Label("Storage Cleanup", systemImage: "trash")
+                }
+                .foregroundStyle(.primary)
             }
             
         }

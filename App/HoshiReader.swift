@@ -26,6 +26,7 @@ struct HoshiReaderApp: App {
     private var shortcutHandler = ShortcutHandler.shared
     
     init() {
+        DiagnosticsCollector.shared.start()
         HttpSyncBackgroundDownloads.shared.restore()
         TokenStorage.clearOldKeys()
         BookStorage.migrateFromDocuments()

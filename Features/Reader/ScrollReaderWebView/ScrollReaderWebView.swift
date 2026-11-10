@@ -284,7 +284,9 @@ struct ScrollReaderWebView: UIViewRepresentable {
         /// page whose overscroll would turn the chapter. Load the chapter again at the reader's
         /// last saved place.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            guard recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+            let visible = LostPageRecovery.isVisible(webView), reload = recovery.shouldReload(visible: visible)
+            DiagnosticsCollector.shared.pageProcessEnded("EPUB (continuous)", visible: visible, reloaded: reload)
+            guard reload else { return }
             reloadLostPage(webView)
         }
         
