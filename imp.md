@@ -730,13 +730,18 @@ with that rule and 0.08 s without it; the same held with the word boxes set to `
 contents`, so the runs, not `nowrap`, are what cost.
 
 - `ReaderTextStyle.lineBoxCSS` now uses `block inline-box replaced` for the paged reader, the
-  continuous reader and podcast transcripts. Across 27 text constructs, two orientations, four
-  fonts and five line heights, line sizes are identical for prose, ruby (including `rp` and
-  long readings), emphasis, tate-chu-yoko, gaiji images, links and rare kanji. Lines holding
+  continuous reader and podcast transcripts. Across 27 single-line constructs, two orientations,
+  four fonts and five line heights, line sizes are identical for prose, ruby (including `rp`
+  and long readings), emphasis, tate-chu-yoko, gaiji images, links and rare kanji. Lines holding
   inline text set larger than the paragraph, or sup/sub, are 1–2 px taller (up to 5 px for
   sup/sub at a line height of 1.2), and at that tight line height a line with an emoji or a
-  Latin fallback font is 1.5–3.5 px shorter. At line heights of 1.65 and above nothing differs
-  in vertical text.
+  Latin fallback font is 1.5–3.5 px shorter.
+- **Correction after the fourth review below:** those samples were single lines, and ruby does
+  differ in a paragraph of several lines. With the default line height nothing changes (a
+  four-line vertical paragraph with ruby is 145.44 px under both rules). With a line height set
+  (1.5, 1.65 and 2.0 were measured), each line with furigana after the first was 43.3 px in
+  vertical and 44.7 px in horizontal text and is now 42.0 px, the same as the first line: 1.3
+  and 2.7 px tighter per line, so a page holds marginally more. Plain lines are unchanged.
 - `textlayout.js` gives break placement a budget of 800 ms; past it the confirmed breaks stay
   and the rest of the chapter keeps ordinary page breaks. A document over 120,000 visible
   characters is left as the publisher wrote it, with no word boxes or breaks.
@@ -946,4 +951,63 @@ the iPad.
 
 A normal launch was refused with `Locked` on each attempt, so the new build has **not** been
 started or seen running on the device. Nothing in this pass was observed on the iPad itself.
+
+### Fourth reviewer: the fixes themselves
+
+One more independent reviewer read only the commits of this pass (`1bc6cc0..571a61a`), which
+nobody but their author had read, and then the parts of the app that take outside input.
+Verdict: nothing that should keep the build off the iPad and nothing that can damage the
+library, bookmarks or reading history. What it found, and what was done:
+
+- **A lost EPUB page could stay blank.** The reload counter was cleared only when a chapter
+  finished restoring, and a page that is not drawn never reports that. Three losses in the
+  background used up the reloads and the fourth left a hidden page. `LostPageRecovery` now
+  decides for all four web views: a page lost while its scene is not in front is loaded again
+  when the scene comes forward, and a visible page gets at most three reloads in thirty seconds,
+  with another chance at the next activation. That bounds a page that dies after it has loaded,
+  which the old counter did not.
+- **A swipe while a chapter reloads.** Found by the recovery test while making the next fix: a
+  page without the reader's scripts must not be read as the end of a chapter, since a chapter
+  that is still loading has none either. Only a document the setup script has marked is left on
+  a swipe.
+- **A spine item that is not HTML** (a bare SVG image, or XHTML without its namespace) made the
+  setup script fail, so the page stayed hidden for good. It is now shown as it is and a swipe
+  leaves it. Already there before this branch.
+- **Restore refused a Books backup containing a book titled "Term", "Frequency" or "Pitch".**
+  A folder counts as a kind of dictionary only when it holds no book metadata.
+- **The ruby measurement above was wrong**; see the correction there.
+- **The large-library test replaced and removed the host app's own usage files** for the last
+  thirty days. It now writes only days that are missing and removes only those.
+- **A title that starts with a dot** (".hack//SIGN") was imported into a hidden folder and never
+  listed. EPUB and manga imports turn a leading dot into an underscore; the sync ID is the same
+  either way. The News importer is unchanged, because its folder name feeds the ID that Android
+  derives too. Already there before this branch.
+- **The local file server listened on every interface.** Everything it serves is fetched through
+  `localhost`, so it now listens on the loopback interface only; a hosted test fetches a clip
+  that way. Already there before this branch.
+
+Checked by that reviewer and found sound: the launch-time staging cleanup, the sync ID grammar
+against Android's, the date key readers (a differential run of 60,000 keys plus 23,650 days in 13
+zones), the usage lane and podcast listing equivalences, the restore and progress changes in
+`reader.js`, the `textlayout.js` cutoff and budget, the `popup.js` tag list against Yomitan's
+schema, the chat log guard, and that every data-replacing UI-test hook is behind the simulator
+gate.
+
+Left open from this review:
+- `hoshi://` links act without confirmation: one that the user agrees to open can make the app
+  download and import a book from any URL, save an article, or mark a word as mined.
+- The 800 ms pagination budget has no test that drives it to expire.
+- The paged-reader tests call the swipe handler directly, so they do not cover hit-testing.
+- Not read: `NewsView`, `NewsStore`, the RSS parser, `news-extract.js`, the Anki import, the
+  Google Drive handlers and `LookupEngine`.
+
+New tests: `testALostPageIsLoadedAgainOnceItCanBeSeenAndNotWithoutEnd`,
+`testASpineItemThatIsNotHTMLIsShownAndASwipeLeavesIt`, `testLocalFileServerAnswersOnLocalhost`,
+and the book-named-like-a-dictionary and leading-dot cases in
+`testABackupIsOnlyRestoredOverTheKindOfCollectionItHolds`.
+
+The gate exited **0** on `a58e6de`, the commit with these fixes: 20 real-server tests, 108
+Python regressions, **342** hosted XCTest cases with no failures or skipped scenarios, and the
+same 8 UI cases. The poll measured 2.15 / 2.61 / 2.01 / 2.23 ms and a manga page turn 7.41 ms
+CPU. Log: `build/claude-final-gate-3.log`.
 
