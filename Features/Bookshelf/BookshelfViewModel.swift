@@ -337,21 +337,50 @@ class BookshelfViewModel {
         }
     }
     
+    /// The EPUB files among `picked`, with every folder replaced by the EPUBs inside it at any
+    /// depth, in name order.
+    nonisolated static func epubs(in picked: [URL]) -> [URL] {
+        picked.flatMap { url -> [URL] in
+            let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            guard isFolder, url.pathExtension.lowercased() != "epub" else { return [url] }
+            let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            return (walker?.allObjects as? [URL] ?? [])
+                .filter { $0.pathExtension.lowercased() == "epub" }
+                .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        }
+    }
+
     func importBooks(result: Result<[URL], Error>) {
         do {
-            let urls = try result.get()
+            let picked = try result.get()
+            if picked.isEmpty {
+                return
+            }
+            // The files inside a picked folder can be read only while the folder's own access
+            // is held, so it is kept until the last of them has been imported.
+            let folders = picked.filter { url in
+                guard url.startAccessingSecurityScopedResource() else { return false }
+                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true { return true }
+                url.stopAccessingSecurityScopedResource()
+                return false
+            }
+            let release = { folders.forEach { $0.stopAccessingSecurityScopedResource() } }
+            let urls = Self.epubs(in: picked)
             if urls.isEmpty {
+                release()
+                showError(message: "No EPUB files found.")
                 return
             }
             
             if urls.count == 1 {
                 importBook(result: .success(urls[0]))
+                release()
                 return
             }
             
             importBooksProgress = "Importing 1 / \(urls.count)..."
             Task {
-                defer { importBooksProgress = nil }
+                defer { importBooksProgress = nil; release() }
                 await Task.yield()
                 
                 var failed: [String] = []

@@ -94,7 +94,7 @@ struct BookshelfView: View {
                     )
                     .fileImporter(
                         isPresented: $viewModel.isImportingEpub,
-                        allowedContentTypes: [.epub],
+                        allowedContentTypes: [.epub, .folder],
                         allowsMultipleSelection: true,
                         onCompletion: viewModel.importBooks
                     )

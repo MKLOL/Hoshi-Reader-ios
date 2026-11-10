@@ -2,6 +2,28 @@ import XCTest
 @testable import Hoshi_Reader
 
 nonisolated final class RecentParitySafetyTests: XCTestCase {
+    /// Picking a folder imports every EPUB inside it, at any depth, and nothing else from it.
+    func testAPickedFolderYieldsTheEpubsInsideItInNameOrder() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("epub-folder-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Library")
+        for name in ["Series/Volume 10.epub", "Series/Volume 2.epub", "Other.EPUB", "notes.txt", "Series/cover.jpg", ".hidden/Secret.epub"] {
+            let file = folder.appendingPathComponent(name)
+            try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: file)
+        }
+        let single = root.appendingPathComponent("Single.epub")
+        try Data("x".utf8).write(to: single)
+        let unpacked = root.appendingPathComponent("Unpacked.epub", isDirectory: true)
+        try fm.createDirectory(at: unpacked.appendingPathComponent("META-INF"), withIntermediateDirectories: true)
+        let found = BookshelfViewModel.epubs(in: [single, folder, unpacked])
+        XCTAssertEqual(found.map(\.lastPathComponent), ["Single.epub", "Other.EPUB", "Volume 2.epub", "Volume 10.epub", "Unpacked.epub"])
+        XCTAssertEqual(BookshelfViewModel.epubs(in: [root.appendingPathComponent("empty")]).count, 1, "a file that is not a folder is passed on as it is")
+        try fm.createDirectory(at: root.appendingPathComponent("NoBooks"), withIntermediateDirectories: true)
+        XCTAssertEqual(BookshelfViewModel.epubs(in: [root.appendingPathComponent("NoBooks")]), [])
+    }
+
     func testAnkiRequiresAnExplicitSuccessfulEnvelopeAndHTTPStatus() throws {
         let url = URL(string: "http://127.0.0.1:8765")!
         let ok = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
