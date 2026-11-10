@@ -207,6 +207,11 @@ struct ReaderView: View {
         return result.joined(separator: " ")
     }
     
+    /// "Always Show Progress" keeps the progress at the bottom, where it stays in focus mode.
+    private var showsProgressAtTop: Bool {
+        userConfig.readerShowProgressTop && !userConfig.readerAlwaysShowProgress && !progressString.isEmpty
+    }
+    
     private var statisticsString: String {
         var result: [String] = []
         if userConfig.readerShowReadingSpeed {
@@ -224,7 +229,7 @@ struct ReaderView: View {
         VStack(spacing: 0) {
             Color.clear
                 .frame(height: max(topSafeArea, 25) + webViewPadding
-                       + (userConfig.readerShowProgressTop && !progressString.isEmpty ? lineHeight : 0)
+                       + (showsProgressAtTop ? lineHeight : 0)
                        + ((userConfig.readerShowTitle
                            || (userConfig.enableStatistics && userConfig.readerShowStatisticsToggle)
                            || (userConfig.enableSasayaki && userConfig.readerShowSasayakiToggle && viewModel.sasayakiPlayer.hasAudio)
@@ -580,7 +585,7 @@ struct ReaderView: View {
                 }
                 .padding(.horizontal, 15)
                 
-                if userConfig.readerShowProgressTop && !progressString.isEmpty {
+                if showsProgressAtTop {
                     Text(progressString)
                         .font(.caption)
                         .foregroundStyle(userConfig.theme == .custom ? AnyShapeStyle(userConfig.customInfoColor) : AnyShapeStyle(.secondary))
@@ -593,17 +598,16 @@ struct ReaderView: View {
         }
         .overlay(alignment: .bottom) {
             VStack {
-                if !focusMode {
-                    if userConfig.enableStatistics && !statisticsString.isEmpty {
-                        Text(statisticsString)
-                            .font(.caption)
-                            .foregroundStyle(userConfig.theme == .custom ? AnyShapeStyle(userConfig.customInfoColor) : AnyShapeStyle(.secondary))
-                    }
-                    if !userConfig.readerShowProgressTop && !progressString.isEmpty {
-                        Text(progressString)
-                            .font(.caption)
-                            .foregroundStyle(userConfig.theme == .custom ? AnyShapeStyle(userConfig.customInfoColor) : AnyShapeStyle(.secondary))
-                    }
+                if !focusMode, userConfig.enableStatistics && !statisticsString.isEmpty {
+                    Text(statisticsString)
+                        .font(.caption)
+                        .foregroundStyle(userConfig.theme == .custom ? AnyShapeStyle(userConfig.customInfoColor) : AnyShapeStyle(.secondary))
+                }
+                if !progressString.isEmpty, userConfig.readerAlwaysShowProgress || (!focusMode && !userConfig.readerShowProgressTop) {
+                    Text(progressString)
+                        .font(.caption)
+                        .foregroundStyle(userConfig.theme == .custom ? AnyShapeStyle(userConfig.customInfoColor) : AnyShapeStyle(.secondary))
+                        .accessibilityIdentifier("reader-progress-bottom")
                 }
             }
             .monospacedDigit()

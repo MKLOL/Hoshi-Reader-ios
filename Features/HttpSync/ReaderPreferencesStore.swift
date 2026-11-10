@@ -156,6 +156,7 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         boolean("showCharacters", \.readerShowCharacters, true)
         boolean("showPercentage", \.readerShowPercentage, true)
         boolean("showProgressTop", \.readerShowProgressTop, true)
+        boolean("alwaysShowProgress", \.readerAlwaysShowProgress, false)
         boolean("popupFullWidth", \.popupFullWidth, false)
         boolean("popupSwipeToDismiss", \.popupSwipeToDismiss, false)
         boolean("mangaSingleTapLookup", \.mangaSingleTapLookup, false)

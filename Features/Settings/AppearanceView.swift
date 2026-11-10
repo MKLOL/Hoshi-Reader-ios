@@ -228,6 +228,10 @@ struct AppearanceView: View {
                     Toggle("Show Percentage", isOn: $userConfig.readerShowPercentage)
                     
                     if userConfig.readerShowCharacters || userConfig.readerShowPercentage {
+                        Toggle("Always Show Progress", isOn: $userConfig.readerAlwaysShowProgress)
+                    }
+                    
+                    if (userConfig.readerShowCharacters || userConfig.readerShowPercentage) && !userConfig.readerAlwaysShowProgress {
                         HStack {
                             Text("Progress Position")
                             Spacer()

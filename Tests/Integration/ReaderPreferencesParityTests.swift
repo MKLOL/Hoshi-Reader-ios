@@ -92,6 +92,35 @@ nonisolated final class ReaderPreferencesParityTests: XCTestCase {
         XCTAssertEqual(try ReaderPreferencesStore.shared.snapshot()["keepScreenOnWhileReading"]?.value, .bool(false))
     }
 
+    /// These reader settings were carried unused until iOS gained them. A choice made on Android
+    /// before then is applied the first time the setting is known, and a local edit is published.
+    @MainActor func testReaderSettingsFirstChosenOnAndroidAreAppliedOnceIOSHasThem() throws {
+        let defaults = UserDefaults.standard
+        let keys = ["blurImages", "paragraphSpacing", "readerAlwaysShowProgress"]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            ReaderPreferencesStore.shared.reset()
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        ReaderPreferencesStore.shared.reset()
+        let config = UserConfig()
+        XCTAssertFalse(config.blurImages); XCTAssertEqual(config.paragraphSpacing, 0); XCTAssertFalse(config.readerAlwaysShowProgress)
+        XCTAssertNil(try ReaderPreferencesStore.shared.snapshot()["blurImages"], "an untouched default is not published")
+        XCTAssertTrue(try ReaderPreferencesStore.shared.merge([
+            "blurImages": .init(value: .bool(true), editedAt: 10, deviceId: "android-a"),
+            "paragraphSpacing": .init(value: .number(1.2), editedAt: 11, deviceId: "android-a"),
+            "alwaysShowProgress": .init(value: .bool(true), editedAt: 12, deviceId: "android-a")]))
+        XCTAssertTrue(config.blurImages); XCTAssertEqual(config.paragraphSpacing, 1.2); XCTAssertTrue(config.readerAlwaysShowProgress)
+        XCTAssertTrue(defaults.bool(forKey: "blurImages")); XCTAssertTrue(defaults.bool(forKey: "readerAlwaysShowProgress"))
+        config.paragraphSpacing = 0.5
+        let edited = try XCTUnwrap(try ReaderPreferencesStore.shared.snapshot()["paragraphSpacing"])
+        XCTAssertEqual(edited.value, .number(0.5)); XCTAssertEqual(edited.deviceId, ReaderPreferencesStore.shared.deviceId)
+        XCTAssertGreaterThan(edited.editedAt, 11)
+    }
+
     @MainActor func testEmptyInstallationPublishesNoDefaultsAndClocksHaveStableTieBreak() async {
         let store = PreferencesMemoryStore(), kv = PreferencesMemoryKV()
         let outcome = await HttpReaderPreferencesLane(store: store).run(transport: kv)

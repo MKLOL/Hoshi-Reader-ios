@@ -299,6 +299,57 @@ nonisolated final class ReaderLifetimeTests: XCTestCase {
         XCTAssertTrue(events.saved.isEmpty, "a document without pages saves no place")
     }
 
+    /// Blur Images hides an illustration until it is tapped, and that tap is not also a tap on
+    /// the page. Paragraph Spacing sets the gap between paragraphs along the way the text grows.
+    @MainActor func testBlurredImagesClearOnTheirOwnTapAndParagraphsKeepTheChosenGap() async throws {
+        let defaults = UserDefaults.standard
+        let keys = ["blurImages", "layoutAdvanced", "paragraphSpacing"]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            ReaderPreferencesStore.shared.reset()
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        defaults.set(true, forKey: "blurImages"); defaults.set(true, forKey: "layoutAdvanced"); defaults.set(1.5, forKey: "paragraphSpacing")
+        ReaderPreferencesStore.shared.reset()
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let picture = UIGraphicsImageRenderer(size: CGSize(width: 300, height: 300), format: format).image { context in
+            UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 300, height: 300))
+        }
+        let source = "data:image/png;base64," + (try XCTUnwrap(picture.pngData())).base64EncodedString()
+        let small = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20), format: format).image { _ in }
+        let gaiji = "data:image/png;base64," + (try XCTUnwrap(small.pngData())).base64EncodedString()
+        let reader = try PagedReader(document: "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>Chapter</title></head><body>"
+            + "<p id=\"first\">一つ目の段落です。<img id=\"gaiji\" src=\"\(gaiji)\"/></p><p id=\"second\">二つ目の段落です。</p><p><img id=\"picture\" src=\"\(source)\"/></p></body></html>", progress: 0)
+        defer { reader.close() }
+        let events = reader.events
+        try await reader.settle("the chapter to be shown") { events.restores == 1 }
+        let page = try reader.page()
+        func value(_ script: String) async throws -> String {
+            let result = try await page.evaluateJavaScript("String(\(script))")
+            return try XCTUnwrap(result as? String)
+        }
+        let blurred = try await value("document.getElementById('picture').classList.contains('blurred') + ' ' + getComputedStyle(document.getElementById('picture')).filter")
+        XCTAssertEqual(blurred, "true blur(24px)")
+        let inline = try await value("document.getElementById('gaiji').classList.contains('blurred')")
+        XCTAssertEqual(inline, "false", "small inline pictures stand in for characters and stay readable")
+        let tapped = try await value("""
+            (() => { let reached = false; document.body.addEventListener('click', () => { reached = true; }, { once: true });
+                     document.getElementById('picture').click();
+                     return document.getElementById('picture').classList.contains('blurred') + ' ' + reached; })()
+            """)
+        XCTAssertEqual(tapped, "false false")
+        let gap = try await value("""
+            (() => { const style = getComputedStyle(document.getElementById('second'));
+                     const sides = \(reader.vertical) ? [style.marginRight, style.marginLeft] : [style.marginTop, style.marginBottom];
+                     return sides.map(side => parseFloat(side) / parseFloat(style.fontSize)).join(' '); })()
+            """)
+        XCTAssertEqual(gap, "1.5 1.5")
+        XCTAssertEqual(ReaderTextStyle.paragraphSpacingCSS(nil, verticalWriting: true), "")
+        XCTAssertEqual(ReaderTextStyle.paragraphSpacingCSS(0, verticalWriting: false), "p { margin-top: 0.0em !important; margin-bottom: 0.0em !important; }")
+    }
+
     @MainActor private func waitUntil(_ condition: @escaping @MainActor () async -> Bool) async throws {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
