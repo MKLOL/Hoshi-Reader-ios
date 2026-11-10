@@ -97,7 +97,8 @@ struct MangaReaderView: View {
 
     private var textPreviewSource: MangaTextPreviewSource? {
         guard let book = model.book, let root = model.bookRoot else { return nil }
-        return MangaTextPreviewSource(book: book, root: root, pageIndex: model.pageIndex)
+        return MangaTextPreviewSource(book: book, root: root, pageIndex: model.pageIndex,
+            twoPageEnabled: model.twoPageEnabled, viewport: controller.captureViewport())
     }
 
     private let backgroundColor: Color = .black

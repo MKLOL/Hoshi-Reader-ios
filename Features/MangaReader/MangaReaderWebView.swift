@@ -23,6 +23,12 @@ import QuartzCore
 import SwiftUI
 import WebKit
 
+nonisolated struct MangaViewportState: Sendable {
+    let zoomScale: Double
+    let offsetX: Double
+    let offsetY: Double
+}
+
 /// Drives the manga WebView from SwiftUI: load a page, clear reveals before a crop, and request
 /// the image-pixel crop rect for a host-pixel drag rectangle.
 @Observable
@@ -147,6 +153,20 @@ final class MangaWebViewController {
         let zoomed = raw > webView.scrollView.minimumZoomScale + 0.01
         let panned = abs(contentOffset.x) > 1 || abs(contentOffset.y) > 1
         isZoomedOrScrollable = zoomed || panned
+    }
+
+    func captureViewport() -> MangaViewportState? {
+        guard let scroll = webView?.scrollView else { return nil }
+        return MangaViewportState(zoomScale: Double(scroll.zoomScale),
+            offsetX: Double(scroll.contentOffset.x), offsetY: Double(scroll.contentOffset.y))
+    }
+
+    func restoreViewport(_ viewport: MangaViewportState) {
+        guard let scroll = webView?.scrollView, viewport.zoomScale.isFinite,
+              viewport.offsetX.isFinite, viewport.offsetY.isFinite else { return }
+        scroll.setZoomScale(CGFloat(viewport.zoomScale), animated: false)
+        scroll.setContentOffset(CGPoint(x: viewport.offsetX, y: viewport.offsetY), animated: false)
+        syncHostViewport()
     }
 
     func uiTestViewportProbeLabel() -> String {

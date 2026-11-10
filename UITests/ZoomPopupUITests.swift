@@ -221,18 +221,35 @@ final class ZoomPopupUITests: XCTestCase {
         app.buttons["manga-go-to-page-confirm"].tap()
         let probe = app.descendants(matching: .any)["manga-viewport-probe"].firstMatch
         XCTAssertTrue(waitForViewport(probe, containing: "page=2;"))
+        let readerFrame = app.webViews.firstMatch.frame
         app.buttons["manga-options-menu"].tap()
         app.buttons["manga-preview-text-size"].tap()
         let page = app.staticTexts["manga-preview-page"]
         XCTAssertTrue(page.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(page.label.contains("Page 2"), page.label)
+        func assertReaderViewport() {
+            let frame = app.webViews.firstMatch.frame
+            XCTAssertEqual(frame.width, readerFrame.width, accuracy: 0.5)
+            XCTAssertEqual(frame.height, readerFrame.height, accuracy: 0.5)
+            XCTAssertEqual(frame.minX, readerFrame.minX, accuracy: 0.5)
+            XCTAssertEqual(frame.minY, readerFrame.minY, accuracy: 0.5)
+        }
+        assertReaderViewport()
+        app.buttons["Hide controls"].tap()
+        assertReaderViewport()
+        app.buttons["Show controls"].tap()
+        assertReaderViewport()
         app.buttons["Previous page"].tap()
         app.buttons["Strong"].tap()
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
             object: app.descendants(matching: .any)["manga-preview-loading"].firstMatch)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
         saveScreenshot(app, name: "ios-manga-page-adjusted")
-        app.segmentedControls.buttons["Original"].tap()
+        app.buttons["Hide controls"].tap()
+        assertReaderViewport()
+        saveScreenshot(app, name: "ios-manga-page-fullscreen")
+        app.buttons["Show controls"].tap()
+        app.buttons["Original"].tap()
         let originalReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
             object: app.descendants(matching: .any)["manga-preview-loading"].firstMatch)
         XCTAssertEqual(XCTWaiter.wait(for: [originalReady], timeout: 10), .completed)

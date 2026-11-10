@@ -38,6 +38,10 @@ final class MangaReaderViewModel {
     /// the volume has more than one page.
     var twoPageActive: Bool { twoPageEnabled && isLandscape && (book?.pages.count ?? 0) > 1 }
 
+    static func savedTwoPagePreference(for id: UUID) -> Bool {
+        UserDefaults.standard.bool(forKey: twoPageKey(id))
+    }
+
     private static func twoPageKey(_ id: UUID) -> String { "mangaTwoPage.\(id.uuidString)" }
 
     /// The right/earlier page index of the spread containing `index`: pages pair (0,1),(2,3),…, the
@@ -81,7 +85,7 @@ final class MangaReaderViewModel {
         self.metadata = metadata
         self.startupTrace = MangaStartupTrace.forOpeningBook(metadata.id)
         self.renderCache = MangaPageRenderCache(imageLoader: imageLoader)
-        self.twoPageEnabled = UserDefaults.standard.bool(forKey: Self.twoPageKey(metadata.id))
+        self.twoPageEnabled = Self.savedTwoPagePreference(for: metadata.id)
         startupTrace.mark("model_created")
     }
 

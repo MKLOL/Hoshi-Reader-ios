@@ -129,6 +129,38 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(original as? Double), 8, accuracy: 0.1)
     }
 
+    @MainActor func testPreviewAndReaderUseIdenticalPageAndGlyphGeometryIncludingSpreads() async throws {
+        let cache = MangaPageRenderCache()
+        let measurement = """
+            (() => {
+              const rect = e => { const r = e.getBoundingClientRect(); return [r.x,r.y,r.width,r.height]; };
+              return [innerWidth,innerHeight,
+                ...[...document.querySelectorAll('.frame')].flatMap(rect),
+                ...[...document.querySelectorAll('.ocr-box')].flatMap(e => [parseFloat(getComputedStyle(e).fontSize),...rect(e)])];
+            })()
+            """
+        for viewport in [CGSize(width: 744, height: 1133), CGSize(width: 1133, height: 744)] {
+            let browser = try MangaTestBrowser(viewport: viewport)
+            defer { browser.close() }
+            let left: MokuroPage? = viewport.width > viewport.height ? page : nil
+            let readerConfig = config(amount: 75, threshold: 40, viewport: viewport)
+            try await load(await cache.htmlFor(page: page, leftPage: left, config: readerConfig), in: browser)
+            _ = try await browser.web.evaluateJavaScript("""
+                document.querySelectorAll('.ocr-box').forEach(box => {
+                  box.classList.add('revealed'); window.hoshiManga.tryWrapFallback(box); window.hoshiManga.fitFurigana(box);
+                });
+                """)
+            let normalValue = try await browser.web.evaluateJavaScript(measurement)
+            let normal = try XCTUnwrap(normalValue as? [Double])
+            var preview = readerConfig
+            preview.textSizePreview = true
+            try await load(await cache.htmlFor(page: page, leftPage: left, config: preview), in: browser)
+            let actualValue = try await browser.web.evaluateJavaScript(measurement)
+            let actual = try XCTUnwrap(actualValue as? [Double])
+            XCTAssertEqual(actual, normal, "Preview must use the reader's exact image and OCR geometry")
+        }
+    }
+
     func testAdjustableEnlargementUsesTheSameCurveAsThePreview() {
         XCTAssertEqual([12, 20, 30, 40].map { MangaTextEnlargement().fontSize(original: $0) }, [21, 25, 30, 40])
         XCTAssertEqual([12, 20, 30, 40].map { MangaTextEnlargement(amount: 75, threshold: 40).fontSize(original: $0) }, [33, 35, 37, 40])
