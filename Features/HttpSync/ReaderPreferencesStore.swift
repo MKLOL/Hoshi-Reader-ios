@@ -138,6 +138,7 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
                 write: { c, v in if case .number(let n) = v { c[keyPath: key] = n } })
         }
         boolean("disablePageTurnAnimation", \.disablePageTurnAnimation, false)
+        boolean("keepScreenOnWhileReading", \.keepScreenOnWhileReading, false)
         boolean("systemLightSepia", \.systemLightSepia, false)
         boolean("sepiaInvertInDark", \.sepiaInvertInDark, false)
         boolean("verticalWriting", \.verticalWriting, true)

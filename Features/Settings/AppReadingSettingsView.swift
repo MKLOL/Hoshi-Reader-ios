@@ -33,6 +33,13 @@ struct AppReadingSettingsView: View {
                     ColorPicker("Info Color", selection: $userConfig.customInfoColor)
                 }
             }
+            Section {
+                Toggle("Keep Screen On", isOn: $userConfig.keepScreenOnWhileReading)
+            } header: {
+                Text("Reading controls")
+            } footer: {
+                Text("Stops the screen dimming and locking while a book or manga is open.")
+            }
         }
         .navigationTitle("App & reading")
         .accessibilityIdentifier("app-reading-settings")

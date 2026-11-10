@@ -64,6 +64,7 @@ final class ReaderWindow {
         host.modalPresentationCapturesStatusBarAppearance = true
         host.view.alpha = 0
         self.hostController = host
+        ScreenAwake.readerOpened()
         
         presenter.present(host, animated: false) {
             UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]) {
@@ -75,6 +76,7 @@ final class ReaderWindow {
     func dismiss(onDismiss: (() -> Void)? = nil) {
         guard let host = hostController else { return }
         self.hostController = nil
+        ScreenAwake.readerClosed()
         lifetime?.close()
         lifetime = nil
         UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState, .curveEaseIn]) {

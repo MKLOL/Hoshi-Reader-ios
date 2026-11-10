@@ -59,6 +59,39 @@ nonisolated final class ReaderPreferencesParityTests: XCTestCase {
         XCTAssertEqual(store.records.count, 1)
     }
 
+    /// "Keep Screen On" chosen on Android arrives as a synced record. It holds the screen only
+    /// while a book or manga is open, and an audiobook pausing does not dim it under the reader.
+    @MainActor func testKeepScreenOnSyncsFromAndroidAndHoldsTheScreenOnlyWhileAReaderIsOpen() throws {
+        let defaults = UserDefaults.standard
+        let previous = defaults.object(forKey: ScreenAwake.settingKey)
+        defer {
+            ReaderPreferencesStore.shared.reset(); ScreenAwake.reset()
+            if let previous { defaults.set(previous, forKey: ScreenAwake.settingKey) } else { defaults.removeObject(forKey: ScreenAwake.settingKey) }
+        }
+        defaults.removeObject(forKey: ScreenAwake.settingKey)
+        ReaderPreferencesStore.shared.reset(); ScreenAwake.reset()
+        let config = UserConfig()
+        XCTAssertFalse(config.keepScreenOnWhileReading)
+        ScreenAwake.readerOpened()
+        XCTAssertFalse(UIApplication.shared.isIdleTimerDisabled)
+        XCTAssertTrue(try ReaderPreferencesStore.shared.merge(["keepScreenOnWhileReading": .init(value: .bool(true), editedAt: 10, deviceId: "android-a")]))
+        XCTAssertTrue(config.keepScreenOnWhileReading)
+        XCTAssertTrue(defaults.bool(forKey: ScreenAwake.settingKey))
+        XCTAssertTrue(UIApplication.shared.isIdleTimerDisabled)
+        ScreenAwake.set(.audiobook, true); ScreenAwake.set(.audiobook, false)
+        XCTAssertTrue(UIApplication.shared.isIdleTimerDisabled)
+        ScreenAwake.readerClosed()
+        XCTAssertFalse(UIApplication.shared.isIdleTimerDisabled)
+        ScreenAwake.set(.audiobook, true)
+        XCTAssertTrue(UIApplication.shared.isIdleTimerDisabled)
+        ScreenAwake.set(.audiobook, false)
+        ScreenAwake.readerOpened()
+        XCTAssertTrue(UIApplication.shared.isIdleTimerDisabled)
+        config.keepScreenOnWhileReading = false
+        XCTAssertFalse(UIApplication.shared.isIdleTimerDisabled)
+        XCTAssertEqual(try ReaderPreferencesStore.shared.snapshot()["keepScreenOnWhileReading"]?.value, .bool(false))
+    }
+
     @MainActor func testEmptyInstallationPublishesNoDefaultsAndClocksHaveStableTieBreak() async {
         let store = PreferencesMemoryStore(), kv = PreferencesMemoryKV()
         let outcome = await HttpReaderPreferencesLane(store: store).run(transport: kv)

@@ -217,6 +217,14 @@ class UserConfig {
         didSet { UserDefaults.standard.set(disablePageTurnAnimation, forKey: "disablePageTurnAnimation"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
 
+    var keepScreenOnWhileReading: Bool {
+        didSet {
+            UserDefaults.standard.set(keepScreenOnWhileReading, forKey: ScreenAwake.settingKey)
+            ReaderPreferencesStore.shared.localDidChange(self)
+            ScreenAwake.settingChanged()
+        }
+    }
+
     var mangaShowFurigana: Bool {
         didSet { UserDefaults.standard.set(mangaShowFurigana, forKey: "mangaShowFurigana"); ReaderPreferencesStore.shared.localDidChange(self) }
     }
@@ -424,6 +432,7 @@ class UserConfig {
         self.readerShowSasayakiToggle = defaults.object(forKey: "readerShowSasayakiToggle") as? Bool ?? false
         
         self.disablePageTurnAnimation = defaults.object(forKey: "disablePageTurnAnimation") as? Bool ?? false
+        self.keepScreenOnWhileReading = defaults.object(forKey: ScreenAwake.settingKey) as? Bool ?? false
         self.mangaShowFurigana = defaults.object(forKey: "mangaShowFurigana") as? Bool ?? true
         self.mangaSingleTapLookup = defaults.object(forKey: "mangaSingleTapLookup") as? Bool ?? false
         self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false

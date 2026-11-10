@@ -184,7 +184,7 @@ class SasayakiPlayer {
     }
     
     func updateIdleTimerDisabled() {
-        UIApplication.shared.isIdleTimerDisabled = isPlaying && autoScroll
+        ScreenAwake.set(.audiobook, isPlaying && autoScroll)
     }
     
     func nextCue() {
