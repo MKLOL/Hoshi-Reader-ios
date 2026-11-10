@@ -94,7 +94,8 @@ struct BackupView: View {
         .navigationTitle("Backup")
         .onDisappear {
             // The document mover owns the exported file until its completion/cancellation callback.
-            if !isExporting { operation?.cancel(); operation = nil; cleanup() }
+            // A cancelled archive stops before it would clear the overlay itself.
+            if !isExporting { operation?.cancel(); operation = nil; cleanup(); isLoading = false }
         }
     }
     

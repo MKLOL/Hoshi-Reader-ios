@@ -162,6 +162,12 @@ nonisolated enum DictionaryDownloads {
             throw DictionaryDownloadError.importFailed(detail.isEmpty ? "Invalid dictionary archive." : detail)
         }
         let title = cxxStringToSwift(result.title)
+        // The title comes from the archive and names the dictionary's folder. One that is empty,
+        // hidden or a path would be listed nowhere, or would replace a folder that is not a
+        // dictionary.
+        guard !title.isEmpty, !title.hasPrefix("."), !title.contains("/"), !title.contains("\0") else {
+            throw DictionaryDownloadError.importFailed("The dictionary has a name that cannot be used.")
+        }
         let imported = staging.appendingPathComponent(title, isDirectory: true)
         guard isImportedDictionary(at: imported) else {
             throw DictionaryDownloadError.importFailed("The dictionary import did not finish.")

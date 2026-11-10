@@ -98,13 +98,15 @@ window.hoshiReader = {
         var totalChars = 0;
         var exploredChars = 0;
         var node;
+        // One range for the whole walk. A page turn reads every text node of the chapter, and a
+        // range made for each one stays registered with the document until it is collected.
+        var range = document.createRange();
         
         while (node = walker.nextNode()) {
             var nodeLen = this.countChars(node.textContent);
             totalChars += nodeLen;
             
             if (nodeLen > 0) {
-                var range = document.createRange();
                 range.selectNodeContents(node);
                 var rect = this.getRect(range);
                 if ((vertical ? rect.top : rect.left) < 0) {
