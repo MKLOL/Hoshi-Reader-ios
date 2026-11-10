@@ -24,6 +24,8 @@ nonisolated struct MangaPageRenderConfig: Hashable, Sendable {
     let selectionScript: String
     var showCopyButton: Bool = false
     var enlargeSmallText: Bool = true
+    var textEnlargementAmount: Int = 50
+    var smallTextThreshold: Int = 30
     var showFurigana: Bool = true
 }
 
@@ -79,6 +81,8 @@ actor MangaPageRenderCache {
             showActionButtons: config.showActionButtons,
             showCopyButton: config.showCopyButton,
             enlargeSmallText: config.enlargeSmallText,
+            textEnlargementAmount: config.textEnlargementAmount,
+            smallTextThreshold: config.smallTextThreshold,
             showFurigana: config.showFurigana,
             imageSources: imageSources
         )

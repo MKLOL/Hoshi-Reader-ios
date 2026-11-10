@@ -267,8 +267,16 @@ class UserConfig {
         didSet { UserDefaults.standard.set(mangaScanNonJapaneseText, forKey: "mangaScanNonJapaneseText") }
     }
 
+    var mangaTextEnlargement: MangaTextEnlargement {
+        didSet {
+            UserDefaults.standard.set(try? JSONEncoder().encode(mangaTextEnlargement.normalized), forKey: "mangaTextEnlargement.ios")
+            UserDefaults.standard.set(mangaTextEnlargement.enabled, forKey: "mangaEnlargeSmallText")
+            ReaderPreferencesStore.shared.localDidChange(self)
+        }
+    }
     var mangaEnlargeSmallText: Bool {
-        didSet { UserDefaults.standard.set(mangaEnlargeSmallText, forKey: "mangaEnlargeSmallText"); ReaderPreferencesStore.shared.localDidChange(self) }
+        get { mangaTextEnlargement.enabled }
+        set { mangaTextEnlargement.enabled = newValue }
     }
     var mangaShowCopyButton: Bool {
         didSet { UserDefaults.standard.set(mangaShowCopyButton, forKey: "mangaShowCopyButton"); ReaderPreferencesStore.shared.localDidChange(self) }
@@ -471,7 +479,9 @@ class UserConfig {
         self.mangaSingleTapLookup = defaults.object(forKey: "mangaSingleTapLookup") as? Bool ?? false
         self.mangaUseNotoSansJpFont = defaults.object(forKey: "mangaUseNotoSansJpFont") as? Bool ?? false
         self.mangaScanNonJapaneseText = defaults.object(forKey: "mangaScanNonJapaneseText") as? Bool ?? false
-        self.mangaEnlargeSmallText = defaults.object(forKey: "mangaEnlargeSmallText") as? Bool ?? true
+        self.mangaTextEnlargement = defaults.data(forKey: "mangaTextEnlargement.ios")
+            .flatMap { try? JSONDecoder().decode(MangaTextEnlargement.self, from: $0) }?.normalized
+            ?? MangaTextEnlargement(enabled: defaults.object(forKey: "mangaEnlargeSmallText") as? Bool ?? true)
         self.mangaShowCopyButton = defaults.bool(forKey: "mangaShowCopyButton")
         self.mangaShowActionButtons = defaults.object(forKey: "mangaShowActionButtons") as? Bool ?? true
 

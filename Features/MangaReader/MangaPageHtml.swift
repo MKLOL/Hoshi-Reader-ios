@@ -62,6 +62,8 @@ nonisolated enum MangaPageHtml {
         showActionButtons: Bool = true,
         showCopyButton: Bool = false,
         enlargeSmallText: Bool = true,
+        textEnlargementAmount: Int = 50,
+        smallTextThreshold: Int = 30,
         showFurigana: Bool = true,
         imageSources: [String: String] = [:]
     ) -> String {
@@ -80,12 +82,14 @@ nonisolated enum MangaPageHtml {
         if let leftPage {
             frames += frameHtml(page: leftPage, availableWidth: perPageWidth,
                                 viewportHeight: viewportHeight,
-                                showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana, imageURL: imageSources[leftPage.imagePath])
+                                showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText,
+                                textEnlargementAmount: textEnlargementAmount, smallTextThreshold: smallTextThreshold, showFurigana: showFurigana, imageURL: imageSources[leftPage.imagePath])
             frames += "\n"
         }
         frames += frameHtml(page: page, availableWidth: perPageWidth,
                             viewportHeight: viewportHeight,
-                            showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana, imageURL: imageSources[page.imagePath])
+                            showActionButtons: showActionButtons, enlargeSmallText: enlargeSmallText,
+                                textEnlargementAmount: textEnlargementAmount, smallTextThreshold: smallTextThreshold, showFurigana: showFurigana, imageURL: imageSources[page.imagePath])
 
         let css = pageCss(
             backgroundCssColor: backgroundCssColor,
@@ -143,6 +147,8 @@ nonisolated enum MangaPageHtml {
         viewportHeight: Int,
         showActionButtons: Bool,
         enlargeSmallText: Bool,
+        textEnlargementAmount: Int,
+        smallTextThreshold: Int,
         showFurigana: Bool,
         imageURL: String?
     ) -> String {
@@ -156,7 +162,8 @@ nonisolated enum MangaPageHtml {
         let frameHeightCss = formatNumber(Double(imageHeight) * fitScale)
         let boxes = page.textBoxes
             .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight,
-                               pageIndex: page.index, enlargeSmallText: enlargeSmallText, showFurigana: showFurigana) }
+                               pageIndex: page.index, enlargeSmallText: enlargeSmallText,
+                                textEnlargementAmount: textEnlargementAmount, smallTextThreshold: smallTextThreshold, showFurigana: showFurigana) }
             .joined(separator: "\n")
         let uiTestBoxes = uiTestActionBoxesHtml(
             imageWidth: imageWidth,
@@ -358,6 +365,8 @@ nonisolated enum MangaPageHtml {
         extraAttributes: String = "",
         pageIndex: Int? = nil,
         enlargeSmallText: Bool = true,
+        textEnlargementAmount: Int = 50,
+        smallTextThreshold: Int = 30,
         showFurigana: Bool = false
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
@@ -367,7 +376,7 @@ nonisolated enum MangaPageHtml {
         // Match Android: the selected image-space font scales with the artwork (cqw = 1%
         // of the frame width). The reveal CSS changes visibility without an extra device-size
         // boost; the shared wrap fallback can still repair a misidentified horizontal bubble.
-        let fontCqw = percent(box.revealFontSize(enlargeSmallText: enlargeSmallText), imageWidth)
+        let fontCqw = percent(box.revealFontSize(enlargeSmallText: enlargeSmallText, amount: textEnlargementAmount, threshold: smallTextThreshold), imageWidth)
         let verticalClass = box.vertical ? " vertical" : ""
         // Join with literal `\n` so the shared selection scanner sees mokuro's line boundaries
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
@@ -734,7 +743,7 @@ nonisolated enum MangaPageHtml {
             revealed[i].classList.remove('furigana-scroll');
             revealed[i].classList.remove('revealed');
             revealed[i].setAttribute('aria-pressed', 'false');
-            // Restore the image-relative font after a wrap-fallback enlargement.
+            // Restore the image-relative font after the wrap fallback.
             if (typeof revealed[i].dataset.wrapOriginalFontSize === 'string') {
               revealed[i].style.fontSize = revealed[i].dataset.wrapOriginalFontSize;
               delete revealed[i].dataset.wrapOriginalFontSize;
@@ -809,7 +818,8 @@ nonisolated enum MangaPageHtml {
           var wrapFs = findMaxFitting(initialPx);
           var WRAP_WIN_RATIO = 1.3;
           if (wrapFs >= initialPx * WRAP_WIN_RATIO) {
-            setFs(wrapFs);
+            // Reflow a misidentified horizontal bubble without overriding the chosen size.
+            box.style.fontSize = originalInlineFontSize;
           } else {
             box.classList.remove('wrap');
             box.style.fontSize = originalInlineFontSize;

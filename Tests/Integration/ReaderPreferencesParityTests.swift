@@ -17,6 +17,63 @@ nonisolated final class ReaderPreferencesParityTests: XCTestCase {
         XCTAssertThrowsError(try ReaderPreferencesProtocol.validate(["fontSize": .init(value: .number(22), editedAt: ReaderPreferencesProtocol.maxTimestamp, deviceId: "a")]))
     }
 
+    func testBothPlatformEnlargementRecordsRejectInvalidObjects() throws {
+        let valid: ReaderPreferenceValue = .object(["enabled": .bool(true), "amount": .number(50), "threshold": .number(30)])
+        for name in ["mangaTextEnlargement.ios", "mangaTextEnlargement.android"] {
+            XCTAssertTrue(ReaderPreferencesProtocol.validValue(valid, name: name))
+            for value: ReaderPreferenceValue in [.bool(true), .object([:]),
+                .object(["enabled": .number(1), "amount": .number(50), "threshold": .number(30)]),
+                .object(["enabled": .bool(true), "amount": .number(50.5), "threshold": .number(30)]),
+                .object(["enabled": .bool(true), "amount": .number(101), "threshold": .number(30)]),
+                .object(["enabled": .bool(true), "amount": .number(50), "threshold": .number(9)])] {
+                XCTAssertThrowsError(try ReaderPreferencesProtocol.validate([name: .init(value: value, editedAt: 1, deviceId: "a")]))
+            }
+        }
+    }
+
+    @MainActor func testMangaEnlargementMigratesLocalChoiceAndSyncsOnlyTheIOSTuple() throws {
+        let defaults = UserDefaults.standard
+        let keys = ["mangaEnlargeSmallText", "mangaTextEnlargement.ios"]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            ReaderPreferencesStore.shared.reset()
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        ReaderPreferencesStore.shared.reset()
+        let config = UserConfig()
+        XCTAssertNil(try ReaderPreferencesStore.shared.snapshot()["mangaTextEnlargement.ios"])
+        // Simulate upgrading with a local off choice and a journal containing the old shared field.
+        defaults.set(false, forKey: "mangaEnlargeSmallText")
+        let suiteName = "manga-enlargement-" + UUID().uuidString
+        let isolatedDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
+        let legacy = ReaderPreferenceRecord(value: .bool(true), editedAt: 10, deviceId: "android-old")
+        isolatedDefaults.set(try JSONEncoder().encode(["mangaEnlargeSmallText": legacy]), forKey: "readerPreferencesJournal.v1")
+        let upgraded = UserConfig()
+        let store = ReaderPreferencesStore(defaults: isolatedDefaults)
+        store.attach(upgraded)
+        XCTAssertFalse(upgraded.mangaEnlargeSmallText)
+        XCTAssertEqual(try store.snapshot()["mangaTextEnlargement.ios"]?.editedAt, 0)
+        XCTAssertEqual(try store.snapshot()["mangaEnlargeSmallText"], legacy)
+        let android: ReaderPreferenceValue = .object(["enabled": .bool(true), "amount": .number(100), "threshold": .number(60)])
+        XCTAssertTrue(try store.merge(["mangaTextEnlargement.android": .init(value: android, editedAt: 30, deviceId: "android-a")]))
+        XCTAssertFalse(upgraded.mangaEnlargeSmallText)
+        let ios: ReaderPreferenceValue = .object(["enabled": .bool(true), "amount": .number(75), "threshold": .number(40)])
+        XCTAssertTrue(try store.merge(["mangaTextEnlargement.ios": .init(value: ios, editedAt: 31, deviceId: "ios-b")]))
+        XCTAssertEqual(upgraded.mangaTextEnlargement, MangaTextEnlargement(amount: 75, threshold: 40))
+        XCTAssertEqual(UserConfig().mangaTextEnlargement, upgraded.mangaTextEnlargement)
+        upgraded.mangaTextEnlargement = .init()
+        store.localDidChange(upgraded)
+        XCTAssertEqual(try store.snapshot()["mangaTextEnlargement.ios"]?.value,
+                       .object(["enabled": .bool(true), "amount": .number(50), "threshold": .number(30)]))
+        XCTAssertEqual(try store.snapshot()["mangaTextEnlargement.android"]?.value, android)
+        XCTAssertEqual(try store.snapshot()["mangaEnlargeSmallText"], legacy)
+        _ = config // Retain the initial configuration through the empty-default assertion.
+    }
+
     @MainActor func testIndependentOfflineEditsAndNullableResetConvergeWithoutRepeatedWrites() async throws {
         let store = PreferencesMemoryStore()
         store.records["fontSize"] = .init(value: .number(26), editedAt: 100, deviceId: "ios-a")

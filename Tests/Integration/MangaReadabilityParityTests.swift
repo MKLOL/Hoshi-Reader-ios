@@ -9,21 +9,26 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
                                            fontSize: 19, vertical: false, lines: ["こんにちは。"], originalFontSize: 8)])
     }
     private func config(enlarge: Bool = true, copy: Bool = false, furigana: Bool = true,
+                        amount: Int = 50, threshold: Int = 30,
                         viewport: CGSize = CGSize(width: 320, height: 640)) -> MangaPageRenderConfig {
         MangaPageRenderConfig(backgroundCssColor: "#000", scanNonJapaneseText: false,
             viewportCssWidth: Int(viewport.width), viewportCssHeight: Int(viewport.height), singleTapLookup: false,
             useNotoSansJpFont: false, showActionButtons: true, selectionScript: "",
-            showCopyButton: copy, enlargeSmallText: enlarge, showFurigana: furigana)
+            showCopyButton: copy, enlargeSmallText: enlarge, textEnlargementAmount: amount,
+            smallTextThreshold: threshold, showFurigana: furigana)
     }
 
     @MainActor func testSmallTextPreferenceDefaultsOnAndPersistsIndependentlyOfCardSettings() {
         let defaults = UserDefaults.standard, key = "mangaEnlargeSmallText"
         let saved = defaults.object(forKey: key)
+        let savedCompound = defaults.object(forKey: "mangaTextEnlargement.ios")
         defer {
             ReaderPreferencesStore.shared.reset()
             if let saved { defaults.set(saved, forKey: key) } else { defaults.removeObject(forKey: key) }
+            if let savedCompound { defaults.set(savedCompound, forKey: "mangaTextEnlargement.ios") } else { defaults.removeObject(forKey: "mangaTextEnlargement.ios") }
         }
         defaults.removeObject(forKey: key)
+        defaults.removeObject(forKey: "mangaTextEnlargement.ios")
         ReaderPreferencesStore.shared.reset()
         let preferences = UserConfig()
         XCTAssertTrue(preferences.mangaEnlargeSmallText)
@@ -85,6 +90,31 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         older.removeValue(forKey: "originalFontSize")
         let oldBox = try JSONDecoder().decode(MokuroTextBox.self, from: JSONSerialization.data(withJSONObject: older))
         XCTAssertEqual(oldBox.originalFontSize, oldBox.fontSize)
+    }
+
+    func testAdjustableEnlargementUsesTheSameCurveAsThePreview() {
+        XCTAssertEqual([12, 20, 30, 40].map { MangaTextEnlargement().fontSize(original: $0) }, [21, 25, 30, 40])
+        XCTAssertEqual([12, 20, 30, 40].map { MangaTextEnlargement(amount: 75, threshold: 40).fontSize(original: $0) }, [33, 35, 37, 40])
+        XCTAssertEqual(MangaTextEnlargement(enabled: false, amount: 100, threshold: 60).fontSize(original: 8), 8)
+        XCTAssertEqual(MangaTextEnlargement(amount: 0, threshold: 60).fontSize(original: 8), 8)
+        XCTAssertEqual(MangaTextEnlargement(amount: 100, threshold: 40).fontSize(original: 8), 40)
+        XCTAssertEqual(MangaTextEnlargement(amount: 100, threshold: 40).fontSize(original: 45), 45)
+        XCTAssertEqual(MangaTextEnlargement(amount: 58, threshold: 51).fontSize(original: 1), 30)
+    }
+
+    @MainActor func testRenderCacheUsesAmountAndThresholdWithoutReimportingManga() async throws {
+        let cache = MangaPageRenderCache()
+        let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
+        defer { browser.close() }
+        for (amount, threshold, expected) in [(50, 30, 19), (100, 40, 40), (0, 40, 8), (50, 30, 19)] {
+            try await load(await cache.htmlFor(page: page, config: config(amount: amount, threshold: threshold)), in: browser)
+            let value = try await browser.web.evaluateJavaScript("""
+                (() => { const box = document.querySelector('.ocr-box');
+                  box.classList.add('revealed'); window.hoshiManga.tryWrapFallback(box);
+                  return parseFloat(getComputedStyle(box).fontSize); })()
+                """)
+            XCTAssertEqual(try XCTUnwrap(value as? Double), Double(expected), accuracy: 0.1)
+        }
     }
 
     func testUnusedLineCoordinatesDoNotAffectParsedBook() throws {
@@ -228,8 +258,8 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         let originalFont = try XCTUnwrap(fields["originalFont"] as? String)
         XCTAssertTrue(originalFont.hasSuffix("cqw"))
         XCTAssertEqual(first["wrap"] as? Bool, true)
-        XCTAssertGreaterThanOrEqual(try XCTUnwrap(first["font"] as? Double),
-            try XCTUnwrap(fields["fontBefore"] as? Double) * 1.3)
+        XCTAssertEqual(try XCTUnwrap(first["font"] as? Double),
+            try XCTUnwrap(fields["fontBefore"] as? Double), accuracy: 0.01)
         let reset = try XCTUnwrap(fields["reset"] as? [String: Any])
         XCTAssertEqual(reset["font"] as? String, originalFont)
         XCTAssertEqual(reset["style"] as? String, fields["originalStyle"] as? String)

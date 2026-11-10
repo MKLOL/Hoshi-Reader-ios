@@ -308,6 +308,8 @@ final class MangaReaderViewModel {
             selectionScript: Self.selectionScript,
             showCopyButton: userConfig.mangaShowCopyButton,
             enlargeSmallText: userConfig.mangaEnlargeSmallText,
+            textEnlargementAmount: userConfig.mangaTextEnlargement.amount,
+            smallTextThreshold: userConfig.mangaTextEnlargement.threshold,
             showFurigana: userConfig.mangaShowFurigana
         )
     }

@@ -82,6 +82,14 @@ nonisolated enum ReaderPreferencesProtocol {
     }
 
     static func validValue(_ value: ReaderPreferenceValue, name: String) -> Bool {
+        if name == "mangaTextEnlargement.ios" || name == "mangaTextEnlargement.android" {
+            guard case .object(let object) = value,
+                  case .bool = object["enabled"],
+                  case .number(let amount) = object["amount"],
+                  case .number(let threshold) = object["threshold"] else { return false }
+            return amount.isFinite && (0...100).contains(amount) && amount.rounded() == amount
+                && threshold.isFinite && (10...60).contains(threshold) && threshold.rounded() == threshold
+        }
         let booleans: Set<String> = ["eInkMode", "disablePageTurnAnimation", "systemLightSepia",
             "sepiaInvertInDark", "verticalWriting", "hideFurigana", "showSentenceTranslations",
             "continuousMode", "showStatisticsToggle", "showReadingSpeed", "showReadingTime",

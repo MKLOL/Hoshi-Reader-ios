@@ -1236,7 +1236,7 @@ assertEqual(
 
     def test_manga_ocr_font_size_matches_android_without_device_size_boost(self):
         html = read("Features/MangaReader/MangaPageHtml.swift")
-        self.assertIn("box.revealFontSize(enlargeSmallText: enlargeSmallText)", html)
+        # Configurable sizing and cache behavior are exercised by MangaReadabilityParityTests.
         self.assertIn("height: \\(heightPct)%; font-size:", html)
         self.assertNotIn("--hoshi-reveal-fs", html)
         self.assertNotIn("targetRevealPt", html)

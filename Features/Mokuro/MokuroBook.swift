@@ -82,7 +82,8 @@ nonisolated struct MokuroTextBox: Codable, Equatable {
         originalFontSize = try c.decodeIfPresent(Int.self, forKey: .originalFontSize) ?? fontSize
     }
 
-    func revealFontSize(enlargeSmallText: Bool) -> Int {
-        max(1, enlargeSmallText ? fontSize : originalFontSize)
+    func revealFontSize(enlargeSmallText: Bool, amount: Int = 50, threshold: Int = 30) -> Int {
+        MangaTextEnlargement(enabled: enlargeSmallText, amount: amount, threshold: threshold)
+            .fontSize(original: originalFontSize)
     }
 }

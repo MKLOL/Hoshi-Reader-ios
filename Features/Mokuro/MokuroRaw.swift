@@ -170,6 +170,5 @@ nonisolated func clampMokuroFontSize(
     linesCoords: [[[Double]]] = []
 ) -> Int {
     let original = max(1, mokuroSafeInt(mokuroFontSize))
-    let headroom = max(0, 30.0 - Double(original))
-    return max(1, Int(Double(original) + headroom * 0.5))
+    return MangaTextEnlargement().fontSize(original: original)
 }

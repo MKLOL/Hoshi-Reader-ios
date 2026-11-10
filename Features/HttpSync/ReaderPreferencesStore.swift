@@ -114,13 +114,21 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         return true
     }
 
-    private func persist() throws { defaults.set(try JSONEncoder().encode(records), forKey: journalKey) }
+    private func persist() throws {
+        try ReaderPreferencesProtocol.validate(records)
+        defaults.set(try JSONEncoder().encode(records), forKey: journalKey)
+    }
     private func values(_ config: UserConfig) -> [String: ReaderPreferenceValue] { Self.fields.mapValues { $0.read(config) } }
 
     private struct Field {
         let defaultValue: ReaderPreferenceValue
         let read: (UserConfig) -> ReaderPreferenceValue
         let write: (UserConfig, ReaderPreferenceValue) -> Void
+    }
+
+    private static func enlargementValue(_ settings: MangaTextEnlargement) -> ReaderPreferenceValue {
+        .object(["enabled": .bool(settings.enabled), "amount": .number(Double(settings.amount)),
+                 "threshold": .number(Double(settings.threshold))])
     }
 
     private static let fields: [String: Field] = {
@@ -162,7 +170,16 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         boolean("mangaSingleTapLookup", \.mangaSingleTapLookup, false)
         boolean("mangaUseNotoSansJp", \.mangaUseNotoSansJpFont, false)
         boolean("mangaShowCopyButton", \.mangaShowCopyButton, false)
-        boolean("mangaEnlargeSmallText", \.mangaEnlargeSmallText, true)
+        fields["mangaTextEnlargement.ios"] = Field(
+            defaultValue: enlargementValue(.init()),
+            read: { enlargementValue($0.mangaTextEnlargement.normalized) },
+            write: { config, value in
+                guard case .object(let object) = value,
+                      case .bool(let enabled) = object["enabled"],
+                      case .number(let amount) = object["amount"],
+                      case .number(let threshold) = object["threshold"] else { return }
+                config.mangaTextEnlargement = .init(enabled: enabled, amount: Int(amount), threshold: Int(threshold))
+            })
         boolean("mangaShowFurigana", \.mangaShowFurigana, true)
         boolean("sasayaki.enabled", \.enableSasayaki, false)
         boolean("sasayaki.showReaderToggle", \.readerShowSasayakiToggle, false)

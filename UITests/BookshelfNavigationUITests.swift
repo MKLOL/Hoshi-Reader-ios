@@ -3,6 +3,53 @@ import XCTest
 /// Exercise the real shell with all five tabs and sync enabled, including the iPad mini's
 /// shared top row. No toolbar overflow or long menu button should hide routine navigation.
 final class BookshelfNavigationUITests: XCTestCase {
+    @MainActor func testMangaTextEnlargementPresetsAndLivePreview() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
+        XCUIDevice.shared.orientation = .portrait
+        app.launch()
+        app.tabBars.buttons["Settings"].tap()
+        let manga = app.buttons["settings-manga"]
+        XCTAssertTrue(manga.waitForExistence(timeout: 10))
+        manga.tap()
+        let enabled = app.switches["manga-text-enlargement-enabled"]
+        XCTAssertTrue(enabled.waitForExistence(timeout: 5))
+        if enabled.value as? String == "0" { enabled.switches.firstMatch.tap() }
+        app.buttons["manga-text-preset-balanced"].tap()
+        XCTAssertTrue(app.otherElements["manga-text-preview-12-21"].exists, app.debugDescription)
+        let list = app.collectionViews["manga-settings"]
+        list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8))
+            .press(forDuration: 0.3, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.64)),
+                   withVelocity: .slow, thenHoldForDuration: 0.4)
+        capture(app, "ios-small-text-balanced")
+        app.buttons["manga-text-preset-strong"].tap()
+        XCTAssertTrue(app.otherElements["manga-text-preview-12-33"].exists, app.debugDescription)
+        capture(app, "ios-small-text-strong")
+        let amount = app.sliders["manga-text-enlargement-amount"]
+        amount.adjust(toNormalizedSliderPosition: 0)
+        let amountValue = try XCTUnwrap(Int((amount.value as? String ?? "").filter(\.isNumber)))
+        XCTAssertLessThan(amountValue, 75)
+        let amountResult = 12 + 28 * amountValue / 100
+        XCTAssertTrue(app.otherElements["manga-text-preview-12-\(amountResult)"].waitForExistence(timeout: 5))
+        app.buttons["manga-text-preset-strong"].tap()
+        let threshold = app.sliders["manga-text-enlargement-threshold"]
+        threshold.adjust(toNormalizedSliderPosition: 0)
+        let thresholdValue = try XCTUnwrap(Int((threshold.value as? String ?? "").filter(\.isNumber)))
+        XCTAssertLessThan(thresholdValue, 40)
+        let thresholdResult = 12 + max(0, thresholdValue - 12) * 75 / 100
+        XCTAssertTrue(app.otherElements["manga-text-preview-12-\(thresholdResult)"].waitForExistence(timeout: 5))
+        app.buttons["manga-text-preset-strong"].tap()
+        enabled.switches.firstMatch.tap()
+        XCTAssertTrue(app.otherElements["manga-text-preview-12-12"].waitForExistence(timeout: 5), app.debugDescription)
+        enabled.switches.firstMatch.tap()
+        app.terminate()
+        app.launch()
+        app.tabBars.buttons["Settings"].tap()
+        app.buttons["settings-manga"].tap()
+        XCTAssertTrue(app.otherElements["manga-text-preview-12-33"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
     @MainActor private func launch() throws -> XCUIApplication {
         continueAfterFailure = false
         let environment = ProcessInfo.processInfo.environment
