@@ -50,7 +50,11 @@ class LocalFileServer {
         
         let newListener: NWListener
         do {
-            newListener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+            // Everything served here is fetched on this device, through localhost: by AnkiMobile
+            // and by the app's own pages. Nothing on the network needs to reach it.
+            let parameters = NWParameters.tcp
+            parameters.requiredInterfaceType = .loopback
+            newListener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: Self.port)!)
         } catch {
             // The port can still be held by the previous listener on a fast relaunch / audio-server
             // toggle / background→foreground churn. Retry shortly instead of trapping (this `try!`

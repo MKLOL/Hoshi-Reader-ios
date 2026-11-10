@@ -410,12 +410,14 @@ nonisolated struct MokuroImporter {
     // MARK: - Title sanitization
 
     /// Mirrors `BookshelfViewModel.sanitizeFileName` so EPUB and mokuro imports name book
-    /// directories identically.
-    private static func sanitizeFileName(_ string: String) -> String {
-        string
+    /// directories identically, including a leading dot, which would hide the folder.
+    static func sanitizeFileName(_ string: String) -> String {
+        let cleaned = string
             .components(separatedBy: CharacterSet(charactersIn: "\\/:*?\"<>|").union(.newlines).union(.controlCharacters))
             .joined(separator: "_")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let dots = cleaned.prefix(while: { $0 == "." }).count
+        return String(repeating: "_", count: dots) + cleaned.dropFirst(dots)
     }
 }
 

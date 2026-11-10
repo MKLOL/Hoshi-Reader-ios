@@ -31,9 +31,11 @@ import Foundation
 
     /// A line's height comes from the paragraph's own line height, the em box of each inline
     /// box and replaced elements, never from an inline element's own line height. `glyphs` in
-    /// place of `inline-box` lays Japanese prose, ruby and emphasis out identically, but makes
-    /// WebKit measure the ink of every text run. The word boxes multiply those runs, and a
-    /// 50-page chapter then took over four seconds to paginate instead of a third of one.
+    /// place of `inline-box` gives almost the same lines: with a line height set, a line with
+    /// furigana after a paragraph's first was 1-3 px taller, as were lines with enlarged inline
+    /// text. But it makes WebKit measure the ink of every text run. The word boxes multiply
+    /// those runs, and a 50-page chapter then took over four seconds to paginate instead of a
+    /// third of one.
     static let lineBoxCSS = "html { -webkit-line-box-contain: block inline-box replaced; }"
 
     static var wordLayoutCSS: String {

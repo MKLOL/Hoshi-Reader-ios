@@ -398,8 +398,7 @@ struct MangaReaderWebView: UIViewRepresentable {
         weak var swipeRightRecognizer: UISwipeGestureRecognizer?
         var parent: MangaReaderWebView
         var lastLoadToken = 0
-        /// Reloads of a lost page since the last one that finished loading.
-        private var recoveries = 0
+        private let recovery = LostPageRecovery()
         var allowedImagePaths: Set<String> = []
         private var scrollableBubbleRegions: [CGRect] = []
         /// Native trackpad debounce — held here so it survives the per-page HTML reload a turn
@@ -436,6 +435,8 @@ struct MangaReaderWebView: UIViewRepresentable {
 
         init(_ parent: MangaReaderWebView) {
             self.parent = parent
+            super.init()
+            LostPageRecovery.observeBecomingVisible(self, selector: #selector(readerBecameVisible))
         }
 
         // MARK: Navigation
@@ -451,7 +452,6 @@ struct MangaReaderWebView: UIViewRepresentable {
                 return
             }
             guard finishedLoadToken == parent.controller.loadToken else { return }
-            recoveries = 0
             parent.controller.startupTrace?.mark("document_finished")
             webView.isHidden = false
             // WebKit can restore the previous document's viewport during navigation. Reset only
@@ -494,9 +494,14 @@ struct MangaReaderWebView: UIViewRepresentable {
         }
 
         private func recoverCurrentPage() {
-            // A page that cannot survive its own load must not be loaded forever.
-            guard recoveries < 3 else { return }
-            recoveries += 1
+            guard let webView = parent.controller.webView,
+                  recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+            parent.controller.reissueCurrentPage()
+        }
+
+        @objc private func readerBecameVisible() {
+            guard let webView = parent.controller.webView, LostPageRecovery.isVisible(webView),
+                  recovery.becameVisible() else { return }
             parent.controller.reissueCurrentPage()
         }
 

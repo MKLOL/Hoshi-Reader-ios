@@ -206,11 +206,13 @@ nonisolated func backupMatches(_ folder: String, staging: URL, fileManager fm: F
     let directories = entries.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
     // The folder names of `DictionaryType`.
     let dictionaryKinds: Set<String> = ["Term", "Frequency", "Pitch"]
-    let holdsDictionaries = directories.contains { dictionaryKinds.contains($0.lastPathComponent) }
-    if folder == "Dictionaries" { return holdsDictionaries }
-    return !holdsDictionaries && directories.contains {
-        fm.fileExists(atPath: $0.appendingPathComponent(FileNames.metadata).path(percentEncoded: false))
+    func isBook(_ directory: URL) -> Bool {
+        fm.fileExists(atPath: directory.appendingPathComponent(FileNames.metadata).path(percentEncoded: false))
     }
+    // A book can be titled "Pitch"; its folder holds the book's metadata, a dictionary kind's does not.
+    let holdsDictionaries = directories.contains { dictionaryKinds.contains($0.lastPathComponent) && !isBook($0) }
+    if folder == "Dictionaries" { return holdsDictionaries }
+    return !holdsDictionaries && directories.contains(where: isBook)
 }
 
 nonisolated func replaceRestoredFolder(staging: URL, destination: URL, fileManager fm: FileManager) throws {

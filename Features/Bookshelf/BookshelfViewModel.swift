@@ -655,11 +655,15 @@ class BookshelfViewModel {
         }
     }
     
+    /// A folder whose name starts with a dot is hidden: the book would be imported and never
+    /// listed. Each leading dot becomes an underscore, which the sync ID ignores as it did the dot.
     private func sanitizeFileName(_ string: String) -> String {
-        return string
+        let cleaned = string
             .components(separatedBy: CharacterSet(charactersIn: "\\/:*?\"<>|").union(.newlines).union(.controlCharacters))
             .joined(separator: "_")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let dots = cleaned.prefix(while: { $0 == "." }).count
+        return String(repeating: "_", count: dots) + cleaned.dropFirst(dots)
     }
     
     private func findCoverInManifest(document: EPUBDocument) -> String? {

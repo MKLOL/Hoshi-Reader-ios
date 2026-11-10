@@ -497,12 +497,17 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         let usageDays = usageInstants.map { ReadingDay.key($0, calendar: utc) }
         let usagePeers = (0..<3).map { "usage-device-\($0)" }
         try FileManager.default.createDirectory(at: usageLog.directory, withIntermediateDirectories: true)
+        // The host's own log is left as it was: a day it already has is neither replaced nor removed.
+        var seededDays: [URL] = []
         defer {
-            for day in usageDays { try? FileManager.default.removeItem(at: usageLog.directory.appendingPathComponent(day + ".ndjson")) }
+            for file in seededDays { try? FileManager.default.removeItem(at: file) }
             for peer in usagePeers { try? FileManager.default.removeItem(at: usageLog.directory.appendingPathComponent("devices").appendingPathComponent(peer)) }
         }
         for (day, instant) in zip(usageDays, usageInstants) {
-            try usageLines([instant]).write(to: usageLog.directory.appendingPathComponent(day + ".ndjson"))
+            let file = usageLog.directory.appendingPathComponent(day + ".ndjson")
+            guard !FileManager.default.fileExists(atPath: file.path) else { continue }
+            try usageLines([instant]).write(to: file)
+            seededDays.append(file)
         }
         var usageMonthDays: [String] = []
         for peer in usagePeers {

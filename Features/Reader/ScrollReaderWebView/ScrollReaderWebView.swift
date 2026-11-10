@@ -173,11 +173,12 @@ struct ScrollReaderWebView: UIViewRepresentable {
         var shouldSyncProgressAfterRestore = false
         var lastProgressUpdate: CFTimeInterval = 0
         var isRestoring = true
-        /// Reloads after the page's process ended, since the last chapter that finished restoring.
-        var processReloads = 0
+        let recovery = LostPageRecovery()
         
         init(_ parent: ScrollReaderWebView) {
             self.parent = parent
+            super.init()
+            LostPageRecovery.observeBecomingVisible(self, selector: #selector(readerBecameVisible))
         }
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -195,7 +196,6 @@ struct ScrollReaderWebView: UIViewRepresentable {
                 return
             }
             if message.name == "restoreCompleted" {
-                processReloads = 0
                 if shouldSyncProgressAfterRestore {
                     shouldSyncProgressAfterRestore = false
                     syncLinkJumpProgress()
@@ -284,9 +284,17 @@ struct ScrollReaderWebView: UIViewRepresentable {
         /// page whose overscroll would turn the chapter. Load the chapter again at the reader's
         /// last saved place.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            // A chapter that cannot survive its own layout must not reload forever.
-            guard let url = currentURL, processReloads < 3 else { return }
-            processReloads += 1
+            guard recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+            reloadLostPage(webView)
+        }
+        
+        @objc private func readerBecameVisible() {
+            guard let webView, LostPageRecovery.isVisible(webView), recovery.becameVisible() else { return }
+            reloadLostPage(webView)
+        }
+        
+        private func reloadLostPage(_ webView: WKWebView) {
+            guard let url = currentURL else { return }
             pendingProgress = parent.bridge.progress
             pendingFragment = nil
             pendingSasayakiCues = parent.bridge.sasayakiCues
@@ -453,6 +461,12 @@ struct ScrollReaderWebView: UIViewRepresentable {
             
             let script = """
             (function() {
+                // A spine item that is not an HTML document, such as a bare SVG image, has no
+                // head or body to prepare. It is shown as it is, without the reader's scripts.
+                if (!document.head || !document.body) {
+                    window.webkit?.messageHandlers?.restoreCompleted?.postMessage(null);
+                    return;
+                }
                 var viewport = document.querySelector('meta[name="viewport"]');
                 if (viewport) { viewport.remove(); }
                 

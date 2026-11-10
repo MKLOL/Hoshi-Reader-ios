@@ -4,6 +4,24 @@ import WebKit
 @testable import Hoshi_Reader
 
 nonisolated final class RuntimeRegressionTests: XCTestCase {
+    /// AnkiMobile and the app's own pages fetch a card's cover and audio through localhost. The
+    /// server listens on the loopback interface only and must still answer there.
+    @MainActor func testLocalFileServerAnswersOnLocalhost() async throws {
+        let clip = Data("sasayaki-clip".utf8)
+        LocalFileServer.shared.setSasayakiAudio(clip)
+        defer { LocalFileServer.shared.clearMedia() }
+        let url = try XCTUnwrap(URL(string: "http://localhost:\(LocalFileServer.port)/sasayaki/audio.m4a"))
+        var received: Data?, status = 0
+        // The listener may need a moment, or a retry when its port was just released.
+        for _ in 0..<40 where received == nil {
+            var request = URLRequest(url: url); request.timeoutInterval = 2
+            if let (data, response) = try? await URLSession.shared.data(for: request) {
+                received = data; status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            } else { try await Task.sleep(for: .milliseconds(150)) }
+        }
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(received, clip)
+    }
     @MainActor func testMangaSchemeProxyRoutesLateStopsToOriginalReceiverAndRetiresCompletedTasks() {
         let proxy = MangaImageSchemeProxy(), webView = WKWebView(frame: .zero)
         var original: MangaSchemeReceiverFixture? = MangaSchemeReceiverFixture()

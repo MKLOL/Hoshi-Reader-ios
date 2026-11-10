@@ -321,11 +321,12 @@ struct ReaderWebView: UIViewRepresentable {
         var pendingSasayakiCues: String?
         var pendingHighlights: String?
         var shouldSyncProgressAfterRestore = false
-        /// Reloads after the page's process ended, since the last chapter that finished restoring.
-        var processReloads = 0
+        let recovery = LostPageRecovery()
         
         init(_ parent: ReaderWebView) {
             self.parent = parent
+            super.init()
+            LostPageRecovery.observeBecomingVisible(self, selector: #selector(readerBecameVisible))
         }
         
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -343,7 +344,6 @@ struct ReaderWebView: UIViewRepresentable {
                 return
             }
             if message.name == "restoreCompleted" {
-                processReloads = 0
                 if shouldSyncProgressAfterRestore {
                     shouldSyncProgressAfterRestore = false
                     syncLinkJumpProgress()
@@ -426,9 +426,17 @@ struct ReaderWebView: UIViewRepresentable {
         /// iOS can discard the page's process while the app is in the background, leaving a blank
         /// page that answers nothing. Load the chapter again at the reader's last saved place.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            // A chapter that cannot survive its own layout must not reload forever.
-            guard let url = currentURL, processReloads < 3 else { return }
-            processReloads += 1
+            guard recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+            reloadLostPage(webView)
+        }
+        
+        @objc private func readerBecameVisible() {
+            guard let webView, LostPageRecovery.isVisible(webView), recovery.becameVisible() else { return }
+            reloadLostPage(webView)
+        }
+        
+        private func reloadLostPage(_ webView: WKWebView) {
+            guard let url = currentURL else { return }
             pendingProgress = parent.bridge.progress
             pendingFragment = nil
             pendingSasayakiCues = parent.bridge.sasayakiCues
@@ -645,6 +653,14 @@ struct ReaderWebView: UIViewRepresentable {
             
             let script = """
             (function() {
+                // A spine item that is not an HTML document, such as a bare SVG image, has no
+                // head or body to prepare. It is shown as it is, without the reader's scripts,
+                // and marked so that a swipe leaves it.
+                if (!document.head || !document.body) {
+                    window.hoshiPlainDocument = true;
+                    window.webkit?.messageHandlers?.restoreCompleted?.postMessage(null);
+                    return;
+                }
                 var viewport = document.querySelector('meta[name="viewport"]');
                 if (viewport) { viewport.remove(); }
                 
@@ -760,7 +776,10 @@ struct ReaderWebView: UIViewRepresentable {
             let jsDirection = direction == .forward ? "forward" : "backward"
             return """
             (function() {
-                return window.hoshiReader.paginate('\(jsDirection)');
+                // A document shown as it is has no pages of its own: every swipe leaves it. A
+                // chapter that is still loading, or a page that cannot answer, gives no result.
+                if (window.hoshiReader) return window.hoshiReader.paginate('\(jsDirection)');
+                return window.hoshiPlainDocument ? 'limit' : null;
             })()
             """
         }

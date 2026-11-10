@@ -83,7 +83,13 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
         private var selectionEpoch = 0
         private var stateSignature = ""
 
-        init(_ parent: PodcastTranscriptWebView) { self.parent = parent }
+        private let recovery = LostPageRecovery()
+
+        init(_ parent: PodcastTranscriptWebView) {
+            self.parent = parent
+            super.init()
+            LostPageRecovery.observeBecomingVisible(self, selector: #selector(transcriptBecameVisible))
+        }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
@@ -96,6 +102,12 @@ struct PodcastTranscriptWebView: UIViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             cancel()
             ready = false; document = nil; style = ""; styleInputs = nil; stateSignature = ""
+            guard recovery.shouldReload(visible: LostPageRecovery.isVisible(webView)) else { return }
+            webView.loadHTMLString(PodcastTranscriptWebView.skeleton, baseURL: nil)
+        }
+
+        @objc private func transcriptBecameVisible() {
+            guard let webView, LostPageRecovery.isVisible(webView), recovery.becameVisible() else { return }
             webView.loadHTMLString(PodcastTranscriptWebView.skeleton, baseURL: nil)
         }
 
