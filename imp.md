@@ -675,3 +675,258 @@ Evidence (ignored): `build/codex-ocr-qol-native-final.log`,
 `build/codex-manga-physical-verified-normal-launch.log`,
 `build/codex-startup-parser-audit/actual-production-parser.json`, and
 `build/startup-first-paint-audit/position-open/results.json`.
+
+
+---
+
+## Three-reviewer pre-merge pass — November 9, 2026 (Claude)
+
+Before merging `codex/ios-android-parity` into `main`, three independent reviewers read the
+whole branch (35 commits, 195 files) with separate scopes: (A) HTTP sync, reading positions and
+the statistics/usage data layer; (B) the EPUB, sentence and manga readers, podcasts, popup, AI
+and their JavaScript; (C) app shell, bookshelf, settings, setup, statistics views, privacy
+claims, test hooks and the build scripts. Reviewer B split podcasts/Sasayaki/furigana and
+AI/popup/dictionary into two sub-reviews. Every reviewer worked read-only. Each finding below was
+checked against the code before it was changed; the ones not changed are listed at the end.
+
+The gate was green on the untouched branch first (20 server tests, 108 Python regressions, 333
+hosted XCTest cases, 8 UI cases), which closes the note above that the complete gate had not been
+rerun after the startup changes.
+
+### Two findings that contradicted this file
+
+**1. "Every poll now costs at most about 3 ms" did not hold once devices publish reading
+activity.** `HttpUsageLane.run` is on the main actor and called `ReadingDay.parse` — which
+built a `DateFormatter` and three calendars per call, about 165 µs — for every listed usage key in
+four places, one of them inside a loop over this device's own day files. It also checked every
+cached day file with `fileExists` on the main actor. Reviewer A measured 66 ms per pass with 30
+keys, 583 ms with 99 keys and 919 ms with 126 keys (three devices, late in a month, a year of
+history), on every statistics pass: once a minute from the poll and every 30 seconds while
+reading. The hosted performance test missed it because it seeded no usage keys.
+
+- `ReadingDay.fixedKey` reads the fixed `yyyy-MM-dd` and `yyyy-MM-dd'T'HH:mm[:ss]` grammar
+  directly. `parse`, `hour`, `isDay` and `StatisticsZone.wallInstant` use it and keep the
+  formatter for anything else, including dates before 1583, so their results are unchanged.
+  This also removes the formatter from every statistics row read in a sync pass.
+- The lane parses each key once, groups this device's keys by month, and asks `UsageLog.complete`
+  for the cached-file check on the log's own queue.
+- `StatisticsDayParityTests` compares the new readers with formatter-only references for every day
+  from 1999 to 2042 in seven time zones (including ones whose DST changes skip midnight), every
+  hour of sampled days, and malformed text. The large-library test now seeds 126 usage keys from
+  three devices plus 30 of this device's own days and asserts they were received.
+- Measured in that test with the usage keys present, over five runs: **1.9–2.7 ms** on the
+  first poll, **2.0–3.0 ms** over later polls, **1.7–2.1 ms** in a statistics pass and
+  **2.1–2.5 ms** in one after a reading save; longest heartbeat gap 4 ms.
+
+**2. Sentence-aware pagination made EPUB chapters take seconds to open.** Reviewer B measured
+`hoshiTextLayout.prepare` in a macOS WKWebView harness running the repository's own scripts:
+0.7 s for 26 pages, 4.3 s for 52, 12.9 s for 104, and over two minutes for a 343-page single-file
+book, all behind the loading spinner. On `main` this step does not exist.
+
+The cause was not the algorithm. `-webkit-line-box-contain: block glyphs replaced`, a rule
+that predates this branch, makes WebKit measure the ink bounds of every text run, and the word
+boxes split a chapter into five times as many runs. One relayout of a 52-page chapter cost 1.5 s
+with that rule and 0.08 s without it; the same held with the word boxes set to `display:
+contents`, so the runs, not `nowrap`, are what cost.
+
+- `ReaderTextStyle.lineBoxCSS` now uses `block inline-box replaced` for the paged reader, the
+  continuous reader and podcast transcripts. Across 27 text constructs, two orientations, four
+  fonts and five line heights, line sizes are identical for prose, ruby (including `rp` and
+  long readings), emphasis, tate-chu-yoko, gaiji images, links and rare kanji. Lines holding
+  inline text set larger than the paragraph, or sup/sub, are 1–2 px taller (up to 5 px for
+  sup/sub at a line height of 1.2), and at that tight line height a line with an emoji or a
+  Latin fallback font is 1.5–3.5 px shorter. At line heights of 1.65 and above nothing differs
+  in vertical text.
+- `textlayout.js` gives break placement a budget of 800 ms; past it the confirmed breaks stay
+  and the rest of the chapter keeps ordinary page breaks. A document over 120,000 visible
+  characters is left as the publisher wrote it, with no word boxes or breaks.
+- Same harness, same Mac, vertical text at 744×1000 and 22 px:
+
+  | Chapter | Before | After |
+  |---|---:|---:|
+  | 11 pages | — | 61 ms |
+  | 26 pages | 721 ms | 136 ms |
+  | 52 pages | 4,327 ms | 348 ms |
+  | 104 pages | 12,915 ms | 747 ms |
+  | 156 pages | — | 1,170 ms |
+  | 57 pages, repetitive prose | 13,140 ms | 796 ms |
+  | 49 pages, horizontal | 3,455 ms | 779 ms |
+  | 332 pages in one file | over 120 s | 8 ms (left alone) |
+
+  Page and break counts are unchanged where a run finishes (52 pages / 47 breaks, 104 / 99).
+  Horizontal text still needs many passes; a 96-page horizontal chapter stops at its budget
+  after 1.5 s with the rest unbroken.
+- `SentenceReadingParityTests.testLongChaptersPaginateQuicklyAndASingleFileBookIsLeftAlone` lays
+  out a 57-page chapter with the reader's real rules and requires all breaks in under 3 s
+  (1.0 s in the simulator; 13 s with the old rule), and checks that a 280,000-character
+  document is left alone.
+
+These are Mac and simulator measurements. Chapter opening has not been timed on the iPad.
+
+### Other findings fixed
+
+Readers:
+- **A page whose WebContent process iOS discarded.** No reader handled it. In the paged EPUB
+  reader the next swipe got no answer from the blank page, and anything but `"scrolled"`
+  counted as the chapter's edge: the reader moved to the next chapter and saved that position.
+  The paged and continuous readers and the manga reader now load the page again at the last
+  saved place (at most three times in a row), and the paged reader changes chapter only on an
+  explicit `"limit"`. Podcast transcripts reload their skeleton and resend the document. The
+  manga reader also retries a navigation that failed for the page still wanted, which used to
+  leave the reused view hidden.
+  `ReaderLifetimeTests.testPagedReaderReturnsToItsPageWhenThePageProcessEndsAndADeadPageCannotTurnTheChapter`
+  hosts the real paged reader, turns a page, ends the page's process with WebKit's test-only
+  switch, swipes on the dead page and checks that the chapter does not turn and the reader comes
+  back on the page read last. Without the guard it fails with one chapter turn.
+- A vertical chapter restored to its first page when the target text node began with collapsed
+  whitespace (pretty-printed markup); the word boxes made such nodes more common.
+  `SentenceReadingParityTests.testVerticalRestoreFindsItsPageWhenParagraphsOpenWithALineBreak`
+  restores 25%, 50% and 75% of a 39-page chapter; without the fix all three land on page 0,
+  in the iOS simulator as in the reviewer's macOS harness.
+- `ReaderWindow` captured itself weakly in the reader's own back action. When the shelf section
+  that owned the window disappeared (its only book finished or moved), the reader could not be
+  closed.
+- An EPUB that failed to load left a full-screen spinner with no way out; it now shows a message
+  and a Close button.
+- Sentence mode: a tap on a reading resolved to a word in the line above; a book without chapter
+  metrics opened on the chapter's last sentence; every return to the app started a second sync
+  beside the reader's own.
+- Sentence mode and the Chapters sheet resolved every contents entry against every chapter, with
+  symbolic-link resolution each time; both resolve once.
+- A manga image request could join a read that `setWindow` had just cancelled.
+- A lookup popup stayed open over text replaced by a position from another device.
+
+Library and settings:
+- **Restore accepted any `.hoshi` file for either collection** and replaced it without asking.
+  A dictionary backup picked under Books replaced the whole library. Restore now checks what the
+  archive holds, asks for confirmation naming the file, and says why a file was refused.
+- Opening an EPUB or Anki file from another app cleared the whole Inbox, including manga archives
+  still queued for the background import (contrary to "safe shared-Inbox cleanup" above).
+- Interrupted imports left `Books/.MokuroImport-*` and `Dictionaries/*/.import-*` folders
+  forever; they are removed at launch.
+- The Dictionary tab changed its page identity before the lookup returned, so the first search
+  after an empty state loaded an empty page. This was already on `main`.
+- UI-test fixtures that replace the sync token, statistics, preferences or books ran in any
+  Debug build. They now run only on a simulator, so a test run pointed at a real device by
+  mistake cannot overwrite its library. `install.sh` also defaulted to that Debug build; it
+  now installs Release, shows the real `devicectl` error and no longer leaks a temp file.
+
+Sync and data:
+- A book whose statistics sidecar could not be decoded could not be deleted, and a tombstone for
+  it from another device retried a full reconcile every minute. Retention now copies the file to
+  `.unreadable/` and keeps what can be read.
+- A cancelled sync recorded each position journal it was fetching as failed, with a back-off.
+- A listed key such as `books/../epub.manifest` produced a folder outside the library.
+
+AI and popup:
+- A reply arriving after its book was deleted recreated the book's folder with only a chat log,
+  which blocked re-importing an EPUB and gave a re-imported manga a different sync ID.
+- An undecodable chat log was replaced by a one-entry log; it is now kept beside the new one.
+- The popup decoded the book's whole chat log, screenshots included, on the main thread at every
+  open and every request update; now only when the history is shown.
+- An on-device translation waiting for an earlier one showed that one's streaming reply as its
+  own.
+- `popup.js`: Back/Forward during a redirect render appended entries to the restored view;
+  structured content could create any element, `script` included.
+- Typing a custom model ID that passes through a listed one lost the text field.
+
+Podcasts and audiobooks:
+- Resuming after word audio in Lower Volume or Keep Volume mode left the session mixable.
+- Original recordings are opened with precise timing; timestamps keep seconds past an hour.
+- The five-second listing check decoded on the main actor, rewrote both listing files on every
+  poll and kept running under the transcript.
+- An imported audiobook position updated the display but not the loaded player.
+
+Privacy:
+- A clock set backward by more than the interval sent the anonymous report at once; the interval
+  now restarts from the corrected clock. The app language is sent without its region.
+- The privacy manifest declares `ProcessInfo.systemUptime` (35F9.1).
+- `PRIVACY.md` now mentions cloud translation, the translation history and prompts that HTTP
+  sync carries, and the default sync server that first-launch setup uses. **These are statements
+  about what the code does; they need the owner's review as policy text.**
+
+Smaller: playback speed is remembered; the slider seeks once on release; a larger timestamp
+touch target; the combined play/pause remote command; Now Playing is no longer republished five
+times a second; `UIColor.hexString` clamps wide-gamut components; VoiceOver labels and the
+selected trait on the bookshelf's icon-only controls; a dictionary archive with an empty, hidden
+or path-like title is refused before it is moved into place (the native importer still writes
+under the name it was given first, as noted above); leaving the Backup screen clears a cancelled
+archive's overlay; a page turn reuses one `Range` instead of making one per text node; the two
+compiler warnings in app code are gone. `docs/CHANGELOG.md` now covers the branch's later
+features, which were missing from it.
+
+### Reviewed and not changed
+
+- **On-device translations queue and cannot be cancelled.** Requests now outlive the popup by
+  design, so five quick taps run five generations in order, after the reader closes too, and
+  the model cannot be unloaded on a memory warning meanwhile. Only the wrong streaming text was
+  fixed. Whether a newer on-device request should cancel an older one is a product decision.
+- Statistics and usage lanes store a GET's ETag header rather than the listed ETag, and bookmark
+  shards are never refetched if a server omits ETags. Both depend on the production server,
+  which currently matches. One reader-preference record dated more than a day ahead stalls
+  preference sync until the clock catches up.
+- A sync token that survives reinstalling the app in the Keychain is used with the default
+  server address. The app declares multiple-scene support but presents readers in the first
+  connected scene. Bulk selection stores whole metadata values, so a reload can strand one.
+- Sentence breaks around block images can add an empty last page. Manga opens on the local page
+  while a remote position is in flight, so a swipe in that moment can win over it. A rotation
+  during a manga page turn can freeze the old snapshot for two seconds.
+- Sentence mode saves no progress for a book without chapter metrics.
+- The shelf's progress labels are not refreshed when a poll moves a position; a full shelf
+  reload for that would bring back the stall this branch removed.
+- The fallback from a failed cloud request to a stored pre-translation never triggers, because
+  the clients wrap the URL error. The first-launch dictionary download cannot be skipped while it
+  runs. Downloaded podcast lessons cannot be deleted individually.
+- Test strength: 53 of the Python regression tests assert that strings exist in Swift source;
+  the podcast UI test can pass without audio playing; `StatisticsSyncUITests` performs no sync.
+- `FirstLaunchSetup` is created before the migration out of Documents and creates the
+  dictionary folders, so an upgrade from a build older than April 2026 would skip migrating
+  its dictionaries. This does not affect an installation that has already migrated.
+- Smaller suggestions not taken: the AI key is read from the Keychain on every pass of the manga
+  toolbar; a popup rebuilds its entries whenever its parent redraws; cloud translation requests
+  stop after 90 s; the dictionary search field selects all on every update while focused; a
+  failed manual dictionary import removes the dictionary it was replacing; an EPUB that is
+  already in the library is skipped without a message; shelves do not remember being expanded;
+  shelf titles do not follow Dynamic Type; the day-rollover timer in Statistics is created in
+  the view body; one unreadable dictionary image stops a whole AnkiConnect export.
+
+Not read by any reviewer: `Features/News`, the Google Drive handlers, `Core/LookupEngine`,
+`Core/LocalFileServer`, `scrollreader.js`, the manga crop views, and the bodies of several hosted
+test files. iPad layout, Dynamic Type and VoiceOver were not checked at run time.
+
+### Verification
+
+`build/parity-python/bin/python tools/test_ios_parity.py` exited **0** on `3ebbb31`, the last
+code commit of this pass:
+
+- **20** real-server tests and **108** Python regressions passed.
+- **339** hosted XCTest cases passed with zero failures or skipped scenarios: the 333 the
+  branch had, and six added here.
+- **8** UI cases passed: both bookshelf navigation cases, cloud manga download, both podcast
+  scenarios, Statistics, zoomed manga selection and thin manga action buttons.
+- In that run the poll measured 2.50 ms on its first pass, 2.83 ms over later ones, 1.86 ms in a
+  statistics pass and 2.21 ms after a reading save, with heartbeat gaps of 3 ms or less. The
+  rendered shelf scrolled through four real polls with 980 display callbacks and a longest gap of
+  17 ms. A manga page turn took 6.91 ms CPU / 7.26 ms wall. The 57-page chapter was paginated
+  in 969 ms, and the single-file book was left alone in 7 ms.
+
+The gate also passed on the untouched branch and once more before the last small commit. The
+page-turn assertion read 8.19 ms once, while a WebKit timing harness was running on the same Mac;
+alone it reads 6.5–7.3 ms. Timing tests need an otherwise idle machine.
+
+Tests added, each failing without its fix where it guards one:
+`testPagedReaderReturnsToItsPageWhenThePageProcessEndsAndADeadPageCannotTurnTheChapter`,
+`testVerticalRestoreFindsItsPageWhenParagraphsOpenWithALineBreak`,
+`testLongChaptersPaginateQuicklyAndASingleFileBookIsLeftAlone`,
+`testFixedGrammarKeysAgreeWithTheFormatterInEveryZoneAndForMalformedText`,
+`testUsageKeysParseWithoutAFormatterAndRejectWhatTheServerMustNotSend`,
+`testABackupIsOnlyRestoredOverTheKindOfCollectionItHolds`, and the usage keys in the
+large-library poll test.
+
+Not verified here: chapter opening time and recovery from a discarded page on the physical iPad;
+the 1–2 px line differences were measured in macOS WebKit and not looked at on a device; the
+restore confirmation and refusal messages, the screen for a book that cannot be opened, the
+VoiceOver labels and the podcast slider have no UI test and were not tried by hand.
+
+Logs (ignored): `build/claude-baseline-gate.log`, `build/claude-final-gate.log`,
+`build/claude-final-gate-2.log`, `build/ios-sync-integration.log`, `build/ios-parity-ui.log`.
