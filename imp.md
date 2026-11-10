@@ -930,3 +930,20 @@ VoiceOver labels and the podcast slider have no UI test and were not tried by ha
 
 Logs (ignored): `build/claude-baseline-gate.log`, `build/claude-final-gate.log`,
 `build/claude-final-gate-2.log`, `build/ios-sync-integration.log`, `build/ios-parity-ui.log`.
+
+### Installation on the iPad mini
+
+`main` was fast-forwarded to `40038a3`, the branch's 41 commits; it has not been pushed. A
+Release build of that commit for the iPad mini (A20 Pro) succeeded with no warnings in app code
+and passed strict, deep signature verification. Its bundled `reader.js`, `textlayout.js`,
+`popup.js` and `furigana.js` are byte-identical to the committed files.
+
+`devicectl device install app` installed it over the existing app (1.2.0, build 12). The first
+library listing after the install failed with a CoreDevice streaming error and the next one
+succeeded: all **31** entries under `Library/Application Support/Books` that were there before
+the install are there after it, by name. No test runner, fixture or diagnostic flag was used on
+the iPad.
+
+A normal launch was refused with `Locked` on each attempt, so the new build has **not** been
+started or seen running on the device. Nothing in this pass was observed on the iPad itself.
+
