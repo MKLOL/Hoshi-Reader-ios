@@ -1011,3 +1011,11 @@ Python regressions, **342** hosted XCTest cases with no failures or skipped scen
 same 8 UI cases. The poll measured 2.15 / 2.61 / 2.01 / 2.23 ms and a manga page turn 7.41 ms
 CPU. Log: `build/claude-final-gate-3.log`.
 
+### Second installation on the iPad mini
+
+`main` was fast-forwarded to `226b907`, which adds the fourth review's fixes. A Release build of
+it succeeded with no warnings in app code and a valid strict, deep signature, and was installed
+over the app on the iPad mini. All **31** library entries listed before the install are listed
+after it. The launch was again refused with `Locked`, so this build has not been started or seen
+running on the device either.
+
