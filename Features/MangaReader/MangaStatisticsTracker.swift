@@ -8,7 +8,7 @@ nonisolated struct MangaStatisticsTracker {
     let device: ReadingDevice?
     /// Manga records one duration per completed page, independently of periodic time ticks.
     let trackPageDurations: Bool
-    private(set) var allStats: [Statistics]
+    private var statisticsByDate: [String: [Statistics]]
     private(set) var isTracking = false
     private(set) var session: Statistics
     private var localToday: Statistics
@@ -23,15 +23,20 @@ nonisolated struct MangaStatisticsTracker {
     }
     func dayTotal(at date: Date, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar) -> Statistics {
         let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
-        let total = ReadingDay.days(reading: rows, resetHour: resetHour, calendar: calendar).first { $0.date == day }
-        var result = Statistics.empty(title: title, day: ReadingDay.key(day, calendar: calendar))
+        let dates = readingDaySourceDates(day, calendar: calendar)
+        let total = ReadingDay.days(reading: dates.flatMap { rows(on: $0) }, resetHour: resetHour, calendar: calendar)
+            .first { $0.date == day }
+        var result = Statistics.empty(title: title, day: dates[0])
         result.readingTime = total?.seconds ?? 0; result.charactersRead = total?.characters ?? 0
         result.lastReadingSpeed = StatisticsNumbers.speed(count: result.charactersRead, seconds: result.readingTime)
         return result
     }
     func textTotal(_ text: [MangaTextStatistic], at date: Date = .now, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar) -> Int {
         let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
-        return ReadingDay.days(reading: rows, text: text, resetHour: resetHour, calendar: calendar).first { $0.date == day }?.characters ?? 0
+        let dates = readingDaySourceDates(day, calendar: calendar)
+        let relevantText = text.filter { dates.contains($0.dateKey) }
+        return ReadingDay.days(reading: dates.flatMap { rows(on: $0) }, text: relevantText, resetHour: resetHour, calendar: calendar)
+            .first { $0.date == day }?.characters ?? 0
     }
     var allTime: Statistics {
         let rows = rows
@@ -39,19 +44,32 @@ nonisolated struct MangaStatisticsTracker {
         total.mangaPageSeconds = Statistics.sumPageSeconds(rows.map(\.mangaPageSeconds))
         return total
     }
-    private var rows: [Statistics] { Statistics.merged(allStats.filter { $0.key != localToday.key } + [localToday]) }
+    private var rows: [Statistics] {
+        Statistics.merged(statisticsByDate.values.flatMap { $0 }.filter { $0.key != localToday.key } + [localToday])
+    }
+
+    private func rows(on date: String) -> [Statistics] {
+        let stored = statisticsByDate[date] ?? []
+        guard date == localToday.dateKey else { return stored }
+        return stored.filter { $0.deviceId != localToday.deviceId } + [localToday]
+    }
+
+    /// A row can contain the previous calendar day's pre-reset hours, up to two days back.
+    private func readingDaySourceDates(_ day: Date, calendar: Calendar) -> [String] {
+        (0...2).map { ReadingDay.key(ReadingDay.shift(day, by: $0, calendar: calendar), calendar: calendar) }
+    }
 
     init(title: String, initialStatistics: [Statistics], enabled: Bool, now: Date = .now, device: ReadingDevice? = nil, trackPageDurations: Bool = false, timeZone: TimeZone = .current) {
         self.title = title
         self.enabled = enabled
         self.device = device
         self.trackPageDurations = trackPageDurations
-        allStats = Statistics.merged(initialStatistics)
+        statisticsByDate = Dictionary(grouping: Statistics.merged(initialStatistics), by: \.dateKey)
         lastTimestamp = now
         lastTimeZone = timeZone
         let day = ReaderDateFormatting.shared.dayKey(for: now, timeZone: timeZone)
         session = .empty(title: title, day: day, device: device)
-        localToday = allStats.first { $0.dateKey == day && $0.deviceId == device?.id } ?? .empty(title: title, day: day, device: device)
+        localToday = statisticsByDate[day]?.first { $0.deviceId == device?.id } ?? .empty(title: title, day: day, device: device)
     }
 
     mutating func start(currentPage: Int, now: Date = .now, timeZone: TimeZone = .current) {
@@ -81,8 +99,8 @@ nonisolated struct MangaStatisticsTracker {
         let recordingZone = lastTimeZone
         let day = ReaderDateFormatting.shared.dayKey(for: now, timeZone: recordingZone)
         if day != localToday.dateKey {
-            allStats = rows
-            localToday = allStats.first { $0.dateKey == day && $0.deviceId == device?.id } ?? .empty(title: title, day: day, device: device)
+            statisticsByDate[localToday.dateKey] = rows(on: localToday.dateKey)
+            localToday = statisticsByDate[day]?.first { $0.deviceId == device?.id } ?? .empty(title: title, day: day, device: device)
         }
         if trackPageDurations { activePageSeconds += elapsed }
         let delta = max(-session.charactersRead, currentPage - lastPageCount)
@@ -117,12 +135,15 @@ nonisolated struct MangaStatisticsTracker {
     }
     mutating func statisticsForPersistence() -> [Statistics]? {
         guard enabled, hasUpdated else { return nil }
-        allStats = rows
-        return allStats
+        let persisted = rows
+        statisticsByDate = Dictionary(grouping: persisted, by: \.dateKey)
+        return persisted
     }
     mutating func mergeHistory(_ incoming: [Statistics]) {
-        allStats = Statistics.merged(rows + incoming)
-        if let merged = allStats.first(where: { $0.key == localToday.key }) { localToday = merged }
+        statisticsByDate = Dictionary(grouping: Statistics.merged(rows + incoming), by: \.dateKey)
+        if let merged = statisticsByDate[localToday.dateKey]?.first(where: { $0.deviceId == localToday.deviceId }) {
+            localToday = merged
+        }
     }
     static func deduplicate(_ statistics: [Statistics]) -> [Statistics] { Statistics.merged(statistics) }
     static func dateKey(for date: Date) -> String {

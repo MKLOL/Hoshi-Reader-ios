@@ -38,6 +38,13 @@ import CryptoKit
     nonisolated private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     nonisolated private static func days(_ data: Data, key: Key) throws -> [String: Data] {
         if let day = key.day { return [day: data] }
+        let first = key.month + "-01"
+        let utc = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
+        guard let start = ReadingDay.parse(first, calendar: utc),
+              let daysInMonth = utc.range(of: .day, in: .month, for: start)?.count else {
+            throw HttpSyncError("Invalid usage month")
+        }
+        let last = key.month + "-" + String(daysInMonth)
         var result: [String: Data] = [:]
         var formatters: [String: DateFormatter] = [:]
         let decoder = JSONDecoder()
@@ -53,8 +60,10 @@ import CryptoKit
                 formatters[zone.identifier] = formatter
             }
             let day = formatter.string(from: Date(timeIntervalSince1970: Double(stamp.at) / 1000))
-            guard day.hasPrefix(key.month + "-") else { continue }
-            result[day, default: Data()].append(contentsOf: line); result[day]!.append(10)
+            // Keep older records even if the source writer filed them in a neighboring month.
+            // Only the cache filename is constrained; statistics use the event's actual clock.
+            let fileDay = min(last, max(first, day))
+            result[fileDay, default: Data()].append(contentsOf: line); result[fileDay]!.append(10)
         }
         return result
     }

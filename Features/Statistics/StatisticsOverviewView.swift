@@ -8,7 +8,6 @@ struct StatisticsOverviewView: View {
     @State private var selectedTab = 0
     @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
-    private var today: DailyReading { model.days.first { $0.date == readingDate } ?? DailyReading(date: readingDate) }
 
     var body: some View {
         List {
@@ -55,8 +54,13 @@ struct StatisticsOverviewView: View {
                 else { Text("Checking other devices’ reading…").font(.caption).foregroundStyle(.secondary) }
             }
         }
+        let calendar = StatisticsZone.calendar
+        let days = model.streakDays(today: readingDate, calendar: calendar)
+        let today = days.recent.first { $0.date == readingDate } ?? DailyReading(date: readingDate)
         UsageTodaySection(reading: today, usage: usage.today)
-        StreakSections(days: model.days, readingDate: readingDate, resetHour: resetHour)
+        if model.loaded {
+            StreakSections(days: days, readingDate: readingDate, resetHour: resetHour, calendar: calendar)
+        }
         if model.books.isEmpty {
             if model.loaded {
                 Section {
@@ -95,9 +99,10 @@ struct StatisticsOverviewView: View {
 
 /// The streak with today's progress, then the goal and what a reading day is.
 private struct StreakSections: View {
-    let days: [DailyReading]
+    let days: (older: ArraySlice<DailyReading>, recent: ArraySlice<DailyReading>, revision: UUID)
     let readingDate: Date
     let resetHour: Int
+    let calendar: Calendar
     /// The goal while the slider moves; saving (and syncing) happens when it is released.
     @State private var draftGoal: Double?
     @AppStorage(ReadingDay.goalKey) private var goal = 10
@@ -113,10 +118,11 @@ private struct StreakSections: View {
     var body: some View {
         let goalMinutes = min(120, max(1, goal))
         let goalSeconds = Double(goalMinutes) * 60
-        let streak = StatisticsMath.streak(days, goalMinutes: goalMinutes, resetHour: resetHour)
-        let todaySeconds = days.first { $0.date == readingDate }?.seconds ?? 0
+        let streak = ReadingStreakCache.shared.compute(older: days.older, recent: days.recent, historyRevision: days.revision,
+            minimumSeconds: goalSeconds, today: readingDate, calendar: calendar)
+        let todaySeconds = streak.todaySeconds
         let reached = todaySeconds >= goalSeconds
-        let onGoal = days.filter { $0.date <= readingDate && $0.seconds >= goalSeconds }.count
+        let onGoal = streak.qualifyingDays
         Section("Reading streak") {
             VStack(alignment: .leading, spacing: 14) {
                 let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 14))

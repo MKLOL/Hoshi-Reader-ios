@@ -17,6 +17,15 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
+    func testOldHoursRebasedOutsideTheirRowUseTheSavedDateWithoutCreatingAnExtraDay() {
+        var legacy = row("2026-01-10", seconds: 720,
+            hours: ["2026-01-10T18:00": 120, "2026-01-11T07:00": 600])
+        legacy.timeZone = "Asia/Tokyo"
+        let days = ReadingDay.days(reading: [legacy], resetHour: 3, calendar: calendar)
+        XCTAssertEqual(days.map(\.date), [date("2026-01-10")])
+        XCTAssertEqual(days.map(\.seconds), [720])
+    }
+
     func testNewSettingsDefaultToThreeAndMidnightRemainsAValidChoice() {
         let suite = "StatisticsDayParityTests." + UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }

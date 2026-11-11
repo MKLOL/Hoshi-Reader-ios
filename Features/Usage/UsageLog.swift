@@ -40,6 +40,13 @@ nonisolated final class UsageLog: @unchecked Sendable {
     static let shared = UsageLog()
     let directory: URL
     private let queue = DispatchQueue(label: "hoshi.usage-log", qos: .utility)
+    private struct DecodedFile {
+        let stamp: HttpStatisticsPreparedBook.Stamp
+        let events: [UsageEvent]
+    }
+    // Accessed only on queue. Keep the bounded chart window and the first log dates.
+    private var decodedFiles: [URL: DecodedFile] = [:]
+
     init(directory: URL? = nil) {
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("usage-log", isDirectory: true)
     }
@@ -190,38 +197,53 @@ nonisolated final class UsageLog: @unchecked Sendable {
                 let since = StatisticsZone.calendar.date(byAdding: .day, value: -(historyDays + 4), to: now) ?? now
                 let sinceKey = ReadingDay.key(since)
                 var events: [UsageEvent] = [], firstDayKey: String?
+                var retained: [URL: DecodedFile] = [:]
                 for (folder, namespace) in folders {
                     let files = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "ndjson" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
                     for (index, file) in files.enumerated() {
-                        guard file.deletingPathExtension().lastPathComponent >= sinceKey || index < 3, let handle = try? FileHandle(forReadingFrom: file) else { continue }
-                        defer { try? handle.close() }
-                        var pending = Data()
-                        while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
-                            pending.append(chunk)
-                            while let end = pending.firstIndex(of: 10) {
-                                if var event = try? JSONDecoder().decode(UsageEvent.self, from: pending[..<end]) {
-                                    if index < 3 {
-                                        let calendar = StatisticsZone.calendar(zone: event.instantZone)
-                                        let localDay = ReadingDay.date(at: event.date, resetHour: resetHour, calendar: calendar)
-                                        let key = ReaderDateFormatting.shared.dayKey(for: localDay, timeZone: event.instantZone)
-                                        firstDayKey = min(firstDayKey ?? key, key)
-                                    }
-                                    if event.date >= since {
-                                        event.session = namespace + "|" + (event.session ?? "")
-                                        events.append(event)
-                                    }
-                                }
-                                pending.removeSubrange(...end)
+                        guard file.deletingPathExtension().lastPathComponent >= sinceKey || index < 3,
+                              let stamp = HttpStatisticsPreparedBook.Stamp.read(file) else { continue }
+                        let decoded = decodedFiles[file].flatMap { $0.stamp == stamp ? $0 : nil }
+                            ?? Self.decode(file, stamp: stamp, namespace: namespace)
+                        guard let decoded else { continue }
+                        retained[file] = decoded
+                        if index < 3 {
+                            for event in decoded.events {
+                                let calendar = StatisticsZone.calendar(zone: event.instantZone)
+                                let localDay = ReadingDay.date(at: event.date, resetHour: resetHour, calendar: calendar)
+                                let key = ReaderDateFormatting.shared.dayKey(for: localDay, timeZone: event.instantZone)
+                                firstDayKey = min(firstDayKey ?? key, key)
                             }
-                            if pending.count > 1024 * 1024 { pending.removeAll() }
                         }
+                        events.append(contentsOf: decoded.events.lazy.filter { $0.date >= since })
                     }
                 }
+                decodedFiles = retained
                 continuation.resume(returning: (events.sorted { $0.at == $1.at ? ($0.session ?? "") < ($1.session ?? "") : $0.at < $1.at }, firstDayKey))
             }
         }
     }
 
+    private static func decode(_ file: URL, stamp: HttpStatisticsPreparedBook.Stamp, namespace: String) -> DecodedFile? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        let decoder = JSONDecoder()
+        var events: [UsageEvent] = [], pending = Data()
+        do {
+            while let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
+                pending.append(chunk)
+                while let end = pending.firstIndex(of: 10) {
+                    if var event = try? decoder.decode(UsageEvent.self, from: pending[..<end]) {
+                        event.session = namespace + "|" + (event.session ?? "")
+                        events.append(event)
+                    }
+                    pending.removeSubrange(...end)
+                }
+                if pending.count > 1024 * 1024 { pending.removeAll() }
+            }
+            return DecodedFile(stamp: stamp, events: events)
+        } catch { return nil }
+    }
 }
 
 extension Notification.Name {

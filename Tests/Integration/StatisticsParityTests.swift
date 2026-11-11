@@ -7,6 +7,36 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         row.readingTime = seconds; row.charactersRead = count; row.lastStatisticModified = stamp
         return row
     }
+    @MainActor func testRecentStreakUpdatesReuseYearsOfHistoryAndAdvanceAtRollover() throws {
+        let calendar = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
+        let today = try XCTUnwrap(ReadingDay.parse("2026-09-12", calendar: calendar))
+        func reading(_ daysAgo: Int) -> DailyReading {
+            DailyReading(date: ReadingDay.shift(today, by: -daysAgo, calendar: calendar), seconds: 900)
+        }
+        let older = (3...2002).reversed().map(reading)
+        let recent = [reading(2), reading(1)]
+        let revision = UUID(), cache = ReadingStreakCache()
+        let initial = cache.compute(older: older[...], recent: recent[...], historyRevision: revision,
+            minimumSeconds: 600, today: today, calendar: calendar)
+        XCTAssertEqual(initial.current, 2002)
+        let refreshed = cache.compute(older: [], recent: (recent + [reading(0)])[...], historyRevision: revision,
+            minimumSeconds: 600, today: today, calendar: calendar)
+        XCTAssertEqual(refreshed.current, 2003)
+
+        let tomorrow = ReadingDay.shift(today, by: 1, calendar: calendar)
+        let afterMidnight = cache.compute(older: [reading(3), reading(2)], recent: [reading(1), reading(0)], historyRevision: revision,
+            minimumSeconds: 600, today: tomorrow, calendar: calendar)
+        XCTAssertEqual(afterMidnight.current, 2003)
+        XCTAssertEqual(afterMidnight.longest, 2003)
+        XCTAssertEqual(afterMidnight.qualifyingDays, 2003)
+
+        let historicalEdit = cache.compute(older: older.dropLast(), recent: recent[...], historyRevision: UUID(),
+            minimumSeconds: 600, today: today, calendar: calendar)
+        XCTAssertEqual(historicalEdit.current, 2)
+        XCTAssertEqual(historicalEdit.longest, 1999)
+        XCTAssertEqual(historicalEdit.qualifyingDays, 2001)
+    }
+
     func testDeviceRowsAddButDuplicatesDoNot() {
         let rows = Statistics.merged([row(), row(), row(device: "tablet", seconds: 120)])
         XCTAssertEqual(rows.count, 2)

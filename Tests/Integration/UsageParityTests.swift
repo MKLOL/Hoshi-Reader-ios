@@ -97,6 +97,35 @@ nonisolated final class UsageParityTests: XCTestCase {
         XCTAssertEqual(saved.events[0].type, .page)
         XCTAssertEqual(try directory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
     }
+    func testCachedUsageFilesDetectHistoricalReplacementAndRemoval() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = UsageLog(directory: directory)
+        let instant = Date(timeIntervalSince1970: 1_792_872_000)
+        let now = instant.addingTimeInterval(7 * 24 * 3600)
+        let stamp = Int64(instant.timeIntervalSince1970 * 1000)
+        let day = ReaderDateFormatting.shared.dayKey(for: instant, timeZone: TimeZone(secondsFromGMT: 0)!)
+        func payload(term: String) throws -> Data {
+            var data = try JSONEncoder().encode(UsageEvent(at: stamp, utcOffset: "+00:00", type: .lookup, term: term))
+            data.append(10)
+            return data
+        }
+        try await log.store(days: [day: payload(term: "one")], device: "remote", mergeOwn: false)
+        let before = await log.read(now: now)
+        XCTAssertEqual(before.events.map(\.term), ["one"])
+
+        let file = directory.appendingPathComponent("devices/remote/\(day).ndjson")
+        let modified = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+        try await log.store(days: [day: payload(term: "two")], device: "remote", mergeOwn: false)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+        let replaced = await log.read(now: now)
+        XCTAssertEqual(replaced.events.map(\.term), ["two"])
+
+        try await log.clearDeviceDays()
+        let removed = await log.read(now: now)
+        XCTAssertTrue(removed.events.isEmpty)
+    }
+
     @MainActor func testBubbleRevealIsCountedOncePerSessionAndCloseIsIdempotent() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -149,6 +178,37 @@ nonisolated final class UsageParityTests: XCTestCase {
         let after = await kv.requests; XCTAssertEqual(count, after)
         let writes = await kv.writes; XCTAssertEqual(writes, [key])
     }
+    @MainActor func testLegacyEventsAtCompactedMonthBoundariesKeepTheirRecordedDay() async throws {
+        let directory = try directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let iso = ISO8601DateFormatter()
+        let now = try XCTUnwrap(iso.date(from: "2026-02-02T12:00:00Z"))
+        let log = UsageLog(directory: directory), lane = HttpUsageLane(log: log, now: { now }), kv = UsageMemoryKV()
+        func upload(month: String, utc: String, offset: String?, term: String) async throws {
+            let instant = try XCTUnwrap(iso.date(from: utc))
+            let event = UsageEvent(at: Int64(instant.timeIntervalSince1970 * 1000), utcOffset: offset, type: .lookup, term: term)
+            var line = try JSONEncoder().encode(event); line.append(10)
+            let key = HttpUsageLane.prefix + "android/" + month + HttpUsageLane.suffix
+            _ = try await kv.put(key: key, contentType: "application/gzip", body: UsageGzip.compress(line))
+        }
+        try await upload(month: "2026-01", utc: "2026-02-01T01:00:00Z", offset: "-05:00", term: "雨")
+        try await upload(month: "2026-02", utc: "2026-02-01T02:00:00Z", offset: nil, term: "雪")
+        let listing = await kv.metadata()
+        let errors = await lane.run(transport: kv, listing: listing, deviceID: "ios", scope: "a", flush: true, retryFailed: true)
+        XCTAssertTrue(errors.isEmpty, "\(errors)")
+        let snapshot = await log.read(now: now)
+        XCTAssertEqual(snapshot.events.map(\.term), ["雨", "雪"])
+        let calendar = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
+        let january = try XCTUnwrap(ReadingDay.parse("2026-01-31", calendar: calendar))
+        let february = try XCTUnwrap(ReadingDay.parse("2026-02-01", calendar: calendar))
+        let days = UsageDay.summarize(snapshot.events, dates: [january, february], calendar: calendar, resetHour: 3)
+        XCTAssertEqual(days[january]?.lookups, 2)
+        XCTAssertEqual(days[february]?.lookups, 0)
+        let requests = await kv.requests
+        _ = await lane.run(transport: kv, listing: listing, deviceID: "ios", scope: "a", flush: true, retryFailed: true)
+        let after = await kv.requests
+        XCTAssertEqual(requests, after)
+    }
+
     @MainActor func testOwnRestoredLogMergesBeforeUploadAndPastMonthsCompactOnlyOwnDays() async throws {
         let directory = try directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let calendar = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)

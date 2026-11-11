@@ -147,6 +147,34 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
         XCTAssertEqual(tracker.allTime.mangaPageSeconds, [:])
         XCTAssertEqual(tracker.allTime.readingTime, 30)
     }
+    func testTodayIncludesPreviousDayHoursFromTwoDatesAheadAfterSync() throws {
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let calendar = StatisticsZone.calendar(zone: utc)
+        let today = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-01-10T12:00:00Z"))
+        var older = Statistics.empty(title: "Manga", day: "2026-01-08", device: phone)
+        older.readingTime = 3600
+        var tracker = MangaStatisticsTracker(title: "Manga", initialStatistics: [older], enabled: true,
+            now: today, device: phone, timeZone: utc)
+        XCTAssertEqual(tracker.dayTotal(at: today, resetHour: 3, calendar: calendar).readingTime, 0)
+
+        var ahead = Statistics.empty(title: "Manga", day: "2026-01-12", device: tablet)
+        ahead.readingTime = 1200
+        ahead.charactersRead = 100
+        ahead.readingTimeByHour = ["2026-01-11T02:00": 600, "2026-01-11T04:00": 600]
+        tracker.mergeHistory([ahead])
+        let text = [
+            MangaTextStatistic(dateKey: "2026-01-12", charactersRead: 20, deviceId: tablet.id),
+            MangaTextStatistic(dateKey: "2026-01-08", charactersRead: 80, deviceId: phone.id),
+        ]
+        let total = tracker.dayTotal(at: today, resetHour: 3, calendar: calendar)
+        XCTAssertEqual(total.dateKey, "2026-01-10")
+        XCTAssertEqual(total.readingTime, 600)
+        XCTAssertEqual(total.charactersRead, 50)
+        XCTAssertEqual(tracker.textTotal(text, at: today, resetHour: 3, calendar: calendar), 10)
+        XCTAssertEqual(tracker.dayTotal(at: today, resetHour: 5, calendar: calendar).readingTime, 1200)
+        XCTAssertEqual(tracker.allTime.readingTime, 4800)
+    }
+
     func testASpreadTurnSplitsItsTimeBetweenBothPages() {
         var tracker = tracker()
         tracker.start(currentPage: 0, now: start)

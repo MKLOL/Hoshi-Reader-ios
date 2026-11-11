@@ -108,6 +108,85 @@ nonisolated final class StatisticsPerformanceTests: XCTestCase {
         XCTAssertEqual(model.days.map(\.seconds), [600])
         XCTAssertEqual(model.books.first?.days.map(\.seconds), [600])
     }
+    @MainActor func testOnlyEditedSourceDatesRebuildAndHistoricalSyncInvalidatesTheStreakPrefix() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("statistics-cache-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = directory.appendingPathComponent("fixture")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try BookStorage.save(BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, syncId: "fixture"),
+                             inside: root, as: FileNames.metadata)
+        let calendar = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
+        let now = try XCTUnwrap(ReadingDay.parse("2026-10-12", calendar: calendar)).addingTimeInterval(12 * 3600)
+        func recent(_ seconds: Double) -> Statistics {
+            var value = Statistics.empty(title: "Fixture", day: "2026-10-12", device: ReadingDevice(id: "ios", name: "iPad"))
+            value.readingTime = seconds
+            value.readingTimeByHour = ["2026-10-12T12:00": seconds]
+            value.lastStatisticModified = Int(seconds)
+            return value
+        }
+        try ReadingStatisticsStore.save([row(60), recent(120)], root: root, scheduleSync: false)
+        let first = await StatisticsOverviewSnapshot.read(directory: directory, resetHour: 3, calendar: calendar, now: now)
+        let originalDate = try XCTUnwrap(first.cachedBooks["fixture"]?.sourceDates["2026-10-01"])
+        let originalRecent = try XCTUnwrap(first.cachedBooks["fixture"]?.sourceDates["2026-10-12"])
+
+        try ReadingStatisticsStore.save([recent(240)], root: root, scheduleSync: false)
+        let next = await StatisticsOverviewSnapshot.read(directory: directory, resetHour: 3, calendar: calendar, reusing: first, now: now)
+        XCTAssertTrue(next.cachedBooks["fixture"]?.sourceDates["2026-10-01"] === originalDate)
+        XCTAssertFalse(next.cachedBooks["fixture"]?.sourceDates["2026-10-12"] === originalRecent)
+        XCTAssertEqual(next.historyRevision, first.historyRevision)
+        XCTAssertEqual(next.days.map(\.seconds), [60, 240])
+
+        let oldPeer = row(480, device: "android")
+        let sync = try await HttpStatisticsPreparedBook.prepare(root: root, reading: [oldPeer], text: [])
+        XCTAssertTrue(try sync.commit())
+        let afterSync = await StatisticsOverviewSnapshot.read(directory: directory, resetHour: 3, calendar: calendar, reusing: next, now: now)
+        XCTAssertNotEqual(afterSync.historyRevision, next.historyRevision)
+        XCTAssertFalse(afterSync.cachedBooks["fixture"]?.sourceDates["2026-10-01"] === originalDate)
+        XCTAssertTrue(afterSync.cachedBooks["fixture"]?.sourceDates["2026-10-12"] === next.cachedBooks["fixture"]?.sourceDates["2026-10-12"])
+        XCTAssertEqual(afterSync.days.map(\.seconds), [540, 240])
+        XCTAssertEqual(afterSync.devices.map(\.books), [1, 1])
+
+        let tomorrow = now.addingTimeInterval(24 * 3600)
+        let rolled = await StatisticsOverviewSnapshot.read(directory: directory, resetHour: 3, calendar: calendar, reusing: afterSync, now: tomorrow)
+        XCTAssertEqual(rolled.historyRevision, afterSync.historyRevision)
+        let changedReset = await StatisticsOverviewSnapshot.read(directory: directory, resetHour: 13, calendar: calendar, reusing: rolled, now: tomorrow)
+        XCTAssertNotEqual(changedReset.historyRevision, rolled.historyRevision)
+        XCTAssertEqual(changedReset.days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-09-30", "2026-10-11"])
+
+        try FileManager.default.removeItem(at: root.appendingPathComponent(FileNames.statistics))
+        let restored = await StatisticsOverviewSnapshot.read(directory: directory, resetHour: 3, calendar: calendar, reusing: afterSync, now: tomorrow)
+        XCTAssertTrue(restored.days.isEmpty)
+        XCTAssertNotEqual(restored.historyRevision, afterSync.historyRevision)
+    }
+
+    @MainActor func testReopenedStatisticsReusesHistoryAndChecksSidecarReplacement() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("statistics-reopen-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = directory.appendingPathComponent("fixture")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try BookStorage.save(BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, syncId: "fixture"),
+                             inside: root, as: FileNames.metadata)
+        try ReadingStatisticsStore.save([row(300)], root: root, scheduleSync: false)
+        let today = ReadingDay.date(at: .now, resetHour: 3), calendar = StatisticsZone.calendar
+        let first = StatisticsOverview()
+        await first.reload(resetHour: 3, directory: directory)
+        let prior = first.streakDays(today: today, calendar: calendar).revision
+
+        let reopened = StatisticsOverview()
+        await reopened.reload(resetHour: 3, directory: directory)
+        XCTAssertEqual(reopened.streakDays(today: today, calendar: calendar).revision, prior)
+        XCTAssertEqual(reopened.days.map(\.seconds), [300])
+
+        let sidecar = root.appendingPathComponent(FileNames.statistics)
+        let modified = try XCTUnwrap(try FileManager.default.attributesOfItem(atPath: sidecar.path)[.modificationDate] as? Date)
+        // Restores may preserve the modification date. Atomic replacement still has a new inode.
+        try BookStorage.save([row(900)], inside: root, as: FileNames.statistics)
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: sidecar.path)
+        await reopened.reload(resetHour: 3, directory: directory)
+        XCTAssertEqual(reopened.days.map(\.seconds), [900])
+        XCTAssertNotEqual(reopened.streakDays(today: today, calendar: calendar).revision, prior)
+    }
+
     @MainActor func testASuspendedOlderOverviewReloadCannotReplaceANewerSnapshot() async {
         let gate = StatisticsSnapshotGate()
         let book = BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, syncId: "fixture")
