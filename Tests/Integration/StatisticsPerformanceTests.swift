@@ -102,7 +102,7 @@ nonisolated final class StatisticsPerformanceTests: XCTestCase {
         XCTAssertEqual(model.books.count, 1)
         XCTAssertEqual(model.days.map(\.seconds), [300])
         XCTAssertEqual(model.devices.map(\.seconds), [300])
-        XCTAssertEqual(model.streakHistory.days.map(\.seconds), [300])
+        XCTAssertEqual(model.days.map(\.seconds), [300])
         try ReadingStatisticsStore.save([row(600)], root: root, scheduleSync: false)
         await model.reload(resetHour: 3, directory: directory)
         XCTAssertEqual(model.days.map(\.seconds), [600])

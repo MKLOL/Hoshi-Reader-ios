@@ -36,6 +36,8 @@ nonisolated struct Statistics: Codable, Equatable, Sendable {
     /// Counted seconds by local ISO date/hour, shared with Android; missing hours are legacy evidence.
     var readingTimeByHour: [String: Double] = [:]
     var timeZone: String? = nil
+    /// A single daily row can include local hours recorded in several zones during travel.
+    var readingTimeByZone: [String: [String: Double]] = [:]
     var importedBaseline: ImportedReadingBaseline? = nil
     /// Completed manga pages by active seconds, cumulative for this day and device. Android
     /// writes it as a JSON object with decimal string keys; a histogram keeps the median
@@ -47,7 +49,7 @@ nonisolated extension Statistics {
     private enum CodingKeys: String, CodingKey {
         case title, dateKey, charactersRead, readingTime, minReadingSpeed, altMinReadingSpeed
         case lastReadingSpeed, maxReadingSpeed, lastStatisticModified, deviceId, deviceName, readingTimeByHour, timeZone, importedBaseline
-        case mangaPageSeconds
+        case mangaPageSeconds, readingTimeByZone
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -68,6 +70,7 @@ nonisolated extension Statistics {
         importedBaseline = try values.decodeIfPresent(ImportedReadingBaseline.self, forKey: .importedBaseline)
         timeZone = try values.decodeIfPresent(String.self, forKey: .timeZone)
         readingTimeByHour = try values.decodeIfPresent([String: Double].self, forKey: .readingTimeByHour) ?? [:]
+        readingTimeByZone = try values.decodeIfPresent([String: [String: Double]].self, forKey: .readingTimeByZone) ?? [:]
         let pages = try values.decodeIfPresent([String: Int].self, forKey: .mangaPageSeconds) ?? [:]
         mangaPageSeconds = Statistics.sumPageSeconds(pages.compactMap { key, count in Int(key).map { [$0: count] } })
     }
@@ -87,6 +90,7 @@ nonisolated extension Statistics {
         try values.encodeIfPresent(timeZone, forKey: .timeZone)
         try values.encodeIfPresent(importedBaseline, forKey: .importedBaseline)
         if !readingTimeByHour.isEmpty { try values.encode(readingTimeByHour, forKey: .readingTimeByHour) }
+        if !readingTimeByZone.isEmpty { try values.encode(readingTimeByZone, forKey: .readingTimeByZone) }
         if !mangaPageSeconds.isEmpty {
             try values.encode(Dictionary(uniqueKeysWithValues: mangaPageSeconds.map { (String($0.key), $0.value) }), forKey: .mangaPageSeconds)
         }

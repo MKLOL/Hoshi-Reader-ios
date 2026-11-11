@@ -17,7 +17,6 @@ import Combine
 struct MangaStatisticsView: View {
     @State private var now = Date.now
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
-    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     let model: MangaReaderViewModel
     let userConfig: UserConfig
     @Environment(\.dismiss) private var dismiss
@@ -67,7 +66,8 @@ struct MangaStatisticsView: View {
                     statisticsSection(title: "Today", stat: statistics.today, characters: model.todayCharacters)
                 }
             }
-            .id(ReadingDay.key(ReadingDay.date(at: now, resetHour: resetHour)) + zoneID)
+            .id(ReadingDay.key(ReadingDay.date(at: now, resetHour: resetHour)) + StatisticsZone.calendar.timeZone.identifier)
+            .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in now = .now }
             .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now = $0 }
             .monospacedDigit()
             .onAppear {

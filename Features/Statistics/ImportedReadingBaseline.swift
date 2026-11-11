@@ -75,6 +75,7 @@ nonisolated extension Statistics {
             if hours.values.reduce(0, +) > row.readingTime + 0.001 { hours = [:] }
         }
         row.readingTimeByHour = hours
+        row.readingTimeByZone = [:]
         row.timeZone = hours.isEmpty ? nil : baseline.timeZone
         return row
     }

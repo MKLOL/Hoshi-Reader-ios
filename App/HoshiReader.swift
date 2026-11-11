@@ -47,7 +47,6 @@ struct HoshiReaderApp: App {
         }
         if fixtures["HOSHI_UI_TESTING_STATISTICS"] == "1" {
             HttpSyncSettingsStore.shared.token = ""
-            UserDefaults.standard.set(StatisticsZone.defaultID, forKey: StatisticsZone.key)
             UserDefaults.standard.set(3, forKey: ReadingDay.resetKey)
             UserDefaults.standard.set(10, forKey: ReadingDay.goalKey)
         }

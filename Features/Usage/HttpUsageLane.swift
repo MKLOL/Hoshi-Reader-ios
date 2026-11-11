@@ -15,7 +15,11 @@ import CryptoKit
         var days: [String: [String]] = [:]
     }
     private struct Failure { var etag: String?; var attempts: Int; var retry: Date; var message: String? }
-    nonisolated private struct LineStamp: Decodable { let at: Int64; let utcOffset: String? }
+    nonisolated private struct LineStamp: Decodable {
+        let at: Int64
+        let utcOffset: String?
+        let timeZone: String?
+    }
     private var failures: [String: Failure] = [:]
     private var lastPush = Date.distantPast
     private let log: UsageLog
@@ -40,7 +44,7 @@ import CryptoKit
         for line in data.split(separator: 10) {
             try Task.checkCancellation()
             guard let stamp = try? decoder.decode(LineStamp.self, from: Data(line)) else { continue }
-            let zone = StatisticsZone.zone(stamp.utcOffset) ?? TimeZone(secondsFromGMT: 0)!
+            let zone = UsageEvent.instantZone(timeZone: stamp.timeZone, utcOffset: stamp.utcOffset)
             let formatter: DateFormatter
             if let old = formatters[zone.identifier] { formatter = old }
             else {

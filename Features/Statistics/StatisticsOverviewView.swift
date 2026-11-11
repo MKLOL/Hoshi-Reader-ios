@@ -8,7 +8,6 @@ struct StatisticsOverviewView: View {
     @State private var selectedTab = 0
     @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
-    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     private var today: DailyReading { model.days.first { $0.date == readingDate } ?? DailyReading(date: readingDate) }
 
     var body: some View {
@@ -39,7 +38,9 @@ struct StatisticsOverviewView: View {
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in refresh() }
         .onChange(of: resetHour) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
-        .onChange(of: zoneID) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+            refresh(); Task { await usage.reload(resetHour: resetHour) }
+        }
     }
     private func refresh() {
         readingDate = ReadingDay.date(at: .now, resetHour: resetHour)
@@ -55,7 +56,7 @@ struct StatisticsOverviewView: View {
             }
         }
         UsageTodaySection(reading: today, usage: usage.today)
-        StreakSections(history: model.streakHistory, readingDate: readingDate, resetHour: resetHour, zoneID: zoneID)
+        StreakSections(days: model.days, readingDate: readingDate, resetHour: resetHour)
         if model.books.isEmpty {
             if model.loaded {
                 Section {
@@ -94,10 +95,9 @@ struct StatisticsOverviewView: View {
 
 /// The streak with today's progress, then the goal and what a reading day is.
 private struct StreakSections: View {
-    let history: (days: [DailyReading], estimated: Bool)
+    let days: [DailyReading]
     let readingDate: Date
     let resetHour: Int
-    let zoneID: String
     /// The goal while the slider moves; saving (and syncing) happens when it is released.
     @State private var draftGoal: Double?
     @AppStorage(ReadingDay.goalKey) private var goal = 10
@@ -113,12 +113,10 @@ private struct StreakSections: View {
     var body: some View {
         let goalMinutes = min(120, max(1, goal))
         let goalSeconds = Double(goalMinutes) * 60
-        let streak = StatisticsMath.streak(history.days, goalMinutes: goalMinutes, resetHour: resetHour)
-        // The streak's day, like Android: it includes the credit for records without hours.
-        let todaySeconds = history.days.first { $0.date == readingDate }?.seconds ?? 0
+        let streak = StatisticsMath.streak(days, goalMinutes: goalMinutes, resetHour: resetHour)
+        let todaySeconds = days.first { $0.date == readingDate }?.seconds ?? 0
         let reached = todaySeconds >= goalSeconds
-        let onGoal = history.days.filter { $0.date <= readingDate && $0.seconds >= goalSeconds }.count
-        let zone = StatisticsZone.zone(zoneID) ?? StatisticsZone.calendar.timeZone
+        let onGoal = days.filter { $0.date <= readingDate && $0.seconds >= goalSeconds }.count
         Section("Reading streak") {
             VStack(alignment: .leading, spacing: 14) {
                 let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 14))
@@ -176,19 +174,12 @@ private struct StreakSections: View {
                 ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
             }
             .accessibilityIdentifier("statistics-day-reset")
-            LabeledContent("Time zone", value: StatisticsFormat.zoneName(zone))
+            LabeledContent("This device’s time zone", value: StatisticsFormat.zoneName(.current))
                 .accessibilityIdentifier("statistics-time-zone")
-            // As on Android, a device elsewhere can move every device's days onto its own clock.
-            if TimeZone.current.identifier != zone.identifier {
-                Button("Count days in this device's time zone (\(StatisticsFormat.zoneName(.current)))") {
-                    StatisticsPreferencesStore.choose(zone: TimeZone.current.identifier)
-                }
-            }
         } header: {
             Text("Reading day")
         } footer: {
-            Text("Reading before \(Self.hourLabel(resetHour)) counts toward the previous day everywhere in your statistics. Every device counts days in \(StatisticsFormat.zoneName(zone)) (\(zone.identifier.replacingOccurrences(of: "_", with: " "))), whatever time zone it is set to."
-                 + (history.estimated ? "\n\nEarlier history has no exact time, so your streak gets credit on either possible day; reading totals stay unchanged." : ""))
+            Text("Reading before \(Self.hourLabel(resetHour)) counts toward the previous day in the time zone where you read. Today follows this device’s clock. Earlier entries without a time zone use US Eastern.")
         }
     }
 }
@@ -235,7 +226,6 @@ struct BookStatisticsDetailView: View {
     @State private var showAllHistory = false
     @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
-    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     private var item: BookReadingSummary? { model.books.first { $0.id == bookId } }
     var body: some View {
         List {
@@ -298,7 +288,7 @@ struct BookStatisticsDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { model.scheduleReload(resetHour: resetHour) }
         .onChange(of: resetHour) { _, _ in model.scheduleReload(resetHour: resetHour) }
-        .onChange(of: zoneID) { _, _ in model.scheduleReload(resetHour: resetHour) }
+        .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in model.scheduleReload(resetHour: resetHour) }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in model.scheduleReload(resetHour: resetHour) }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in model.scheduleReload(resetHour: resetHour) }
     }

@@ -5,6 +5,7 @@ nonisolated struct UsageSpan: Identifiable {
     let end: Date
     let title: String
     let session: String
+    let zone: TimeZone
     var id: String { session + "|" + String(start.timeIntervalSince1970) }
     var seconds: Double { max(0, end.timeIntervalSince(start)) }
 }
@@ -15,6 +16,18 @@ nonisolated struct UsageDay {
     var spans: [UsageSpan] = []
     var firstActivity: Date?
     var lastActivity: Date?
+    var firstActivityZone: TimeZone?
+    var lastActivityZone: TimeZone?
+
+    mutating func noteActivity(_ instant: Date, zone: TimeZone) {
+        if firstActivity.map({ instant < $0 }) ?? true {
+            firstActivity = instant; firstActivityZone = zone
+        }
+        if lastActivity.map({ instant > $0 }) ?? true {
+            lastActivity = instant; lastActivityZone = zone
+        }
+    }
+
     static func summarize(_ events: [UsageEvent], date: Date, calendar: Calendar = .current, resetHour: Int = 0) -> Self {
         let day = calendar.startOfDay(for: date)
         return summarize(events, dates: [day], calendar: calendar, resetHour: resetHour)[day] ?? Self(date: day)
@@ -26,23 +39,34 @@ nonisolated struct UsageDay {
         let dates = Set(dates.map { calendar.startOfDay(for: $0) }).sorted()
         guard let first = dates.first, let lastDay = dates.last else { return [:] }
         var result = Dictionary(uniqueKeysWithValues: dates.map { ($0, Self(date: $0)) })
-        let start = ReadingDay.boundary(on: first, resetHour: resetHour, calendar: calendar)
-        let end = ReadingDay.boundary(on: ReadingDay.shift(lastDay, by: 1, calendar: calendar), resetHour: resetHour, calendar: calendar)
         let ordered = events.sorted { $0.at < $1.at }
         var opened: [String: UsageEvent] = [:], last: [String: Date] = [:]
         var words: [Date: [String: (Int, Int)]] = [:]
-        func addSpan(from: Date, to: Date, event: UsageEvent) {
+        func matchingDate(_ date: Date, from source: Calendar, to target: Calendar) -> Date? {
+            guard let day = target.date(from: source.dateComponents([.year, .month, .day], from: date)) else { return nil }
+            return target.startOfDay(for: day)
+        }
+        func addSpan(from: Date, to: Date, event: UsageEvent, zone: TimeZone) {
+            let source = StatisticsZone.calendar(zone: zone)
+            guard let firstLocal = matchingDate(first, from: calendar, to: source),
+                  let lastLocal = matchingDate(lastDay, from: calendar, to: source) else { return }
+            let start = ReadingDay.boundary(on: firstLocal, resetHour: resetHour, calendar: source)
+            let end = ReadingDay.boundary(on: ReadingDay.shift(lastLocal, by: 1, calendar: source), resetHour: resetHour, calendar: source)
             let a = max(start, from), b = min(end, to)
             guard b > a else { return }
-            var day = ReadingDay.date(at: a, resetHour: resetHour, calendar: calendar)
-            while day <= lastDay {
-                let next = ReadingDay.shift(day, by: 1, calendar: calendar)
-                let spanStart = max(a, ReadingDay.boundary(on: day, resetHour: resetHour, calendar: calendar))
-                let spanEnd = min(b, ReadingDay.boundary(on: next, resetHour: resetHour, calendar: calendar))
-                if spanEnd > spanStart, result[day] != nil {
-                    result[day]!.spans.append(UsageSpan(start: spanStart, end: spanEnd, title: event.bookTitle ?? "Untitled", session: event.session ?? ""))
+            var day = ReadingDay.date(at: a, resetHour: resetHour, calendar: source)
+            while day <= lastLocal {
+                let next = ReadingDay.shift(day, by: 1, calendar: source)
+                let spanStart = max(a, ReadingDay.boundary(on: day, resetHour: resetHour, calendar: source))
+                let spanEnd = min(b, ReadingDay.boundary(on: next, resetHour: resetHour, calendar: source))
+                if spanEnd > spanStart, let label = matchingDate(day, from: source, to: calendar), var summary = result[label] {
+                    summary.spans.append(UsageSpan(start: spanStart, end: spanEnd, title: event.bookTitle ?? "Untitled",
+                        session: event.session ?? "", zone: zone))
+                    summary.noteActivity(spanStart, zone: zone)
+                    summary.noteActivity(spanEnd, zone: zone)
+                    result[label] = summary
                 }
-                if spanEnd >= b { break }
+                if spanEnd >= b || next <= day { break }
                 day = next
             }
         }
@@ -51,13 +75,18 @@ nonisolated struct UsageDay {
             last[session] = at
             if event.type == .started { opened[session] = event }
             if event.type == .stopped {
-                let began = event.startedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? opened[session]?.date ?? at
-                opened[session] = nil; addSpan(from: began, to: at, event: event)
+                let active = opened[session]
+                let start = event.startedAt == nil || active?.at == event.startedAt ? active : nil
+                if start != nil { opened[session] = nil }
+                let began = event.startedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? start?.date ?? at
+                let zone = StatisticsZone.zone(event.startedTimeZone) ?? start?.recordedZone ?? event.recordedZone
+                addSpan(from: began, to: at, event: event, zone: zone)
             }
-            let day = ReadingDay.date(at: at, resetHour: resetHour, calendar: calendar)
-            guard at >= start, at < end, var summary = result[day] else { continue }
-            summary.firstActivity = summary.firstActivity ?? at
-            summary.lastActivity = at
+            let zone = event.instantZone
+            let source = StatisticsZone.calendar(zone: zone)
+            let localDay = ReadingDay.date(at: at, resetHour: resetHour, calendar: source)
+            guard let day = matchingDate(localDay, from: source, to: calendar), var summary = result[day] else { continue }
+            summary.noteActivity(at, zone: zone)
             switch event.type {
             case .opened: summary.sessions += 1
             case .page: if event.source != "jump" { summary.pages += 1 }
@@ -76,11 +105,12 @@ nonisolated struct UsageDay {
             }
             result[day] = summary
         }
-        for (session, event) in opened { addSpan(from: event.date, to: last[session] ?? event.date, event: event) }
+        for (session, event) in opened {
+            addSpan(from: event.date, to: last[session] ?? event.date, event: event, zone: event.recordedZone)
+        }
         for day in dates {
             var summary = result[day]!
             summary.spans.sort { $0.start < $1.start }
-            if let spanStart = summary.spans.first?.start { summary.firstActivity = min(summary.firstActivity ?? spanStart, spanStart) }
             summary.repeated = (words[day] ?? [:]).filter { $0.value.0 > 1 }.sorted { $0.value.0 == $1.value.0 ? $0.value.1 > $1.value.1 : $0.value.0 > $1.value.0 }.prefix(5).map { ($0.key, $0.value.0) }
             result[day] = summary
         }
@@ -124,7 +154,7 @@ nonisolated enum ReadingTrends {
     func reload(resetHour: Int = ReadingDay.resetHour, now: Date = .now, log: UsageLog = .shared) async {
         reloadGeneration += 1
         let generation = reloadGeneration
-        let snapshot = await log.read(now: now)
+        let snapshot = await log.read(now: now, resetHour: resetHour)
         let calendar = StatisticsZone.calendar
         let readingToday = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
         let summaries = await Task.detached {
@@ -133,7 +163,7 @@ nonisolated enum ReadingTrends {
         }.value
         guard generation == reloadGeneration else { return }
         events = snapshot.events
-        firstDay = snapshot.firstDay.map { ReadingDay.date(at: $0, resetHour: resetHour, calendar: calendar) }
+        firstDay = snapshot.firstDayKey.flatMap { ReadingDay.parse($0, calendar: calendar) }
         counts = summaries
         today = summaries[readingToday] ?? UsageDay(date: readingToday)
     }

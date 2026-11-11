@@ -24,6 +24,45 @@ nonisolated final class UsageParityTests: XCTestCase {
         let crashed = [event(.started, date: today), event(.page, date: end)]
         XCTAssertEqual(UsageDay.summarize(crashed, date: today).spans.first?.seconds, 120)
     }
+    func testEachEventUsesItsOwnDateAndMissingZoneUsesEastern() throws {
+        let iso = ISO8601DateFormatter()
+        let newYork = try XCTUnwrap(iso.date(from: "2027-01-10T10:00:00Z"))
+        let tokyo = try XCTUnwrap(iso.date(from: "2027-01-11T14:00:00Z"))
+        let legacy = try XCTUnwrap(iso.date(from: "2027-01-12T05:30:00Z"))
+        let events = [
+            UsageEvent(at: Int64(newYork.timeIntervalSince1970 * 1000), utcOffset: "-05:00", type: .lookup),
+            UsageEvent(at: Int64(tokyo.timeIntervalSince1970 * 1000), utcOffset: "+09:00", type: .lookup),
+            UsageEvent(at: Int64(legacy.timeIntervalSince1970 * 1000), utcOffset: nil, type: .lookup)
+        ]
+        let viewer = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu")))
+        let jan10 = try XCTUnwrap(ReadingDay.parse("2027-01-10", calendar: viewer))
+        let jan11 = try XCTUnwrap(ReadingDay.parse("2027-01-11", calendar: viewer))
+        let jan12 = try XCTUnwrap(ReadingDay.parse("2027-01-12", calendar: viewer))
+        XCTAssertEqual(tokyo.timeIntervalSince(newYork), 28 * 3600)
+        let days = UsageDay.summarize(events, dates: [jan10, jan11, jan12], calendar: viewer, resetHour: 3)
+        XCTAssertEqual([jan10, jan11, jan12].map { days[$0]?.lookups }, [1, 2, 0])
+    }
+
+    func testSpanCanRestartAtTheSameInstantOnThePreviousLocalDate() throws {
+        let iso = ISO8601DateFormatter()
+        let transition = try XCTUnwrap(iso.date(from: "2027-01-11T15:00:00Z"))
+        let at = Int64(transition.timeIntervalSince1970 * 1000)
+        let priorStart = at - 600_000
+        let events = [
+            UsageEvent(at: priorStart, utcOffset: "+14:00", type: .started, session: "s", timeZone: "Pacific/Kiritimati"),
+            UsageEvent(at: at, utcOffset: "-10:00", type: .started, session: "s", timeZone: "Pacific/Honolulu"),
+            UsageEvent(at: at, utcOffset: "+14:00", type: .stopped, session: "s", startedAt: priorStart,
+                timeZone: "Pacific/Kiritimati", startedTimeZone: "Pacific/Kiritimati"),
+            UsageEvent(at: at + 1_200_000, utcOffset: "-10:00", type: .page, session: "s")
+        ]
+        let viewer = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
+        let jan11 = try XCTUnwrap(ReadingDay.parse("2027-01-11", calendar: viewer))
+        let jan12 = try XCTUnwrap(ReadingDay.parse("2027-01-12", calendar: viewer))
+        let days = UsageDay.summarize(events, dates: [jan11, jan12], calendar: viewer, resetHour: 3)
+        XCTAssertEqual(days[jan11]?.spans.map(\.seconds), [1200])
+        XCTAssertEqual(days[jan12]?.spans.map(\.seconds), [600])
+    }
+
     func testJumpDoesNotCountAsPageTurn() {
         let now = Date()
         let day = UsageDay.summarize([event(.page, date: now, source: "jump"), event(.page, date: now)], date: now)

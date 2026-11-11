@@ -5,7 +5,6 @@ import Charts
 struct ReadingHeatmap: View {
     let days: [DailyReading]
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
-    @AppStorage(StatisticsZone.key) private var zoneID = StatisticsZone.defaultID
     @State private var width: CGFloat = 0
     @ScaledMetric(relativeTo: .caption2) private var labelWidth = 28
     private let gap: CGFloat = 3

@@ -277,9 +277,9 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
             await syncNow()
             XCTAssertEqual(ReadingStatisticsStore.reading(root: manga.root), [reading])
             XCTAssertEqual(ReadingStatisticsStore.text(root: manga.root), [text])
-            let history = ReadingDay.streakHistory([reading], resetHour: 3)
+            let history = ReadingDay.days(reading: [reading], resetHour: 3)
             let now = ReadingDay.parse("2026-10-01")!.addingTimeInterval(3600)
-            XCTAssertEqual(StatisticsMath.streak(history.days, goalMinutes: 10, now: now, resetHour: 3).current, 1)
+            XCTAssertEqual(StatisticsMath.streak(history, goalMinutes: 10, now: now, resetHour: 3).current, 1)
             let requests = try await serverRequests().filter { $0.path.hasPrefix("/v1/") }
             XCTAssertEqual(requests.count, 3, "one metadata check and the two missing histories: \(requests)")
             XCTAssertEqual(requests.filter { $0.method == "GET" && ($0.path.hasSuffix(readingKey) || $0.path.hasSuffix(textKey)) }.count, 2)

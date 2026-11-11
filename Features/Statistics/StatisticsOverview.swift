@@ -154,12 +154,11 @@ nonisolated enum ReadingDay {
         for row in rows {
             guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
             let previous = shift(date, by: -1, calendar: calendar)
-            let recorded = row.recordedZone(target: calendar.timeZone)
-            let convert = recorded != nil && recorded != calendar.timeZone
-            let hours = reset == 0 && !convert ? [] : row.readingTimeByHour.compactMap { key, value -> (Date, Double)? in
-                guard value.isFinite, value > 0, let hour = hour(key, calendar: calendar), hour.date == date || hour.date == previous else { return nil }
-                guard let moved = StatisticsZone.convert(key, from: recorded, to: calendar) else { return nil }
-                return (hourDay(moved, reset: reset, calendar: calendar), value)
+            // Hour keys already carry the local date and time from the recording device.
+            let hours = row.wallClockHours.compactMap { key, value -> (Date, Double)? in
+                guard value.isFinite, value > 0, let local = hour(key, calendar: calendar),
+                      local.date == date || local.date == previous else { return nil }
+                return (hourDay(local, reset: reset, calendar: calendar), value)
             }
             let known = hours.reduce(0.0) { StatisticsNumbers.adding($0, $1.1) }
             let scale = known > row.readingTime ? row.readingTime / known : 1
@@ -200,29 +199,6 @@ nonisolated enum ReadingDay {
             return day.seconds > 0 || day.characters > 0 ? day : nil
         }
     }
-    /// Missing hour evidence receives streak credit on both plausible dates, never duplicated totals.
-    static func streakHistory(_ rows: [Statistics], resetHour: Int, calendar: Calendar = StatisticsZone.calendar) -> (days: [DailyReading], estimated: Bool) {
-        let reset = min(23, max(0, resetHour))
-        var result: [Date: Double] = [:], estimated = false
-        func credit(_ day: Date, _ value: Double) { if value > 0 { result[day] = StatisticsNumbers.adding(result[day] ?? 0, value) } }
-        for row in Statistics.merged(rows) {
-            guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
-            let recorded = row.recordedZone(target: calendar.timeZone)
-            let hours = row.readingTimeByHour.compactMap { key, value -> (Date, Double)? in
-                guard value.isFinite, value > 0, let hour = StatisticsZone.convert(key, from: recorded, to: calendar) else { return nil }
-                return (hourDay(hour, reset: reset, calendar: calendar), value)
-            }
-            let known = hours.reduce(0.0) { StatisticsNumbers.adding($0, $1.1) }
-            let scale = known > row.readingTime ? row.readingTime / known : 1
-            for (day, value) in hours { credit(day, value * scale) }
-            let unknown = max(0, row.readingTime - known)
-            if unknown > 0.001 {
-                credit(date, unknown)
-                if reset > 0 { credit(shift(date, by: -1, calendar: calendar), unknown); estimated = true }
-            }
-        }
-        return (result.keys.sorted().map { DailyReading(date: $0, seconds: result[$0]!) }, estimated)
-    }
 }
 
 nonisolated struct BookReadingSummary: Identifiable, Sendable {
@@ -236,7 +212,6 @@ nonisolated struct BookReadingSummary: Identifiable, Sendable {
     let pages: Int
     let devices: [DeviceReadingSummary]
     let days: [DailyReading]
-    let streakHistory: (days: [DailyReading], estimated: Bool)
     var id: UUID { book.id }
     var isManga: Bool { book.resolvedContentType == .mokuro }
 
@@ -250,7 +225,6 @@ nonisolated struct BookReadingSummary: Identifiable, Sendable {
         pages = isManga ? reading.reduce(0) { StatisticsNumbers.adding($0, $1.charactersRead) } : 0
         days = ReadingDay.days(reading: reading, text: isManga ? mangaText : nil, resetHour: resetHour, calendar: calendar)
         devices = StatisticsMath.devices(reading: reading, text: mangaText, isManga: isManga, resetHour: resetHour, calendar: calendar)
-        streakHistory = ReadingDay.streakHistory(reading, resetHour: resetHour, calendar: calendar)
     }
 }
 
@@ -369,15 +343,12 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
     var books: [BookReadingSummary]
     var days: [DailyReading]
     var devices: [DeviceReadingSummary]
-    var streakHistory: (days: [DailyReading], estimated: Bool)
     var maintenance: [URL] = []
     var needsAbsorb = false
     init(books: [BookReadingSummary]) {
         self.books = books
         days = StatisticsMath.combine(books.flatMap(\.days))
         devices = StatisticsMath.combineDevices(books.flatMap(\.devices))
-        let histories = books.map(\.streakHistory)
-        streakHistory = (StatisticsMath.combine(histories.flatMap(\.days)), histories.contains { $0.estimated })
     }
     private struct FinishInfo: Decodable { let characterCount: Int }
     @concurrent static func read(directory: URL, resetHour: Int, calendar: Calendar) async -> Self {
@@ -424,11 +395,6 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
     }) { self.loadSnapshot = loadSnapshot }
     var days: [DailyReading] { snapshot?.days ?? StatisticsMath.combine(books.flatMap(\.days)) }
     var devices: [DeviceReadingSummary] { snapshot?.devices ?? StatisticsMath.combineDevices(books.flatMap(\.devices)) }
-    var streakHistory: (days: [DailyReading], estimated: Bool) {
-        if let snapshot { return snapshot.streakHistory }
-        let histories = books.map(\.streakHistory)
-        return (StatisticsMath.combine(histories.flatMap(\.days)), histories.contains { $0.estimated })
-    }
     /// Coalesce a shard's per-book notifications while retaining each reader's root notification.
     func scheduleReload(resetHour: Int = ReadingDay.resetHour) {
         scheduled?.cancel()

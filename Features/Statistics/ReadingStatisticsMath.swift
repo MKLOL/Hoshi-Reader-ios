@@ -94,6 +94,14 @@ nonisolated extension Statistics {
             // Old clients strip unknown fields. Otherwise-identical rows keep the richer
             // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
             if old.tieBreak == entry.tieBreak {
+                if old.readingTimeByHour == entry.readingTimeByHour, old.readingTimeByZone != entry.readingTimeByZone {
+                    if old.readingTimeByZone.isEmpty { return entry }
+                    if entry.readingTimeByZone.isEmpty { return old }
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                    let left = (try? encoder.encode(old.readingTimeByZone)) ?? Data()
+                    let right = (try? encoder.encode(entry.readingTimeByZone)) ?? Data()
+                    return left.lexicographicallyPrecedes(right) ? entry : old
+                }
                 if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone != nil && entry.timeZone == nil { return old }
                 if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone == nil && entry.timeZone != nil { return entry }
                 // Android orders equal stamps by the full row text, where the zone follows the hours.

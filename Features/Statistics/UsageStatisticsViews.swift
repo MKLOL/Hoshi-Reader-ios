@@ -1,6 +1,14 @@
 import SwiftUI
 import Charts
 
+private func usageTime(_ date: Date, zone: TimeZone) -> String {
+    StatisticsZone.display(date, dateStyle: .none, timeStyle: .short, calendar: StatisticsZone.calendar(zone: zone))
+}
+
+private func usageTimeRange(_ start: Date, _ end: Date, startZone: TimeZone, endZone: TimeZone) -> String {
+    usageTime(start, zone: startZone) + "\u{00A0}–\u{2060}\u{00A0}" + usageTime(end, zone: endZone)
+}
+
 struct UsageTodaySection: View {
     let reading: DailyReading
     let usage: UsageDay
@@ -25,8 +33,9 @@ struct UsageTodaySection: View {
         Section {
             VStack(alignment: .leading, spacing: 2) {
                 Text(StatisticsFormat.longDay(usage.date)).font(.subheadline.weight(.semibold))
-                if let first = usage.firstActivity, let last = usage.lastActivity {
-                    Text("Active \(StatisticsFormat.timeRange(first, last))").font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                if let first = usage.firstActivity, let last = usage.lastActivity,
+                   let firstZone = usage.firstActivityZone, let lastZone = usage.lastActivityZone {
+                    Text("Active \(usageTimeRange(first, last, startZone: firstZone, endZone: lastZone))").font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
                 }
                 if reading.seconds > 0 || reading.characters > 0 {
                     Text("Reading time").font(.subheadline).foregroundStyle(.secondary).padding(.top, 10)
@@ -60,7 +69,7 @@ struct UsageTodaySection: View {
                 let colors = StatisticsBookColors(spans: usage.spans)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Timeline").font(.subheadline.weight(.semibold))
-                    ReadingTimeline(spans: usage.spans, day: usage.date, resetHour: resetHour, colors: colors)
+                    ReadingTimeline(spans: usage.spans, resetHour: resetHour, colors: colors)
                 }
                 .padding(.vertical, 6)
                 DisclosureGroup(StatisticsFormat.count(usage.spans.count, "session", "sessions")) {
@@ -107,7 +116,7 @@ private struct ReadingSessionRow: View {
             layout {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(span.title).lineLimit(1)
-                    Text(StatisticsFormat.timeRange(span.start, span.end))
+                    Text(usageTimeRange(span.start, span.end, startZone: span.zone, endZone: span.zone))
                         .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
                         .lineLimit(1).minimumScaleFactor(0.75)
                 }
@@ -122,7 +131,6 @@ private struct ReadingSessionRow: View {
 /// Minutes read in each hour of the reading day, stacked by book, like Screen Time's day view.
 private struct ReadingTimeline: View {
     let spans: [UsageSpan]
-    let day: Date
     let resetHour: Int
     let colors: StatisticsBookColors
     @ScaledMetric(relativeTo: .body) private var height = 120
@@ -133,23 +141,21 @@ private struct ReadingTimeline: View {
     }
 
     var body: some View {
-        let calendar = StatisticsZone.calendar
-        let dayStart = ReadingDay.boundary(on: day, resetHour: resetHour, calendar: calendar)
-        let dayEnd = ReadingDay.boundary(on: ReadingDay.shift(day, by: 1, calendar: calendar), resetHour: resetHour, calendar: calendar)
-        let hours = Array(sequence(first: dayStart) { calendar.date(byAdding: .hour, value: 1, to: $0).flatMap { $0 < dayEnd ? $0 : nil } })
-        let slices = hours.flatMap { start -> [Slice] in
-            let end = min(dayEnd, calendar.date(byAdding: .hour, value: 1, to: start)!)
-            var minutes: [String: Double] = [:]
-            for span in spans {
-                let overlap = min(end, span.end).timeIntervalSince(max(start, span.start))
-                if overlap > 0 { minutes[colors.name(span.title), default: 0] += overlap / 60 }
-            }
+        let reset = min(23, max(0, resetHour))
+        let dayStart = Date(timeIntervalSince1970: Double(reset) * 3600)
+        let dayEnd = dayStart.addingTimeInterval(24 * 3600)
+        let byHour = minutesByHour(reset: reset)
+        let peak = max(60, (byHour.values.map { $0.values.reduce(0, +) }.max() ?? 0))
+        let slices = (0..<24).flatMap { hour -> [Slice] in
+            let start = dayStart.addingTimeInterval(Double(hour) * 3600)
+            let end = start.addingTimeInterval(3600)
+            let minutes = byHour[hour, default: [:]]
             let books = colors.names.filter { (minutes[$0] ?? 0) > 0 }
             // A gap between neighbouring hours, as Screen Time draws them.
             let inset = end.timeIntervalSince(start) * 0.12
             var result: [Slice] = [], low = 0.0
             for (index, book) in books.enumerated() {
-                let high = min(60, low + minutes[book]!)
+                let high = low + minutes[book]!
                 result.append(Slice(start: start.addingTimeInterval(inset), end: end.addingTimeInterval(-inset), book: book, low: low, high: high, top: index == books.count - 1))
                 low = high
             }
@@ -160,9 +166,8 @@ private struct ReadingTimeline: View {
             return seconds > 0 ? "\(name), \(StatisticsMath.readingTime(seconds))" : nil
         }
         let total = StatisticsMath.readingTime(spans.reduce(0.0) { $0 + $1.seconds })
-        let range = StatisticsFormat.timeRange(spans.map(\.start).min() ?? dayStart, spans.map(\.end).max() ?? dayStart)
         VStack(alignment: .leading, spacing: 10) {
-            chart(slices, from: dayStart, to: dayEnd)
+            chart(slices, from: dayStart, to: dayEnd, peak: peak)
             StatisticsFlowLayout(spacing: 12) {
                 ForEach(colors.names, id: \.self) { name in
                     Label {
@@ -178,11 +183,28 @@ private struct ReadingTimeline: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Reading timeline")
-        .accessibilityValue((["\(total) between \(range)"] + totals).joined(separator: "; "))
+        .accessibilityValue(([total] + totals).joined(separator: "; "))
     }
 
-    private func chart(_ slices: [Slice], from dayStart: Date, to dayEnd: Date) -> some View {
-        let marks = [0, 6, 12, 18, 24].compactMap { StatisticsZone.calendar.date(byAdding: .hour, value: $0, to: dayStart) }.filter { $0 <= dayEnd }
+    private func minutesByHour(reset: Int) -> [Int: [String: Double]] {
+        var byHour: [Int: [String: Double]] = [:]
+        for span in spans {
+            let calendar = StatisticsZone.calendar(zone: span.zone)
+            let book = colors.name(span.title)
+            var cursor = span.start
+            while cursor < span.end, let hour = calendar.dateInterval(of: .hour, for: cursor), hour.end > cursor {
+                let next = min(span.end, hour.end)
+                let slot = (calendar.component(.hour, from: cursor) - reset + 24) % 24
+                byHour[slot, default: [:]][book, default: 0] += next.timeIntervalSince(cursor) / 60
+                cursor = next
+            }
+        }
+        return byHour
+    }
+
+    private func chart(_ slices: [Slice], from dayStart: Date, to dayEnd: Date, peak: Double) -> some View {
+        let marks = [0, 6, 12, 18, 24].map { dayStart.addingTimeInterval(Double($0) * 3600) }
+        let utc = TimeZone(secondsFromGMT: 0)!
         return Chart(slices) { slice in
             let radius: CGFloat = slice.top ? 3 : 0
             RectangleMark(xStart: .value("Hour", slice.start), xEnd: .value("Hour end", slice.end),
@@ -191,19 +213,19 @@ private struct ReadingTimeline: View {
                 .clipShape(UnevenRoundedRectangle(topLeadingRadius: radius, topTrailingRadius: radius))
         }
         .chartXScale(domain: dayStart...dayEnd)
-        .chartYScale(domain: 0...60)
+        .chartYScale(domain: 0...peak)
         .chartXAxis {
             AxisMarks(values: marks) { value in
                 let date = value.as(Date.self) ?? dayEnd
                 AxisGridLine()
                 // The day's last gridline closes the chart; its hour is already the first label.
-                AxisValueLabel(anchor: .topLeading) { Text(date < dayEnd ? StatisticsFormat.hour(date) : "") }
+                AxisValueLabel(anchor: .topLeading) { Text(date < dayEnd ? date.formatted(Date.FormatStyle(timeZone: utc).hour()) : "") }
             }
         }
         .chartYAxis {
-            AxisMarks(position: .trailing, values: [0, 30, 60]) { value in
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { value in
                 AxisGridLine()
-                AxisValueLabel { Text(Self.minuteTick(value.as(Int.self) ?? 0)) }
+                AxisValueLabel { Text(Self.minuteTick(Int(value.as(Double.self) ?? 0))) }
             }
         }
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)

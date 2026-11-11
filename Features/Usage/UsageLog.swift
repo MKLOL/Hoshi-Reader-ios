@@ -8,7 +8,7 @@ nonisolated enum UsageEventType: String, Codable, Sendable {
 }
 nonisolated struct UsageEvent: Codable, Sendable {
     let at: Int64
-    let utcOffset: String
+    let utcOffset: String?
     let type: UsageEventType
     var session: String?
     var bookId: String?
@@ -24,6 +24,13 @@ nonisolated struct UsageEvent: Codable, Sendable {
     var term: String?
     var source: String?
     var outcome: String?
+    var timeZone: String?
+    var startedTimeZone: String?
+    var recordedZone: TimeZone { StatisticsZone.zone(timeZone) ?? instantZone }
+    var instantZone: TimeZone { Self.instantZone(timeZone: timeZone, utcOffset: utcOffset) }
+    static func instantZone(timeZone: String?, utcOffset: String?) -> TimeZone {
+        StatisticsZone.zone(utcOffset) ?? StatisticsZone.zone(timeZone) ?? StatisticsZone.legacyZone
+    }
     var date: Date { Date(timeIntervalSince1970: Double(at) / 1000) }
 }
 
@@ -42,7 +49,7 @@ nonisolated final class UsageLog: @unchecked Sendable {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 var root = directory, values = URLResourceValues(); values.isExcludedFromBackup = true
                 try root.setResourceValues(values)
-                let file = directory.appendingPathComponent(MangaStatisticsTracker.dateKey(for: event.date) + ".ndjson")
+                let file = directory.appendingPathComponent(ReaderDateFormatting.shared.dayKey(for: event.date, timeZone: event.instantZone) + ".ndjson")
                 if !FileManager.default.fileExists(atPath: file.path) { FileManager.default.createFile(atPath: file.path, contents: nil) }
                 let handle = try FileHandle(forUpdating: file); defer { try? handle.close() }
                 let size = try handle.seekToEnd()
@@ -171,7 +178,7 @@ nonisolated final class UsageLog: @unchecked Sendable {
     func hasDeviceDays(_ days: [String], device: String) -> Bool {
         days.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent("devices").appendingPathComponent(device).appendingPathComponent($0 + ".ndjson").path) }
     }
-    func read(historyDays: Int = 92, now: Date = .now) async -> (events: [UsageEvent], firstDay: Date?) {
+    func read(historyDays: Int = 92, now: Date = .now, resetHour: Int = 0) async -> (events: [UsageEvent], firstDayKey: String?) {
         await withCheckedContinuation { continuation in
             queue.async { [self] in
                 var folders: [(URL, String)] = [(directory, "local")]
@@ -179,22 +186,26 @@ nonisolated final class UsageLog: @unchecked Sendable {
                 for folder in (try? FileManager.default.contentsOfDirectory(at: devices, includingPropertiesForKeys: nil)) ?? [] where Self.validDevice(folder.lastPathComponent) {
                     folders.append((folder, "device:" + folder.lastPathComponent))
                 }
-                // File labels are each writer's local dates. Include adjacent labels; event instants
-                // determine the actual reading day in the chosen statistics zone.
-                let since = StatisticsZone.calendar.date(byAdding: .day, value: -(historyDays + 2), to: now) ?? now
+                // Adjacent files can contain overnight spans or pre-update events saved after a zone change.
+                let since = StatisticsZone.calendar.date(byAdding: .day, value: -(historyDays + 4), to: now) ?? now
                 let sinceKey = ReadingDay.key(since)
-                var events: [UsageEvent] = [], first: Date?
+                var events: [UsageEvent] = [], firstDayKey: String?
                 for (folder, namespace) in folders {
                     let files = ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "ndjson" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
                     for (index, file) in files.enumerated() {
-                        guard file.deletingPathExtension().lastPathComponent >= sinceKey || index == 0, let handle = try? FileHandle(forReadingFrom: file) else { continue }
+                        guard file.deletingPathExtension().lastPathComponent >= sinceKey || index < 3, let handle = try? FileHandle(forReadingFrom: file) else { continue }
                         defer { try? handle.close() }
-                        var pending = Data(), fileFirst: Date?
+                        var pending = Data()
                         while let chunk = try? handle.read(upToCount: 64 * 1024), !chunk.isEmpty {
                             pending.append(chunk)
                             while let end = pending.firstIndex(of: 10) {
                                 if var event = try? JSONDecoder().decode(UsageEvent.self, from: pending[..<end]) {
-                                    fileFirst = min(fileFirst ?? event.date, event.date)
+                                    if index < 3 {
+                                        let calendar = StatisticsZone.calendar(zone: event.instantZone)
+                                        let localDay = ReadingDay.date(at: event.date, resetHour: resetHour, calendar: calendar)
+                                        let key = ReaderDateFormatting.shared.dayKey(for: localDay, timeZone: event.instantZone)
+                                        firstDayKey = min(firstDayKey ?? key, key)
+                                    }
                                     if event.date >= since {
                                         event.session = namespace + "|" + (event.session ?? "")
                                         events.append(event)
@@ -204,10 +215,9 @@ nonisolated final class UsageLog: @unchecked Sendable {
                             }
                             if pending.count > 1024 * 1024 { pending.removeAll() }
                         }
-                        if let fileFirst { first = min(first ?? fileFirst, fileFirst) }
                     }
                 }
-                continuation.resume(returning: (events.sorted { $0.at == $1.at ? ($0.session ?? "") < ($1.session ?? "") : $0.at < $1.at }, first))
+                continuation.resume(returning: (events.sorted { $0.at == $1.at ? ($0.session ?? "") < ($1.session ?? "") : $0.at < $1.at }, firstDayKey))
             }
         }
     }
@@ -223,7 +233,7 @@ extension Notification.Name {
     let book: BookMetadata
     private let log: UsageLog
     private let openedAt = Date()
-    private var readingSince: Date?
+    private var readingStart: (date: Date, zone: TimeZone)?
     private var closed = false
     private var revealed: Set<String> = []
     init(book: BookMetadata, log: UsageLog = .shared) {
@@ -233,9 +243,14 @@ extension Notification.Name {
     func reading(_ active: Bool) {
         guard !closed else { return }
         if active {
-            guard readingSince == nil else { return }; readingSince = .now; record(.started)
+            guard readingStart == nil else { return }
+            let now = Date(), zone = TimeZone.current
+            readingStart = (now, zone)
+            record(.started, now: now, timeZone: zone)
         } else {
-            guard let since = readingSince else { return }; readingSince = nil; record(.stopped, startedAt: since)
+            guard let start = readingStart else { return }
+            readingStart = nil
+            record(.stopped, startedAt: start.date, startedTimeZone: start.zone.identifier)
         }
     }
     func close() {
@@ -248,13 +263,21 @@ extension Notification.Name {
     }
     func record(_ type: UsageEventType, text: String? = nil, term: String? = nil, source: String? = nil,
                 found: Bool? = nil, page: Int? = nil, from: Int? = nil, to: Int? = nil,
-                chapter: Int? = nil, character: Int? = nil, startedAt: Date? = nil, now: Date = .now) {
+                chapter: Int? = nil, character: Int? = nil, startedAt: Date? = nil, now: Date = .now,
+                timeZone: TimeZone = .current, startedTimeZone: String? = nil) {
         guard !closed else { return }
-        log.append(UsageEvent(at: Int64(now.timeIntervalSince1970 * 1000), utcOffset: ReaderDateFormatting.utcOffset(for: now), type: type,
+        if type != .started, type != .stopped, let start = readingStart, now > start.date, start.zone != timeZone {
+            // The first event observed on the new clock closes the old span.
+            readingStart = (now, timeZone)
+            record(.stopped, startedAt: start.date, now: now, timeZone: start.zone, startedTimeZone: start.zone.identifier)
+            record(.started, now: now, timeZone: timeZone)
+        }
+        log.append(UsageEvent(at: Int64(now.timeIntervalSince1970 * 1000), utcOffset: ReaderDateFormatting.utcOffset(for: now, timeZone: timeZone), type: type,
             session: id, bookId: book.id.uuidString, bookTitle: book.title,
             contentType: book.resolvedContentType == .mokuro ? "manga" : "epub", page: page, fromPage: from, toPage: to,
             chapter: chapter, character: character, startedAt: startedAt.map { Int64($0.timeIntervalSince1970 * 1000) },
             text: text.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500)) },
-            term: term.map { String($0.prefix(500)) }, source: source, outcome: found.map { $0 ? "found" : "not-found" }))
+            term: term.map { String($0.prefix(500)) }, source: source, outcome: found.map { $0 ? "found" : "not-found" },
+            timeZone: timeZone.identifier, startedTimeZone: startedTimeZone))
     }
 }

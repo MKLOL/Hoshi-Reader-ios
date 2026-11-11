@@ -13,6 +13,7 @@ nonisolated struct MangaStatisticsTracker {
     private(set) var session: Statistics
     private var localToday: Statistics
     private var lastTimestamp: Date
+    private var lastTimeZone: TimeZone
     private var lastPageCount = 0
     private var hasUpdated = false
     private var activePageSeconds = 0.0
@@ -40,22 +41,23 @@ nonisolated struct MangaStatisticsTracker {
     }
     private var rows: [Statistics] { Statistics.merged(allStats.filter { $0.key != localToday.key } + [localToday]) }
 
-    init(title: String, initialStatistics: [Statistics], enabled: Bool, now: Date = .now, device: ReadingDevice? = nil, trackPageDurations: Bool = false) {
+    init(title: String, initialStatistics: [Statistics], enabled: Bool, now: Date = .now, device: ReadingDevice? = nil, trackPageDurations: Bool = false, timeZone: TimeZone = .current) {
         self.title = title
         self.enabled = enabled
         self.device = device
         self.trackPageDurations = trackPageDurations
         allStats = Statistics.merged(initialStatistics)
         lastTimestamp = now
-        let day = Self.dateKey(for: now)
+        lastTimeZone = timeZone
+        let day = ReaderDateFormatting.shared.dayKey(for: now, timeZone: timeZone)
         session = .empty(title: title, day: day, device: device)
         localToday = allStats.first { $0.dateKey == day && $0.deviceId == device?.id } ?? .empty(title: title, day: day, device: device)
     }
 
-    mutating func start(currentPage: Int, now: Date = .now) {
+    mutating func start(currentPage: Int, now: Date = .now, timeZone: TimeZone = .current) {
         guard enabled else { return }
         isTracking = true
-        resetBaseline(currentPage: currentPage, now: now)
+        resetBaseline(currentPage: currentPage, now: now, timeZone: timeZone)
     }
     mutating func startForPageTurnIfNeeded(currentPage: Int, now: Date = .now) {
         if !isTracking { start(currentPage: currentPage, now: now) }
@@ -66,28 +68,32 @@ nonisolated struct MangaStatisticsTracker {
         isTracking = false
         return true
     }
-    mutating func update(currentPage: Int, now: Date = .now) {
+    mutating func update(currentPage: Int, now: Date = .now, timeZone: TimeZone = .current) {
         guard enabled, isTracking else { return }
-        let day = Self.dateKey(for: now)
+        // The elapsed interval began under the previous clock. A time zone change starts a
+        // new interval while keeping the preceding time under its recorded local hours.
+        let elapsed = now.timeIntervalSince(lastTimestamp)
+        guard elapsed > 0 else {
+            if elapsed < 0 { lastTimestamp = now }
+            lastTimeZone = timeZone
+            return
+        }
+        let recordingZone = lastTimeZone
+        let day = ReaderDateFormatting.shared.dayKey(for: now, timeZone: recordingZone)
         if day != localToday.dateKey {
             allStats = rows
             localToday = allStats.first { $0.dateKey == day && $0.deviceId == device?.id } ?? .empty(title: title, day: day, device: device)
         }
-        let elapsed = now.timeIntervalSince(lastTimestamp)
-        if elapsed < 0 { lastTimestamp = now }
-        guard elapsed > 0 else { return }
         if trackPageDurations { activePageSeconds += elapsed }
         let delta = max(-session.charactersRead, currentPage - lastPageCount)
         let stamp = StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000)
-        localToday.record(in: .current)
-        session.record(in: .current)
+        let hours = ReadingDay.hours(from: lastTimestamp, to: now, calendar: StatisticsZone.calendar(zone: recordingZone))
+        localToday.record(hours: hours, in: recordingZone)
+        session.record(hours: hours, in: recordingZone)
         session.add(seconds: elapsed, count: delta, stamp: stamp)
         localToday.add(seconds: elapsed, count: delta, stamp: stamp)
-        let hours = ReadingDay.hours(from: lastTimestamp, to: now)
-        localToday.readingTimeByHour = ReadingDay.sumHours([localToday.readingTimeByHour, hours])
-        session.readingTimeByHour = ReadingDay.sumHours([session.readingTimeByHour, hours])
         hasUpdated = true
-        resetBaseline(currentPage: currentPage, now: now)
+        resetBaseline(currentPage: currentPage, now: now, timeZone: timeZone)
     }
     /// Called for every navigation. Only forward turns complete pages; jumps and backtracking
     /// discard the unfinished sample rather than inventing page durations. Pausing keeps active
@@ -104,9 +110,10 @@ nonisolated struct MangaStatisticsTracker {
         }
         activePageSeconds = 0
     }
-    mutating func resetBaseline(currentPage: Int, now: Date = .now) {
+    mutating func resetBaseline(currentPage: Int, now: Date = .now, timeZone: TimeZone = .current) {
         lastPageCount = currentPage
         lastTimestamp = now
+        lastTimeZone = timeZone
     }
     mutating func statisticsForPersistence() -> [Statistics]? {
         guard enabled, hasUpdated else { return nil }
