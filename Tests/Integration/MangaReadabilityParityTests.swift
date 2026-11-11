@@ -1,5 +1,6 @@
 import XCTest
 import WebKit
+import SwiftUI
 @testable import Hoshi_Reader
 
 nonisolated final class MangaReadabilityParityTests: XCTestCase {
@@ -131,23 +132,36 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
 
     @MainActor func testPreviewAndReaderUseIdenticalPageAndGlyphGeometryIncludingSpreads() async throws {
         let cache = MangaPageRenderCache()
+        let page = MokuroPage(index: 0, imagePath: "fixture.png", imageWidth: 320, imageHeight: 640,
+            textBoxes: [MokuroTextBox(left: 250, top: 3, width: 65, height: 185,
+                fontSize: 21, vertical: true, lines: ["学校で本を読む。"], originalFontSize: 12),
+                MokuroTextBox(left: 30, top: 250, width: 190, height: 70,
+                    fontSize: 40, vertical: false, lines: ["大きな文字"], blockIndex: 1, originalFontSize: 40)])
+        let facingPage = MokuroPage(index: 1, imagePath: "facing.png", imageWidth: 400, imageHeight: 600,
+            textBoxes: page.textBoxes)
         let measurement = """
             (() => {
               const rect = e => { const r = e.getBoundingClientRect(); return [r.x,r.y,r.width,r.height]; };
+              const boxes = [...document.querySelectorAll('.ocr-box')];
+              if (!boxes.every(box => box.classList.contains('revealed'))) return 'unrevealed boxes';
+              if (!boxes[0].querySelector('rt') || boxes[0].dataset.furiganaFitted !== '1') return 'unfitted ruby';
               return [innerWidth,innerHeight,
                 ...[...document.querySelectorAll('.frame')].flatMap(rect),
-                ...[...document.querySelectorAll('.ocr-box')].flatMap(e => [parseFloat(getComputedStyle(e).fontSize),...rect(e)])];
+                ...boxes.flatMap(e => [parseFloat(getComputedStyle(e).fontSize),...rect(e),...rect(e.querySelector('p'))])];
             })()
             """
         for viewport in [CGSize(width: 744, height: 1133), CGSize(width: 1133, height: 744)] {
             let browser = try MangaTestBrowser(viewport: viewport)
             defer { browser.close() }
-            let left: MokuroPage? = viewport.width > viewport.height ? page : nil
+            let left: MokuroPage? = viewport.width > viewport.height ? facingPage : nil
             let readerConfig = config(amount: 75, threshold: 40, viewport: viewport)
             try await load(await cache.htmlFor(page: page, leftPage: left, config: readerConfig), in: browser)
             _ = try await browser.web.evaluateJavaScript("""
                 document.querySelectorAll('.ocr-box').forEach(box => {
-                  box.classList.add('revealed'); window.hoshiManga.tryWrapFallback(box); window.hoshiManga.fitFurigana(box);
+                  window.hoshiManga.prepareReveal(box);
+                  box.classList.add('revealed');
+                  window.hoshiManga.tryWrapFallback(box);
+                  window.hoshiManga.fitFurigana(box);
                 });
                 """)
             let normalValue = try await browser.web.evaluateJavaScript(measurement)
@@ -159,6 +173,55 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
             let actual = try XCTUnwrap(actualValue as? [Double])
             XCTAssertEqual(actual, normal, "Preview must use the reader's exact image and OCR geometry")
         }
+    }
+
+    @MainActor func testPreviewAndReaderRestoreZoomAndPanAfterReloadAndRecovery() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = MangaWebViewController()
+        var ready: XCTestExpectation?
+        window.rootViewController = UIHostingController(rootView:
+            MangaReaderWebView(controller: controller, backgroundColor: .black,
+                onNavigate: { _ in }, onTextSelected: { _ in nil }, onTapOutside: {},
+                onAskAi: { _, _ in }, onCopy: { _ in }, onPageReady: { _ in ready?.fulfill() },
+                pageTurnEnabled: false)
+                .ignoresSafeArea())
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousWindow?.makeKeyAndVisible()
+        }
+        let cache = MangaPageRenderCache()
+        let normalConfig = config(viewport: window.bounds.size)
+        var previewConfig = normalConfig
+        previewConfig.textSizePreview = true
+        let normal = await cache.htmlFor(page: page, config: normalConfig)
+        let preview = await cache.htmlFor(page: page, config: previewConfig)
+        let zoomed = MangaViewportState(zoomScale: 1.7, offsetX: 95, offsetY: 175)
+        let previewReady = expectation(description: "Retried preview reaches ready")
+        ready = previewReady
+        let superseded = controller.load(html: preview, allowedImagePaths: [page.imagePath],
+            preservingViewport: zoomed, textSizePreview: true)
+        controller.reissueCurrentPage()
+        XCTAssertGreaterThan(controller.loadToken, superseded)
+        await fulfillment(of: [previewReady], timeout: 10)
+        XCTAssertTrue(controller.isCurrentPageReady)
+        let actual = try XCTUnwrap(controller.viewportForReload())
+        XCTAssertEqual(actual.zoomScale, zoomed.zoomScale, accuracy: 0.01)
+        XCTAssertEqual(actual.offsetX, zoomed.offsetX, accuracy: 1)
+        XCTAssertEqual(actual.offsetY, zoomed.offsetY, accuracy: 1)
+
+        let readerReady = expectation(description: "Updated reader page reaches ready")
+        ready = readerReady
+        controller.load(html: normal, allowedImagePaths: [page.imagePath], preservingViewport: actual)
+        await fulfillment(of: [readerReady], timeout: 10)
+        XCTAssertTrue(controller.isCurrentPageReady)
+        let updated = try XCTUnwrap(controller.viewportForReload())
+        XCTAssertEqual(updated.zoomScale, zoomed.zoomScale, accuracy: 0.01)
+        XCTAssertEqual(updated.offsetX, zoomed.offsetX, accuracy: 1)
+        XCTAssertEqual(updated.offsetY, zoomed.offsetY, accuracy: 1)
     }
 
     func testAdjustableEnlargementUsesTheSameCurveAsThePreview() {

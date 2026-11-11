@@ -244,12 +244,14 @@ final class ZoomPopupUITests: XCTestCase {
         let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
             object: app.descendants(matching: .any)["manga-preview-loading"].firstMatch)
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+        XCTAssertTrue(app.sliders["Enlargement amount"].isHittable)
+        XCTAssertTrue(app.sliders["Small-text cutoff"].isHittable)
         saveScreenshot(app, name: "ios-manga-page-adjusted")
         app.buttons["Hide controls"].tap()
         assertReaderViewport()
         saveScreenshot(app, name: "ios-manga-page-fullscreen")
         app.buttons["Show controls"].tap()
-        app.buttons["Original"].tap()
+        app.buttons["Original size"].tap()
         let originalReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"),
             object: app.descendants(matching: .any)["manga-preview-loading"].firstMatch)
         XCTAssertEqual(XCTWaiter.wait(for: [originalReady], timeout: 10), .completed)
@@ -263,7 +265,7 @@ final class ZoomPopupUITests: XCTestCase {
         app.buttons["manga-preview-text-size"].tap()
         XCTAssertTrue(page.waitForExistence(timeout: 5))
         XCTAssertTrue(page.label.contains("Page 2"))
-        app.buttons["Strong"].tap()
+        app.buttons["Subtle"].tap()
         app.buttons["manga-preview-apply"].tap()
         XCTAssertTrue(waitForViewport(probe, containing: "page=2;"), probe.label)
     }
@@ -859,7 +861,7 @@ final class ZoomPopupUITests: XCTestCase {
         app.launchArguments += ["-mangaShowCopyButton", showCopy ? "YES" : "NO"]
         if syntheticFixture {
             app.launchEnvironment["HOSHI_UI_TESTING_ZOOM"] = "1"
-            app.launchArguments += ["-mangaSingleTapLookup", "NO", "-mangaShowFurigana", "NO"]
+            app.launchArguments += ["-mangaSingleTapLookup", "NO", "-mangaShowFurigana", textSizePreview ? "YES" : "NO"]
         }
         if chromeFixture { app.launchEnvironment["HOSHI_UI_TESTING_CHROME"] = "1" }
         if textSizePreview { app.launchEnvironment["HOSHI_UI_TESTING_TEXT_SIZE"] = "1" }

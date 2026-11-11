@@ -98,7 +98,7 @@ struct MangaReaderView: View {
     private var textPreviewSource: MangaTextPreviewSource? {
         guard let book = model.book, let root = model.bookRoot else { return nil }
         return MangaTextPreviewSource(book: book, root: root, pageIndex: model.pageIndex,
-            twoPageEnabled: model.twoPageEnabled, viewport: controller.captureViewport())
+            twoPageEnabled: model.twoPageEnabled, viewport: controller.viewportForReload())
     }
 
     private let backgroundColor: Color = .black
@@ -145,7 +145,7 @@ struct MangaReaderView: View {
 
     private var pageNavigationEnabled: Bool {
         !screenshotCropMode && !showGoToPageDialog && !showMangaSettings &&
-        !showStatisticsSheet && !aiController.isPresented
+        !showStatisticsSheet && !showTextPreview && !aiController.isPresented
     }
 
     var body: some View {
@@ -493,7 +493,7 @@ struct MangaReaderView: View {
         }
         .onChange(of: userConfig.mangaTextEnlargement) { _, _ in
             model.closePopups()
-            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig)
+            model.renderCurrentPage(controller: controller, screenSize: lastSize, userConfig: userConfig, preserveViewport: true)
         }
         .onChange(of: userConfig.mangaShowFurigana) { _, _ in
             model.closePopups()

@@ -133,11 +133,32 @@ nonisolated enum MangaPageHtml {
         window.hoshiManga && window.hoshiManga.setSingleTapLookup(\(singleTapLookup));
         if (\(textSizePreview)) {
           document.querySelectorAll('[data-hoshi-ui-test]').forEach(function(box) { box.remove(); });
-          document.querySelectorAll('.ocr-box').forEach(function(box) {
-            box.classList.add('revealed');
-            window.hoshiManga.tryWrapFallback(box);
-            window.hoshiManga.fitFurigana(box);
-          });
+          window.hoshiManga.revealPreview = function() {
+            this.clearRevealed();
+            document.querySelectorAll('.ocr-box').forEach(function(box) {
+              var vv = window.visualViewport, r = box.getBoundingClientRect();
+              var visible = !vv || (r.right > vv.offsetLeft && r.left < vv.offsetLeft + vv.width &&
+                r.bottom > vv.offsetTop && r.top < vv.offsetTop + vv.height);
+              window.hoshiManga.prepareReveal(box);
+              box.classList.add('revealed');
+              box.setAttribute('aria-pressed', 'true');
+              if (visible) {
+                window.hoshiManga.tryWrapFallback(box);
+                window.hoshiManga.fitFurigana(box);
+              }
+            });
+            this.notifyScrollableBubbleRegions();
+          };
+          window.hoshiManga.revealPreview();
+          var previewFitTimer;
+          function refitPreviewAfterViewportChange() {
+            clearTimeout(previewFitTimer);
+            previewFitTimer = setTimeout(function() { window.hoshiManga.revealPreview(); }, 120);
+          }
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', refitPreviewAfterViewportChange);
+            window.visualViewport.addEventListener('scroll', refitPreviewAfterViewportChange);
+          }
         } else {
           window.hoshiManga && window.hoshiManga.installTapListener(\(mangaMaxSelectionLength));
         }

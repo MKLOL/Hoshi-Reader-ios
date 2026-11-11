@@ -39,6 +39,8 @@ final class MangaWebViewController {
     fileprivate var pendingHtml: String?
     fileprivate var documentIdentity = UUID().uuidString
     fileprivate var allowedImagePaths: Set<String> = []
+    fileprivate var pendingViewport: MangaViewportState?
+    fileprivate var isTextSizePreview = false
     fileprivate weak var webView: WKWebView?
 
     /// Book root used by the scheme handler to resolve `hoshi-img://` requests off disk.
@@ -51,6 +53,7 @@ final class MangaWebViewController {
     fileprivate(set) var decodedPageIndices: [Int] = []
     private(set) var hasFinishedPage = false
     private var readyLoadToken: Int?
+    var isCurrentPageReady: Bool { readyLoadToken == loadToken }
     private var pendingPredecode: (token: Int, script: String)?
 
     /// True while the page is zoomed or panned, so the host should gate swipe-to-turn.
@@ -62,22 +65,26 @@ final class MangaWebViewController {
     /// Replaces the rendered page. `allowedImagePaths` is the allow-list of book-root-relative
     /// image paths the scheme handler may serve for this page (normally just the page's image).
     @discardableResult
-    func load(html: String, allowedImagePaths: Set<String>) -> Int {
+    func load(html: String, allowedImagePaths: Set<String>, preservingViewport: MangaViewportState? = nil,
+              textSizePreview: Bool = false) -> Int {
         webView?.evaluateJavaScript("window.hoshiMangaImageCache && window.hoshiMangaImageCache.cancel()") { _, _ in }
         readyLoadToken = nil
         pendingPredecode = nil
         documentIdentity = UUID().uuidString
         self.pendingHtml = html
         self.allowedImagePaths = allowedImagePaths
+        pendingViewport = preservingViewport
+        isTextSizePreview = textSizePreview
         loadToken += 1
         return loadToken
     }
 
     /// Loads the current page again after its document was lost: WebKit ended the page's
     /// process, or the navigation failed before anything was shown.
-    fileprivate func reissueCurrentPage() {
+    func reissueCurrentPage() {
         guard let pendingHtml else { return }
-        load(html: pendingHtml, allowedImagePaths: allowedImagePaths)
+        load(html: pendingHtml, allowedImagePaths: allowedImagePaths,
+             preservingViewport: viewportForReload(), textSizePreview: isTextSizePreview)
     }
 
     func setPredecodeScript(_ script: String, for token: Int) {
@@ -153,6 +160,10 @@ final class MangaWebViewController {
         let zoomed = raw > webView.scrollView.minimumZoomScale + 0.01
         let panned = abs(contentOffset.x) > 1 || abs(contentOffset.y) > 1
         isZoomedOrScrollable = zoomed || panned
+    }
+
+    func viewportForReload() -> MangaViewportState? {
+        isCurrentPageReady ? captureViewport() : pendingViewport
     }
 
     func captureViewport() -> MangaViewportState? {
@@ -482,12 +493,24 @@ struct MangaReaderWebView: UIViewRepresentable {
             previousPinchLocation = nil
             indirectPinchTransform = nil
             trackpadPanSession = nil
-            parent.controller.syncHostViewport()
-            parent.onPageReady(finishedLoadToken)
-            parent.controller.pageReady(finishedLoadToken)
-            // Re-assert first responder so hardware-keyboard arrows keep turning pages after a
-            // load (loadHTMLString can drop it). No-op cost when already first responder; safe here
-            // because a page turn has already cleared any text selection / popups.
+            if let viewport = parent.controller.pendingViewport { parent.controller.restoreViewport(viewport) }
+            else { parent.controller.syncHostViewport() }
+            if parent.controller.isTextSizePreview {
+                // Fit ruby against the restored visual viewport, as in a normal reveal.
+                webView.evaluateJavaScript("window.hoshiManga && window.hoshiManga.revealPreview()") { [weak self, weak webView] _, _ in
+                    guard let self, let webView else { return }
+                    self.finishPage(webView, token: finishedLoadToken)
+                }
+            } else {
+                finishPage(webView, token: finishedLoadToken)
+            }
+        }
+
+        private func finishPage(_ webView: WKWebView, token: Int) {
+            guard token == parent.controller.loadToken, parent.controller.webView === webView else { return }
+            parent.onPageReady(token)
+            parent.controller.pageReady(token)
+            // loadHTMLString may drop first responder. Re-assert it for reader hardware keys.
             if webView.window != nil { webView.becomeFirstResponder() }
         }
 

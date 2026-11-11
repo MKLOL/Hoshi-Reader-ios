@@ -224,7 +224,7 @@ final class MangaReaderViewModel {
     // MARK: Rendering
 
     func renderCurrentPage(controller: MangaWebViewController, screenSize: CGSize, userConfig: UserConfig,
-                           onLoadToken: ((Int) -> Void)? = nil) {
+                           preserveViewport: Bool = false, onLoadToken: ((Int) -> Void)? = nil) {
         guard let book, !book.pages.isEmpty, screenSize.width > 0, screenSize.height > 0 else { return }
         let index = max(0, min(pageIndex, book.pages.count - 1))
         // In a spread the right/earlier page is the spread start; the later page (if any) goes left.
@@ -259,7 +259,8 @@ final class MangaReaderViewModel {
             let html = await renderCache.htmlFor(page: page, leftPage: leftPage, config: config)
             self.startupTrace.mark("html_finished")
             guard self.renderGeneration == generation else { return }
-            let loadToken = controller.load(html: html, allowedImagePaths: allowedPaths)
+            let loadToken = controller.load(html: html, allowedImagePaths: allowedPaths,
+                preservingViewport: preserveViewport ? controller.viewportForReload() : nil)
             onLoadToken?(loadToken)
             self.preloadAdjacentPages(config: config, controller: controller, loadToken: loadToken, generation: generation)
         }
@@ -503,7 +504,7 @@ final class MangaReaderViewModel {
     }()
 }
 
-private extension String {
+extension String {
     func trimmingPrefixSlash() -> String {
         var s = self
         while s.hasPrefix("/") { s.removeFirst() }
