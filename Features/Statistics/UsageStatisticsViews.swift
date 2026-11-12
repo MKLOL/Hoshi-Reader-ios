@@ -267,9 +267,11 @@ struct StatisticsTrendsSections: View {
         let since = usage.firstDay.map { "Recorded since \(StatisticsFormat.date($0))" }
         let perBubble = usage.firstDay.map { "Per revealed manga bubble, since \(StatisticsFormat.date($0))" }
         let rate: (Double) -> String = { $0.formatted(.number.precision(.fractionLength(0...2))) }
-        ReadingTrendChart(title: "Daily reading time", points: series(Dictionary(uniqueKeysWithValues: reading.map { ($0.date, $0.seconds / 60) })),
+        let seconds = Dictionary(uniqueKeysWithValues: reading.map { ($0.date, min($0.seconds, Double(Int.max))) })
+        ReadingTrendChart(title: "Daily reading time", points: series(seconds),
                           empty: "No reading in the last \(days) days.",
-                          format: { StatisticsMath.readingTime($0 * 60) }, tick: { $0 == 0 ? "0" : StatisticsMath.readingTime($0 * 60) })
+                          format: { StatisticsMath.readingTime($0) }, tick: { $0 == 0 ? "0" : StatisticsMath.readingTime($0) },
+                          yAxisMaximum: { StatisticsMath.axisTop($0 / 60) * 60 })
         ReadingTrendChart(title: "Characters read", points: series(Dictionary(uniqueKeysWithValues: reading.map { ($0.date, Double($0.characters)) })),
                           empty: "No characters read in the last \(days) days.")
         ReadingTrendChart(title: "Words looked up", subtitle: since, points: series(usage.values(\.lookups), local: true),
@@ -299,6 +301,7 @@ private struct ReadingTrendChart: View {
     var empty = "Nothing recorded yet."
     var format: (Double) -> String = { $0.formatted(.number.precision(.fractionLength(0...1))) }
     var tick: (Double) -> String = { $0.formatted(.number.notation(.compactName)) }
+    var yAxisMaximum: (Double) -> Double = StatisticsMath.axisTop
     @State private var selected: Date?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -366,7 +369,7 @@ private struct ReadingTrendChart: View {
 
     private var chart: some View {
         let calendar = StatisticsZone.calendar
-        let top = StatisticsMath.axisTop(points.map { max($0.value, hasRate($0) ? $0.average : 0) }.max() ?? 0)
+        let top = yAxisMaximum(points.map { max($0.value, hasRate($0) ? $0.average : 0) }.max() ?? 0)
         // Ticks at chosen days' middles, labelled in the statistics zone, not the device's.
         let stride = max(1, Int((Double(points.count) / (typeSize.isAccessibilitySize ? 2 : 4)).rounded(.up)))
         let ticks = points.isEmpty ? [] : Swift.stride(from: max(0, points.count - 1 - stride / 2), through: 0, by: -stride).map { middle(points[$0].date) }

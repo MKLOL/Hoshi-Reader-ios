@@ -96,10 +96,10 @@ struct StatisticsUITestFixture: View {
 
         // Today, from the morning until after midnight.
         let morning = (0..<11).map { words[$0 % 5] } + ["猫", "猫", "曖昧", "気配"]
-        read(books[1], on: devices[2], from: at(today, 9, 10), minutes: 32, seconds: 39, lookups: morning + ["猫", "呟く", "仕草"], logged: true)
-        read(books[2], on: devices[0], from: at(today, 13, 0), minutes: 25, lookups: ["猫", "曖昧", "気配", "猫", "曖昧", "気配", "仕草", "呟く", "猫", "曖昧", "気配"], logged: true)
-        read(books[2], on: devices[0], from: at(today, 22, 30), minutes: 45, lookups: ["猫", "曖昧", "気配", "猫", "曖昧", "気配", "猫", "曖昧", "仕草", "呟く", "結局"], logged: true)
-        read(books[1], on: devices[2], from: at(today, 24, 52), minutes: 32, lookups: ["猫", "猫", "曖昧", "気配", "仕草", "呟く", "眩しい"], logged: true)
+        read(books[1], on: devices[2], from: at(today, 9, 10), minutes: 2, lookups: morning + ["猫", "呟く", "仕草"], logged: true)
+        read(books[2], on: devices[0], from: at(today, 13, 0), minutes: 2, lookups: ["猫", "曖昧", "気配", "猫", "曖昧", "気配", "仕草", "呟く", "猫", "曖昧", "気配"], logged: true)
+        read(books[2], on: devices[0], from: at(today, 22, 30), minutes: 2, lookups: ["猫", "曖昧", "気配", "猫", "曖昧", "気配", "猫", "曖昧", "仕草", "呟く", "結局"], logged: true)
+        read(books[1], on: devices[2], from: at(today, 24, 52), minutes: 3, seconds: 17, lookups: ["猫", "猫", "曖昧", "気配", "仕草", "呟く", "眩しい"], logged: true)
         // Four months before it; the usage log only covers the last two, some of them without manga.
         for back in 1...120 where next(0...9) < 8 {
             let day = ReadingDay.shift(today, by: -back, calendar: calendar)

@@ -149,6 +149,25 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         XCTAssertEqual([0, 2, 7, 59, 134, 21_000, 0.37].map(StatisticsMath.axisTop), [1, 2, 8, 60, 150, 30_000, 0.4])
         XCTAssertEqual([0, 1, 25, 26, 50, 75, 76, 100].map { StatisticsMath.heatmapLevel($0, maximum: 100) }, [0, 1, 1, 2, 2, 3, 4, 4])
     }
+    @MainActor func testShortReadingSessionRetainsSecondsInSavedDailyStatistics() throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let zone = TimeZone(secondsFromGMT: 0)!
+        let calendar = StatisticsZone.calendar(zone: zone)
+        let day = try XCTUnwrap(ReadingDay.parse("2026-11-12", calendar: calendar))
+        let start = day.addingTimeInterval(12 * 3600)
+        let device = ReadingDevice(id: "fixture", name: "Fixture")
+        var tracker = MangaStatisticsTracker(title: "Fixture", initialStatistics: [], enabled: true,
+            now: start, device: device, timeZone: zone)
+        tracker.start(currentPage: 0, now: start, timeZone: zone)
+        tracker.update(currentPage: 1, now: start.addingTimeInterval(557.5), timeZone: zone)
+        let records = try XCTUnwrap(tracker.statisticsForPersistence())
+        try ReadingStatisticsStore.save(records, root: root, scheduleSync: false)
+        let saved = try ReadingStatisticsStore.strictReading(root: root)
+        let total = try XCTUnwrap(ReadingDay.days(reading: saved, resetHour: 3, calendar: calendar).first)
+        XCTAssertEqual(total.seconds, 557.5)
+        XCTAssertEqual(StatisticsMath.readingTime(total.seconds, locale: Locale(identifier: "en_US")), "9m 17s")
+    }
     @MainActor func testCompletionUsesWholeBookCountInsteadOfChapterProgress() {
         let info = BookInfo(characterCount: 10000, chapterInfo: [:])
         XCTAssertFalse(StatisticsMath.isFinished(bookmark: Bookmark(chapterIndex: 0, progress: 1, characterCount: 1000), info: info, isManga: false))

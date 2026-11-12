@@ -8,7 +8,7 @@ final class StatisticsSyncUITests: XCTestCase {
         app.launch()
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(app.staticTexts["猫"].firstMatch.waitForExistence(timeout: 15), app.debugDescription)
-        let readingTime = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "2h 14m 39s")).firstMatch
+        let readingTime = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "9m 17s")).firstMatch
         XCTAssertTrue(readingTime.waitForExistence(timeout: 5), app.debugDescription)
         capture(app, "statistics-synced-today")
         let reset = app.buttons["statistics-day-reset"]
@@ -41,6 +41,7 @@ final class StatisticsSyncUITests: XCTestCase {
         XCTAssertTrue(trends.isHittable, app.debugDescription)
         trends.tap()
         XCTAssertTrue(app.staticTexts["Daily reading time"].waitForExistence(timeout: 5))
+        XCTAssertTrue(readingTime.waitForExistence(timeout: 5), app.debugDescription)
         capture(app, "statistics-trends")
     }
     @MainActor private func capture(_ app: XCUIApplication, _ name: String) {
