@@ -443,18 +443,18 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
     func testCutoverUsesThePreviousReadingDayBoundaryAndSplitsRecordedZones() throws {
         let history = StatisticsZone.calendar(zone: StatisticsZone.legacyZone)
         let viewer = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo")))
-        let november = try XCTUnwrap(ReadingDay.parse("2026-11-30", calendar: viewer))
-        let december = try XCTUnwrap(ReadingDay.parse("2026-12-01", calendar: viewer))
+        let october = try XCTUnwrap(ReadingDay.parse("2026-10-31", calendar: viewer))
+        let november = try XCTUnwrap(ReadingDay.parse("2026-11-01", calendar: viewer))
         let cutover = ReadingDay.travelCutover(resetHour: 3, historyCalendar: history)
-        XCTAssertEqual(ReadingDay.today(at: cutover.addingTimeInterval(-1), resetHour: 3, calendar: viewer, historyCalendar: history), november)
-        XCTAssertEqual(ReadingDay.today(at: cutover, resetHour: 3, calendar: viewer, historyCalendar: history), december)
+        XCTAssertEqual(ReadingDay.today(at: cutover.addingTimeInterval(-1), resetHour: 3, calendar: viewer, historyCalendar: history), october)
+        XCTAssertEqual(ReadingDay.today(at: cutover, resetHour: 3, calendar: viewer, historyCalendar: history), november)
 
-        var mixed = row("2026-12-01", seconds: 1500, hours: ["2026-12-01T12:00": 1200])
-        mixed.readingTimeByZone = ["Asia/Tokyo": ["2026-12-01T12:00": 600],
-                                   "America/New_York": ["2026-12-01T12:00": 600]]
+        var mixed = row("2026-11-01", seconds: 1500, hours: ["2026-11-01T12:00": 1200])
+        mixed.readingTimeByZone = ["Asia/Tokyo": ["2026-11-01T12:00": 600],
+                                   "America/New_York": ["2026-11-01T12:00": 600]]
         let days = ReadingDay.days(reading: [mixed], resetHour: 3, calendar: viewer,
                                    historyCalendar: history, includeLegacyStreakCredit: true)
-        XCTAssertEqual(days.map(\.date), [november, december])
+        XCTAssertEqual(days.map(\.date), [october, november])
         XCTAssertEqual(days.map(\.seconds), [600, 900])
         XCTAssertEqual(days.map(\.legacyStreakCredit), [0, 0])
     }
@@ -464,20 +464,20 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         let cutoff = ReadingDay.travelCutover(resetHour: 3, historyCalendar: history)
         let from = cutoff.addingTimeInterval(-300), to = cutoff.addingTimeInterval(300)
         let hours = ReadingDay.hours(from: from, to: to, calendar: viewer, splitAt: cutoff)
-        XCTAssertEqual(hours, ["2026-12-01T13:00": 300, "2026-12-01T13:30": 300])
+        XCTAssertEqual(hours, ["2026-11-01T13:00": 300, "2026-11-01T13:30": 300])
         XCTAssertEqual(ReadingDay.hours(from: cutoff, to: to, calendar: viewer, splitAt: cutoff),
-                       ["2026-12-01T13:30": 300])
-        var reading = row("2026-12-01", seconds: 600, hours: hours)
+                       ["2026-11-01T13:30": 300])
+        var reading = row("2026-11-01", seconds: 600, hours: hours)
         reading.timeZone = viewer.timeZone.identifier
         let days = ReadingDay.days(reading: [reading], resetHour: 3, calendar: viewer, historyCalendar: history)
-        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: viewer) }, ["2026-11-30", "2026-12-01"])
+        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: viewer) }, ["2026-10-31", "2026-11-01"])
         XCTAssertEqual(days.map(\.seconds), [300, 300])
     }
     func testEachDevicesCharactersFollowItsOwnLocalReset() {
         let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
-        var phone = row("2026-12-10", seconds: 3600, count: 1000, hours: ["2026-12-10T20:00": 3600])
+        var phone = row("2026-11-10", seconds: 3600, count: 1000, hours: ["2026-11-10T20:00": 3600])
         phone.timeZone = "America/New_York"
-        var tablet = row("2026-12-10", seconds: 1200, count: 5000, hours: ["2026-12-10T02:00": 1200], device: "tablet")
+        var tablet = row("2026-11-10", seconds: 1200, count: 5000, hours: ["2026-11-10T02:00": 1200], device: "tablet")
         tablet.timeZone = "Asia/Shanghai"
         let days = ReadingDay.days(reading: [phone, tablet], resetHour: 3, calendar: calendar)
         XCTAssertEqual(days.map(\.characters), [5000, 1000])

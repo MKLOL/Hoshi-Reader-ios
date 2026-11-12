@@ -5,7 +5,7 @@ nonisolated enum ReadingDay {
     static var calendar: Calendar { StatisticsZone.calendar }
     static let resetKey = "statistics.dayResetHour"
     static let goalKey = "statistics.dailyGoalMinutes"
-    static let travelStartKey = "2026-12-01"
+    static let travelStartKey = "2026-11-01"
     private static let travelCutoverWindow: DateInterval = {
         let utc = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
         let midnight = parse(travelStartKey, calendar: utc)!
@@ -191,8 +191,8 @@ nonisolated enum ReadingDay {
             guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
             let previous = shift(date, by: -1, calendar: calendar)
             // Even across the widest zone difference and a midnight-crossing sample,
-            // a row from December 5 onward cannot contain a November reading day.
-            let canContainHistory = row.dateKey < "2026-12-05"
+            // a row from November 5 onward cannot contain an October reading day.
+            let canContainHistory = row.dateKey < "2026-11-05"
             let wallHours = row.wallClockHours
             let source = canContainHistory && !wallHours.isEmpty
                 ? StatisticsZone.calendar(zone: row.historicalRecordingZone(target: historyCalendar.timeZone)) : historyCalendar

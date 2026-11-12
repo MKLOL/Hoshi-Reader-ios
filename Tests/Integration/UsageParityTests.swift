@@ -45,15 +45,15 @@ nonisolated final class UsageParityTests: XCTestCase {
         XCTAssertEqual([jan10, jan11, jan12].map { days[$0]?.lookups }, [1, 2, 0])
     }
 
-    @MainActor func testUsageKeepsNovemberInThePreviousZoneAndSplitsASessionAtCutover() async throws {
+    @MainActor func testUsageKeepsOctoberInThePreviousZoneAndSplitsASessionAtCutover() async throws {
         let directory = try directory(); defer { try? FileManager.default.removeItem(at: directory) }
         let iso = ISO8601DateFormatter()
-        let start = try XCTUnwrap(iso.date(from: "2026-12-01T10:50:00Z"))
-        let end = try XCTUnwrap(iso.date(from: "2026-12-01T11:10:00Z"))
+        let start = try XCTUnwrap(iso.date(from: "2026-11-01T10:50:00Z"))
+        let end = try XCTUnwrap(iso.date(from: "2026-11-01T11:10:00Z"))
         let history = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles")))
         let viewer = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo")))
-        let november = try XCTUnwrap(ReadingDay.parse("2026-11-30", calendar: viewer))
-        let december = try XCTUnwrap(ReadingDay.parse("2026-12-01", calendar: viewer))
+        let october = try XCTUnwrap(ReadingDay.parse("2026-10-31", calendar: viewer))
+        let november = try XCTUnwrap(ReadingDay.parse("2026-11-01", calendar: viewer))
         let log = UsageLog(directory: directory)
         func event(_ type: UsageEventType, at date: Date, started: Date? = nil) -> UsageEvent {
             UsageEvent(at: Int64(date.timeIntervalSince1970 * 1000), utcOffset: "+09:00", type: type,
@@ -66,18 +66,18 @@ nonisolated final class UsageParityTests: XCTestCase {
 
         let model = UsageStatisticsModel()
         await model.reload(resetHour: 3, now: start, log: log, calendar: viewer, historyCalendar: history)
-        XCTAssertEqual(model.today.date, november)
+        XCTAssertEqual(model.today.date, october)
         XCTAssertEqual(model.today.lookups, 1)
         XCTAssertEqual(model.today.spans.map(\.seconds), [600])
         XCTAssertEqual(model.today.spans.first?.zone, history.timeZone)
-        XCTAssertEqual(model.firstDay, november)
+        XCTAssertEqual(model.firstDay, october)
 
         await model.reload(resetHour: 3, now: end, log: log, calendar: viewer, historyCalendar: history)
-        XCTAssertEqual(model.today.date, december)
+        XCTAssertEqual(model.today.date, november)
         XCTAssertEqual(model.today.lookups, 1)
         XCTAssertEqual(model.today.spans.map(\.seconds), [600])
         XCTAssertEqual(model.today.spans.first?.zone, viewer.timeZone)
-        XCTAssertEqual(model.values(\.lookups)[november], 1)
+        XCTAssertEqual(model.values(\.lookups)[october], 1)
     }
 
     func testSpanCanRestartAtTheSameInstantOnThePreviousLocalDate() throws {

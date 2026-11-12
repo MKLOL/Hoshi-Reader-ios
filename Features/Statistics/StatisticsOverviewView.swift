@@ -189,7 +189,7 @@ private struct StreakSections: View {
         } header: {
             Text("Reading day")
         } footer: {
-            Text("Through November 30, 2026, reading uses the previous statistics time zone. Starting December 1, reading uses the time zone where you read. Reading before \(Self.hourLabel(resetHour)) counts toward the previous day.")
+            Text("Through October 31, 2026, reading uses the previous statistics time zone. Starting November 1, reading uses the time zone where you read. Reading before \(Self.hourLabel(resetHour)) counts toward the previous day.")
         }
     }
 }
