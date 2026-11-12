@@ -45,13 +45,13 @@ nonisolated struct ReadingStreakRun {
         if revision != historyRevision || goalSeconds != minimumSeconds || self.calendar != calendar ||
             (through.map { endOfHistory < $0 } ?? true) {
             historical = ReadingStreakRun()
-            for day in older where day.date <= endOfHistory && day.seconds >= minimumSeconds {
+            for day in older where day.date <= endOfHistory && day.streakSeconds >= minimumSeconds {
                 historical.add(day.date, calendar: calendar)
             }
         } else if let previous = through, endOfHistory > previous {
             // At rollover only the newly finished days enter the prefix.
             let matured = older.reversed().prefix { $0.date > previous }
-            for day in matured.reversed() where day.date <= endOfHistory && day.seconds >= minimumSeconds {
+            for day in matured.reversed() where day.date <= endOfHistory && day.streakSeconds >= minimumSeconds {
                 historical.add(day.date, calendar: calendar)
             }
         }
@@ -60,9 +60,9 @@ nonisolated struct ReadingStreakRun {
         self.calendar = calendar
         through = endOfHistory
         var run = historical
-        for day in recent where day.date > endOfHistory && day.date <= today && day.seconds >= minimumSeconds {
+        for day in recent where day.date > endOfHistory && day.date <= today && day.streakSeconds >= minimumSeconds {
             run.add(day.date, calendar: calendar)
         }
-        return run.progress(today: today, seconds: recent.first { $0.date == today }?.seconds ?? 0, calendar: calendar)
+        return run.progress(today: today, seconds: recent.first { $0.date == today }?.streakSeconds ?? 0, calendar: calendar)
     }
 }

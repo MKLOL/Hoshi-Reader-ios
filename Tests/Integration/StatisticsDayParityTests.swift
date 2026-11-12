@@ -66,9 +66,9 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
                 reading.timeZone = zone
                 return reading
             }
-            let history = ReadingDay.days(reading: rows, resetHour: 3, calendar: calendar)
+            let history = ReadingDay.days(reading: rows, resetHour: 3, calendar: calendar, historyCalendar: calendar)
             let noon = try XCTUnwrap(calendar.date(byAdding: .hour, value: 12, to: days[2]))
-            let streak = StatisticsMath.streak(history, goalMinutes: 10, now: noon, resetHour: 3, calendar: calendar)
+            let streak = StatisticsMath.streak(history, goalMinutes: 10, now: noon, resetHour: 3, calendar: calendar, historyCalendar: calendar)
             XCTAssertEqual(streak.current, 3, zone)
             XCTAssertEqual(streak.longest, 3, zone)
         }
@@ -186,11 +186,11 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         log.append(event(.lookup, date("2026-10-01", 1)))
         log.append(event(.stopped, date("2026-10-01", 1), started: date("2026-09-30", 23, 59)))
         let model = UsageStatisticsModel()
-        await model.reload(resetHour: 3, now: date("2026-10-01", 2), log: log)
+        await model.reload(resetHour: 3, now: date("2026-10-01", 2), log: log, historyCalendar: calendar)
         XCTAssertEqual(model.today.date, date("2026-09-30")); XCTAssertEqual(model.today.lookups, 2)
         XCTAssertEqual(model.today.spans.first?.seconds, 3660)
         XCTAssertEqual(model.values(\.lookups)[date("2026-09-30")], 2)
-        await model.reload(resetHour: 0, now: date("2026-10-01", 2), log: log)
+        await model.reload(resetHour: 0, now: date("2026-10-01", 2), log: log, historyCalendar: calendar)
         XCTAssertEqual(model.today.date, date("2026-10-01")); XCTAssertEqual(model.today.lookups, 1)
         XCTAssertEqual(model.today.spans.first?.seconds, 3600)
         XCTAssertEqual(model.values(\.lookups)[date("2026-09-30")], 1)
@@ -210,7 +210,7 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
             event(.page, date("2026-10-01", 3, 12), session: "interrupted")
         ]
         let first = date("2026-09-30"), second = date("2026-10-01")
-        let days = UsageDay.summarize(Array(events.reversed()), dates: [first, second], calendar: calendar, resetHour: 3)
+        let days = UsageDay.summarize(Array(events.reversed()), dates: [first, second], calendar: calendar, resetHour: 3, historyCalendar: calendar)
         XCTAssertEqual(days[first]?.lookups, 2); XCTAssertEqual(days[second]?.lookups, 1)
         XCTAssertEqual(days[first]?.repeated.first?.word, "猫"); XCTAssertEqual(days[first]?.repeated.first?.count, 2)
         XCTAssertTrue(days[second]!.repeated.isEmpty)
@@ -385,8 +385,8 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         let eastern = StatisticsZone.legacyZone
         let honolulu = try XCTUnwrap(TimeZone(identifier: "Pacific/Honolulu"))
         let parser = ISO8601DateFormatter()
-        let homeStart = try XCTUnwrap(parser.date(from: "2026-01-10T17:00:00Z"))
-        let travelStart = try XCTUnwrap(parser.date(from: "2026-01-12T05:00:00Z"))
+        let homeStart = try XCTUnwrap(parser.date(from: "2027-01-10T17:00:00Z"))
+        let travelStart = try XCTUnwrap(parser.date(from: "2027-01-12T05:00:00Z"))
         XCTAssertGreaterThan(travelStart.timeIntervalSince(homeStart), 24 * 3600)
 
         var tracker = MangaStatisticsTracker(title: "Fixture", initialStatistics: [], enabled: true,
@@ -396,21 +396,88 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         tracker.start(currentPage: 1, now: travelStart, timeZone: honolulu)
         tracker.update(currentPage: 2, now: travelStart.addingTimeInterval(600), timeZone: honolulu)
         let rows = try XCTUnwrap(tracker.statisticsForPersistence()).filter { $0.readingTime > 0 }
-        XCTAssertEqual(rows.map(\.dateKey), ["2026-01-10", "2026-01-11"])
+        XCTAssertEqual(rows.map(\.dateKey), ["2027-01-10", "2027-01-11"])
         XCTAssertEqual(rows.map(\.timeZone), [eastern.identifier, honolulu.identifier])
         let local = StatisticsZone.calendar(zone: honolulu)
         let days = ReadingDay.days(reading: rows, resetHour: 3, calendar: local)
-        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: local) }, ["2026-01-10", "2026-01-11"])
+        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: local) }, ["2027-01-10", "2027-01-11"])
         XCTAssertEqual(days.map(\.seconds), [600, 600])
         let now = travelStart.addingTimeInterval(600)
         XCTAssertEqual(StatisticsMath.streak(days, goalMinutes: 10, now: now, resetHour: 3, calendar: local).current, 2)
         XCTAssertEqual(tracker.dayTotal(at: now, resetHour: 3, calendar: local).readingTime, 600)
     }
+    @MainActor func testCutoffRestoresSixtyTwoDayStreakWithoutAddingUntimedSecondsToHistory() async throws {
+        let calendar = StatisticsZone.calendar(zone: StatisticsZone.legacyZone)
+        let first = try XCTUnwrap(ReadingDay.parse("2026-09-11", calendar: calendar))
+        let today = ReadingDay.shift(first, by: 61, calendar: calendar)
+        let now = today.addingTimeInterval(12 * 3600)
+        var rows = (1...61).compactMap { offset -> Statistics? in
+            let key = ReadingDay.key(ReadingDay.shift(first, by: offset, calendar: calendar), calendar: calendar)
+            guard key != "2026-10-02" else { return nil }
+            return row(key, seconds: 660, hours: offset == 1 ? [:] : [key + "T12:00": 660])
+        }
+        var shifted = row("2026-10-03", seconds: 720, hours: ["2026-10-03T08:00": 720], device: "tablet")
+        shifted.timeZone = "Asia/Shanghai"
+        rows.append(shifted)
+
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let book = root.appendingPathComponent("fixture")
+        try FileManager.default.createDirectory(at: book, withIntermediateDirectories: true)
+        try BookStorage.save(BookMetadata(title: "Fixture", cover: nil, folder: "fixture", lastAccess: .now, syncId: "fixture"),
+                             inside: book, as: FileNames.metadata)
+        try ReadingStatisticsStore.save(rows, root: book, scheduleSync: false)
+        let snapshot = await StatisticsOverviewSnapshot.read(directory: root, resetHour: 3,
+            calendar: calendar, historyCalendar: calendar, now: now)
+        let restored = try XCTUnwrap(ReadingDay.parse("2026-10-02", calendar: calendar))
+        XCTAssertEqual(snapshot.days.first { $0.date == restored }?.seconds, 720)
+        XCTAssertFalse(snapshot.days.contains { $0.date == first })
+        XCTAssertEqual(snapshot.days.reduce(0) { $0 + $1.seconds }, rows.reduce(0) { $0 + $1.readingTime })
+        XCTAssertEqual(snapshot.streakDays.first?.legacyStreakCredit, 660)
+        let boundary = snapshot.streakDays.lowerBound(for: ReadingDay.shift(today, by: -2, calendar: calendar))
+        let progress = ReadingStreakCache().compute(older: snapshot.streakDays[..<boundary],
+            recent: snapshot.streakDays[boundary...], historyRevision: snapshot.historyRevision,
+            minimumSeconds: 600, today: today, calendar: calendar)
+        XCTAssertEqual(progress.current, 62)
+        XCTAssertEqual(progress.todaySeconds, 660)
+    }
+    func testCutoverUsesThePreviousReadingDayBoundaryAndSplitsRecordedZones() throws {
+        let history = StatisticsZone.calendar(zone: StatisticsZone.legacyZone)
+        let viewer = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo")))
+        let november = try XCTUnwrap(ReadingDay.parse("2026-11-30", calendar: viewer))
+        let december = try XCTUnwrap(ReadingDay.parse("2026-12-01", calendar: viewer))
+        let cutover = ReadingDay.travelCutover(resetHour: 3, historyCalendar: history)
+        XCTAssertEqual(ReadingDay.today(at: cutover.addingTimeInterval(-1), resetHour: 3, calendar: viewer, historyCalendar: history), november)
+        XCTAssertEqual(ReadingDay.today(at: cutover, resetHour: 3, calendar: viewer, historyCalendar: history), december)
+
+        var mixed = row("2026-12-01", seconds: 1500, hours: ["2026-12-01T12:00": 1200])
+        mixed.readingTimeByZone = ["Asia/Tokyo": ["2026-12-01T12:00": 600],
+                                   "America/New_York": ["2026-12-01T12:00": 600]]
+        let days = ReadingDay.days(reading: [mixed], resetHour: 3, calendar: viewer,
+                                   historyCalendar: history, includeLegacyStreakCredit: true)
+        XCTAssertEqual(days.map(\.date), [november, december])
+        XCTAssertEqual(days.map(\.seconds), [600, 900])
+        XCTAssertEqual(days.map(\.legacyStreakCredit), [0, 0])
+    }
+    func testCutoverSplitsTheRecordedHourInAHalfHourZone() throws {
+        let history = StatisticsZone.calendar(zone: StatisticsZone.legacyZone)
+        let viewer = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "Asia/Kolkata")))
+        let cutoff = ReadingDay.travelCutover(resetHour: 3, historyCalendar: history)
+        let from = cutoff.addingTimeInterval(-300), to = cutoff.addingTimeInterval(300)
+        let hours = ReadingDay.hours(from: from, to: to, calendar: viewer, splitAt: cutoff)
+        XCTAssertEqual(hours, ["2026-12-01T13:00": 300, "2026-12-01T13:30": 300])
+        XCTAssertEqual(ReadingDay.hours(from: cutoff, to: to, calendar: viewer, splitAt: cutoff),
+                       ["2026-12-01T13:30": 300])
+        var reading = row("2026-12-01", seconds: 600, hours: hours)
+        reading.timeZone = viewer.timeZone.identifier
+        let days = ReadingDay.days(reading: [reading], resetHour: 3, calendar: viewer, historyCalendar: history)
+        XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: viewer) }, ["2026-11-30", "2026-12-01"])
+        XCTAssertEqual(days.map(\.seconds), [300, 300])
+    }
     func testEachDevicesCharactersFollowItsOwnLocalReset() {
         let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
-        var phone = row("2026-10-03", seconds: 3600, count: 1000, hours: ["2026-10-03T20:00": 3600])
+        var phone = row("2026-12-10", seconds: 3600, count: 1000, hours: ["2026-12-10T20:00": 3600])
         phone.timeZone = "America/New_York"
-        var tablet = row("2026-10-03", seconds: 1200, count: 5000, hours: ["2026-10-03T02:00": 1200], device: "tablet")
+        var tablet = row("2026-12-10", seconds: 1200, count: 5000, hours: ["2026-12-10T02:00": 1200], device: "tablet")
         tablet.timeZone = "Asia/Shanghai"
         let days = ReadingDay.days(reading: [phone, tablet], resetHour: 3, calendar: calendar)
         XCTAssertEqual(days.map(\.characters), [5000, 1000])
@@ -451,13 +518,13 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
             XCTAssertEqual(days.map(\.seconds), [600, 600])
         }
     }
-    func testLegacyMissingOrInvalidZoneUsesEasternInsteadOfInferringFromStamp() {
+    func testHistoricalDayInfersTheZoneWithoutChangingTheStoredFallback() {
         var edited = row("2026-10-03", seconds: 600, hours: ["2026-10-03T12:00": 600], stamp: 1791001743483)
         XCTAssertEqual(edited.recordingZone, StatisticsZone.legacyZone)
         edited.timeZone = "invalid/zone"
         XCTAssertEqual(edited.recordingZone, StatisticsZone.legacyZone)
         let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/Los_Angeles")!)
-        XCTAssertEqual(ReadingDay.days(reading: [edited], resetHour: 3, calendar: calendar).map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-03"])
+        XCTAssertEqual(ReadingDay.days(reading: [edited], resetHour: 3, calendar: calendar).map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-02"])
     }
     @MainActor func testStatisticsTimeZoneSyncPreservesExplicitZoneFromOlderPeers() async throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -483,8 +550,8 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
             var entry = row("2026-10-03", seconds: 1800, hours: ["2026-10-03T12:00": 1200], stamp: 1791072000000)
             entry.timeZone = zone
             let days = ReadingDay.days(reading: [entry], resetHour: 3, calendar: calendar)
-            XCTAssertEqual(days.map(\.seconds), [1800], zone)
-            XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-03"])
+            XCTAssertEqual(days.map(\.seconds), [1200, 600], zone)
+            XCTAssertEqual(days.map { ReadingDay.key($0.date, calendar: calendar) }, ["2026-10-02", "2026-10-03"])
         }
         XCTAssertEqual(StatisticsZone.zone("Z")?.secondsFromGMT(), 0)
         XCTAssertEqual(StatisticsZone.zone("+05:30")?.secondsFromGMT(), 19_800)
@@ -499,19 +566,19 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
         let saved = ReadingStatisticsStore.reading(root: root)
         XCTAssertEqual(saved[0].timeZone, "Asia/Shanghai")
         let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
-        XCTAssertEqual(ReadingDay.days(reading: saved, resetHour: 3, calendar: calendar).map(\.seconds), [1800])
+        XCTAssertEqual(ReadingDay.days(reading: saved, resetHour: 3, calendar: calendar).map(\.seconds), [1200, 600])
     }
     @MainActor func testUsageRecordingStartUsesRecordedDayRatherThanItsFileName() async throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
         let calendar = StatisticsZone.calendar(zone: TimeZone(identifier: "America/New_York")!)
-        let at = calendar.date(bySettingHour: 15, minute: 30, second: 0, of: ReadingDay.parse("2026-10-02", calendar: calendar)!)!
+        let at = calendar.date(bySettingHour: 15, minute: 30, second: 0, of: ReadingDay.parse("2026-12-08", calendar: calendar)!)!
         let event = UsageEvent(at: Int64(at.timeIntervalSince1970 * 1000), utcOffset: "+08:00", type: .lookup, term: "猫")
         var data = try JSONEncoder().encode(event); data.append(10)
-        try data.write(to: root.appendingPathComponent("2026-10-02.ndjson"))
+        try data.write(to: root.appendingPathComponent("2026-12-08.ndjson"))
         let model = UsageStatisticsModel()
         await model.reload(resetHour: 3, now: at.addingTimeInterval(86400), log: UsageLog(directory: root))
-        XCTAssertEqual(model.firstDay, ReadingDay.parse("2026-10-03"))
-        XCTAssertEqual(model.values(\.lookups)[ReadingDay.parse("2026-10-03")!], 1)
+        XCTAssertEqual(model.firstDay, ReadingDay.parse("2026-12-09"))
+        XCTAssertEqual(model.values(\.lookups)[ReadingDay.parse("2026-12-09")!], 1)
     }
 
 }

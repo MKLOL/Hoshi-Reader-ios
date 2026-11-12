@@ -185,8 +185,10 @@ nonisolated final class UsageLog: @unchecked Sendable {
     func hasDeviceDays(_ days: [String], device: String) -> Bool {
         days.allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent("devices").appendingPathComponent(device).appendingPathComponent($0 + ".ndjson").path) }
     }
-    func read(historyDays: Int = 92, now: Date = .now, resetHour: Int = 0) async -> (events: [UsageEvent], firstDayKey: String?) {
-        await withCheckedContinuation { continuation in
+    func read(historyDays: Int = 92, now: Date = .now, resetHour: Int = 0,
+              historyCalendar: Calendar = StatisticsZone.historyCalendar) async -> (events: [UsageEvent], firstDayKey: String?) {
+        let cutover = ReadingDay.travelCutover(resetHour: resetHour, historyCalendar: historyCalendar)
+        return await withCheckedContinuation { continuation in
             queue.async { [self] in
                 var folders: [(URL, String)] = [(directory, "local")]
                 let devices = directory.appendingPathComponent("devices")
@@ -209,9 +211,9 @@ nonisolated final class UsageLog: @unchecked Sendable {
                         retained[file] = decoded
                         if index < 3 {
                             for event in decoded.events {
-                                let calendar = StatisticsZone.calendar(zone: event.instantZone)
+                                let calendar = event.date < cutover ? historyCalendar : StatisticsZone.calendar(zone: event.instantZone)
                                 let localDay = ReadingDay.date(at: event.date, resetHour: resetHour, calendar: calendar)
-                                let key = ReaderDateFormatting.shared.dayKey(for: localDay, timeZone: event.instantZone)
+                                let key = ReaderDateFormatting.shared.dayKey(for: localDay, timeZone: calendar.timeZone)
                                 firstDayKey = min(firstDayKey ?? key, key)
                             }
                         }

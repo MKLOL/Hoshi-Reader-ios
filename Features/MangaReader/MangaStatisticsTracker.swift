@@ -21,21 +21,25 @@ nonisolated struct MangaStatisticsTracker {
     var today: Statistics {
         dayTotal(at: .now)
     }
-    func dayTotal(at date: Date, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar) -> Statistics {
-        let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
+    func dayTotal(at date: Date, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar,
+                  historyCalendar: Calendar = StatisticsZone.historyCalendar) -> Statistics {
+        let day = ReadingDay.today(at: date, resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar)
         let dates = readingDaySourceDates(day, calendar: calendar)
-        let total = ReadingDay.days(reading: dates.flatMap { rows(on: $0) }, resetHour: resetHour, calendar: calendar)
+        let total = ReadingDay.days(reading: dates.flatMap { rows(on: $0) }, resetHour: resetHour,
+                                    calendar: calendar, historyCalendar: historyCalendar)
             .first { $0.date == day }
-        var result = Statistics.empty(title: title, day: dates[0])
+        var result = Statistics.empty(title: title, day: ReadingDay.key(day, calendar: calendar))
         result.readingTime = total?.seconds ?? 0; result.charactersRead = total?.characters ?? 0
         result.lastReadingSpeed = StatisticsNumbers.speed(count: result.charactersRead, seconds: result.readingTime)
         return result
     }
-    func textTotal(_ text: [MangaTextStatistic], at date: Date = .now, resetHour: Int = ReadingDay.resetHour, calendar: Calendar = StatisticsZone.calendar) -> Int {
-        let day = ReadingDay.date(at: date, resetHour: resetHour, calendar: calendar)
+    func textTotal(_ text: [MangaTextStatistic], at date: Date = .now, resetHour: Int = ReadingDay.resetHour,
+                   calendar: Calendar = StatisticsZone.calendar, historyCalendar: Calendar = StatisticsZone.historyCalendar) -> Int {
+        let day = ReadingDay.today(at: date, resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar)
         let dates = readingDaySourceDates(day, calendar: calendar)
         let relevantText = text.filter { dates.contains($0.dateKey) }
-        return ReadingDay.days(reading: dates.flatMap { rows(on: $0) }, text: relevantText, resetHour: resetHour, calendar: calendar)
+        return ReadingDay.days(reading: dates.flatMap { rows(on: $0) }, text: relevantText, resetHour: resetHour,
+                               calendar: calendar, historyCalendar: historyCalendar)
             .first { $0.date == day }?.characters ?? 0
     }
     var allTime: Statistics {
@@ -54,9 +58,12 @@ nonisolated struct MangaStatisticsTracker {
         return stored.filter { $0.deviceId != localToday.deviceId } + [localToday]
     }
 
-    /// A row can contain the previous calendar day's pre-reset hours, up to two days back.
+    /// The old clock could also move a local hour across dates. Keep the reader's
+    /// lookup bounded while covering the widest time-zone separation and midnight.
     private func readingDaySourceDates(_ day: Date, calendar: Calendar) -> [String] {
-        (0...2).map { ReadingDay.key(ReadingDay.shift(day, by: $0, calendar: calendar), calendar: calendar) }
+        let key = ReadingDay.key(day, calendar: calendar)
+        let offsets = key < ReadingDay.travelStartKey ? -2...4 : 0...2
+        return offsets.map { ReadingDay.key(ReadingDay.shift(day, by: $0, calendar: calendar), calendar: calendar) }
     }
 
     init(title: String, initialStatistics: [Statistics], enabled: Bool, now: Date = .now, device: ReadingDevice? = nil, trackPageDurations: Bool = false, timeZone: TimeZone = .current) {
@@ -105,7 +112,8 @@ nonisolated struct MangaStatisticsTracker {
         if trackPageDurations { activePageSeconds += elapsed }
         let delta = max(-session.charactersRead, currentPage - lastPageCount)
         let stamp = StatisticsNumbers.integer(now.timeIntervalSince1970 * 1000)
-        let hours = ReadingDay.hours(from: lastTimestamp, to: now, calendar: StatisticsZone.calendar(zone: recordingZone))
+        let cutoff = ReadingDay.cutoverForRecording(from: lastTimestamp, to: now)
+        let hours = ReadingDay.hours(from: lastTimestamp, to: now, calendar: StatisticsZone.calendar(zone: recordingZone), splitAt: cutoff)
         localToday.record(hours: hours, in: recordingZone)
         session.record(hours: hours, in: recordingZone)
         session.add(seconds: elapsed, count: delta, stamp: stamp)

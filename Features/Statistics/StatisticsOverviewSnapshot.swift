@@ -22,13 +22,14 @@ private nonisolated struct CachedReadingDays<Source: Hashable & Sendable>: Senda
         var updated: [Date: DailyReading] = [:]
         for date in dirty {
             let index = days.lowerBound(for: date)
-            let previous = index < days.count && days[index].date == date ? days[index].seconds : 0
+            let previous = index < days.count && days[index].date == date ? days[index].streakSeconds : 0
             if let rows = contributions[date], !rows.isEmpty {
                 let next = DailyReading(date: date,
                     seconds: rows.values.reduce(0) { StatisticsNumbers.adding($0, $1.seconds) },
-                    characters: rows.values.reduce(0) { StatisticsNumbers.adding($0, $1.characters) })
+                    characters: rows.values.reduce(0) { StatisticsNumbers.adding($0, $1.characters) },
+                    legacyStreakCredit: rows.values.reduce(0) { StatisticsNumbers.adding($0, $1.legacyStreakCredit) })
                 updated[date] = next
-                if next.seconds != previous { secondsChanged.insert(date) }
+                if next.streakSeconds != previous { secondsChanged.insert(date) }
             } else {
                 contributions[date] = nil
                 if previous > 0 { secondsChanged.insert(date) }
@@ -68,10 +69,12 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
         let days: [DailyReading]
         let devices: [DeviceReadingSummary]
 
-        init(reading: [Statistics], text: [MangaTextStatistic], manga: Bool, resetHour: Int, calendar: Calendar) {
+        init(reading: [Statistics], text: [MangaTextStatistic], manga: Bool, resetHour: Int, calendar: Calendar, historyCalendar: Calendar) {
             self.reading = reading; self.text = text
-            days = ReadingDay.days(reading: reading, text: manga ? text : nil, resetHour: resetHour, calendar: calendar)
-            devices = StatisticsMath.devices(reading: reading, text: text, isManga: manga, resetHour: resetHour, calendar: calendar)
+            days = ReadingDay.days(reading: reading, text: manga ? text : nil, resetHour: resetHour,
+                calendar: calendar, historyCalendar: historyCalendar, includeLegacyStreakCredit: true)
+            devices = StatisticsMath.devices(reading: reading, text: text, isManga: manga, resetHour: resetHour,
+                calendar: calendar, historyCalendar: historyCalendar)
         }
     }
 
@@ -86,12 +89,14 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
 
     private(set) var books: [BookReadingSummary]
     private(set) var days: [DailyReading]
+    private(set) var streakDays: [DailyReading]
     private(set) var devices: [DeviceReadingSummary]
     private(set) var historyRevision = UUID()
     private(set) var cachedBooks: [String: CachedBook] = [:]
     private var directory: URL?
     private var resetHour: Int?
     private var calendar: Calendar?
+    private var historyCalendar: Calendar?
     private var cutoff: Date?
     private var aggregate = CachedReadingDays<String>()
     var maintenance: [URL] = []
@@ -99,13 +104,15 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
 
     init(books: [BookReadingSummary]) {
         self.books = books
-        days = StatisticsMath.combine(books.flatMap(\.days))
+        streakDays = StatisticsMath.combine(books.flatMap(\.streakDays))
+        days = streakDays.filter(\.hasActivity)
         devices = StatisticsMath.combineDevices(books.flatMap(\.devices))
     }
 
     private struct FinishInfo: Decodable { let characterCount: Int }
 
     @concurrent static func read(directory: URL, resetHour: Int, calendar: Calendar,
+                                historyCalendar: Calendar = StatisticsZone.historyCalendar,
                                 reusing previous: Self? = nil, now: Date = .now) async -> Self {
         let disk = await HttpStatisticsDisk.read(booksDirectory: directory, stateFile: HttpReadingStatisticsSync.stateFile)
         let decoder = JSONDecoder(), manager = FileManager.default
@@ -114,7 +121,8 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
         }
 
         let reused = previous.flatMap { old in
-            old.directory == directory && old.resetHour == resetHour && old.calendar == calendar ? old : nil
+            old.directory == directory && old.resetHour == resetHour && old.calendar == calendar &&
+                old.historyCalendar == historyCalendar ? old : nil
         }
         var snapshot = reused ?? Self(books: [])
         var nextBooks: [String: CachedBook] = [:]
@@ -166,7 +174,8 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
                     continue
                 }
                 let next = rows.isEmpty && textRows.isEmpty ? nil
-                    : DateTotals(reading: rows, text: textRows, manga: isManga, resetHour: resetHour, calendar: calendar)
+                    : DateTotals(reading: rows, text: textRows, manga: isManga, resetHour: resetHour,
+                        calendar: calendar, historyCalendar: historyCalendar)
                 nextDates[key] = next
                 bookAggregate.replace(source: key, old: old?.days ?? [], new: next?.days ?? [], dirty: &bookDirty)
             }
@@ -174,28 +183,28 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
             var devices = StatisticsMath.combineDevices(nextDates.keys.sorted().flatMap { nextDates[$0]!.devices })
             for index in devices.indices { devices[index].books = 1 }
             let summary = BookReadingSummary(book: book, reading: reading, mangaText: text, finished: finished,
-                resetHour: resetHour, calendar: calendar, days: bookAggregate.days, devices: devices)
+                resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar, days: bookAggregate.days, devices: devices)
             nextBooks[item.syncId] = CachedBook(root: item.root, readingStamp: readingStamp, textStamp: textStamp,
                 aggregate: bookAggregate, sourceDates: nextDates, summary: summary)
 
             // Only replace this book's contributions where its reduced reading days changed.
-            let oldDays = prior?.summary.days ?? []
+            let oldDays = prior?.summary.streakDays ?? []
             let before = bookDirty.compactMap { date -> DailyReading? in
                 let index = oldDays.lowerBound(for: date)
                 return index < oldDays.count && oldDays[index].date == date ? oldDays[index] : nil
             }
             let after = bookDirty.compactMap { date -> DailyReading? in
-                let index = summary.days.lowerBound(for: date)
-                return index < summary.days.count && summary.days[index].date == date ? summary.days[index] : nil
+                let index = summary.streakDays.lowerBound(for: date)
+                return index < summary.streakDays.count && summary.streakDays[index].date == date ? summary.streakDays[index] : nil
             }
             snapshot.aggregate.replace(source: item.syncId, old: before, new: after, dirty: &dirty)
         }
         for (id, old) in snapshot.cachedBooks where nextBooks[id] == nil {
-            snapshot.aggregate.replace(source: id, old: old.summary.days, new: [], dirty: &dirty)
+            snapshot.aggregate.replace(source: id, old: old.summary.streakDays, new: [], dirty: &dirty)
         }
 
         let secondsChanged = snapshot.aggregate.refresh(dirty)
-        let today = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
+        let today = ReadingDay.today(at: now, resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar)
         let cutoff = ReadingDay.shift(today, by: -2, calendar: calendar)
         if let priorCutoff = snapshot.cutoff, secondsChanged.contains(where: { $0 < max(priorCutoff, cutoff) }) {
             snapshot.historyRevision = UUID()
@@ -204,10 +213,12 @@ nonisolated struct StatisticsOverviewSnapshot: Sendable {
         snapshot.directory = directory
         snapshot.resetHour = resetHour
         snapshot.calendar = calendar
+        snapshot.historyCalendar = historyCalendar
         snapshot.cachedBooks = nextBooks
         snapshot.books = nextBooks.values.map(\.summary).filter { $0.seconds > 0 || $0.characters > 0 || $0.pages > 0 }
             .sorted { $0.seconds == $1.seconds ? $0.id.uuidString < $1.id.uuidString : $0.seconds > $1.seconds }
-        snapshot.days = snapshot.aggregate.days
+        snapshot.streakDays = snapshot.aggregate.days
+        if !dirty.isEmpty { snapshot.days = snapshot.streakDays.filter(\.hasActivity) }
         snapshot.devices = StatisticsMath.combineDevices(snapshot.books.flatMap(\.devices))
         snapshot.needsAbsorb = disk.needsAbsorb
         snapshot.maintenance = disk.roots.filter { !manager.fileExists(atPath: $0.root.appendingPathComponent(ReadingStatisticsStore.migration).path) }.map(\.root)

@@ -66,7 +66,7 @@ struct MangaStatisticsView: View {
                     statisticsSection(title: "Today", stat: statistics.today, characters: model.todayCharacters)
                 }
             }
-            .id(ReadingDay.key(ReadingDay.date(at: now, resetHour: resetHour)) + StatisticsZone.calendar.timeZone.identifier)
+            .id(ReadingDay.key(ReadingDay.today(at: now, resetHour: resetHour)) + StatisticsZone.calendar.timeZone.identifier)
             .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in now = .now }
             .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { now = $0 }
             .monospacedDigit()

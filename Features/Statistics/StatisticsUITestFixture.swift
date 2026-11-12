@@ -38,7 +38,9 @@ struct StatisticsUITestFixture: View {
         if FileManager.default.fileExists(atPath: UsageLog.shared.directory.path) { try FileManager.default.removeItem(at: UsageLog.shared.directory) }
         guard !empty else { return }
 
-        let now = Date(), calendar = StatisticsZone.calendar, zone = calendar.timeZone
+        let now = Date()
+        let calendar = now < ReadingDay.travelCutover(resetHour: 3) ? StatisticsZone.historyCalendar : StatisticsZone.calendar
+        let zone = calendar.timeZone
         let today = ReadingDay.date(at: now, resetHour: 3, calendar: calendar)
         let stamp = Int(now.timeIntervalSince1970 * 1000)
         let devices = [ReadingDevice(id: "android-ui", name: "Pixel Tablet"), ReadingDevice(id: "iphone-ui", name: "Dragos’s iPhone"), ReadingDevice.current]

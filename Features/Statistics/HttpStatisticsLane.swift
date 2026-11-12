@@ -100,7 +100,7 @@ nonisolated enum HttpStatisticsDecode {
 @MainActor enum StatisticsPreferencesStore {
     static let stampKey = "statistics.preferencesUpdatedAt"
     // Retain this preference on the wire for peers that still count in a shared zone.
-    static let zoneKey = "statistics.timeZone"
+    nonisolated static let zoneKey = "statistics.timeZone"
     static func load(defaults: UserDefaults = .standard) -> HttpStatisticsPreferences {
         let goal = defaults.object(forKey: ReadingDay.goalKey) == nil ? 10 : min(120, max(1, defaults.integer(forKey: ReadingDay.goalKey)))
         let reset = ReadingDay.resetHour(defaults: defaults)

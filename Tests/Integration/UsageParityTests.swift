@@ -8,21 +8,23 @@ nonisolated final class UsageParityTests: XCTestCase {
         return UsageEvent(at: Int64(date.timeIntervalSince1970 * 1000), utcOffset: offset.string(from: date), type: type, session: "session", bookId: "book", bookTitle: "Fixture", contentType: "manga", startedAt: started.map { Int64($0.timeIntervalSince1970 * 1000) }, text: text, term: term, source: source, outcome: found ? "found" : "not-found")
     }
     func testRepeatedWordsUseDictionaryFormAndIgnoreMisses() {
-        let today = Date()
+        let today = Calendar.current.startOfDay(for: .now).addingTimeInterval(12 * 3600)
         let events = [event(.lookup, date: today, text: "食べた", term: "食べる", source: "page"), event(.lookup, date: today.addingTimeInterval(1), text: "食べて", term: "食べる", source: "popup"), event(.lookup, date: today.addingTimeInterval(2), text: "unknown", source: "page", found: false), event(.lookup, date: today.addingTimeInterval(3), text: "猫", term: "猫", source: "page")]
-        let summary = UsageDay.summarize(events, date: today)
+        let summary = UsageDay.summarize(events, date: today, historyCalendar: .current)
         XCTAssertEqual(summary.lookups, 4)
         XCTAssertEqual(summary.mangaLookups, 3)
         XCTAssertEqual(summary.repeated.count, 1)
         XCTAssertEqual(summary.repeated.first?.word, "食べる")
         XCTAssertEqual(summary.repeated.first?.count, 2)
     }
-    func testReadingSpanClipsAtMidnightAndCrashStopsAtLastActivity() {
-        let today = Calendar.current.startOfDay(for: Date()), start = today.addingTimeInterval(-60), end = today.addingTimeInterval(120)
+    func testReadingSpanClipsAtMidnightAndCrashStopsAtLastActivity() throws {
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-15T12:00:00Z"))
+        let today = Calendar.current.startOfDay(for: instant)
+        let start = today.addingTimeInterval(-60), end = today.addingTimeInterval(120)
         let stopped = event(.stopped, date: end, started: start)
-        XCTAssertEqual(UsageDay.summarize([stopped], date: today).spans.first?.seconds, 120)
+        XCTAssertEqual(UsageDay.summarize([stopped], date: today, historyCalendar: .current).spans.first?.seconds, 120)
         let crashed = [event(.started, date: today), event(.page, date: end)]
-        XCTAssertEqual(UsageDay.summarize(crashed, date: today).spans.first?.seconds, 120)
+        XCTAssertEqual(UsageDay.summarize(crashed, date: today, historyCalendar: .current).spans.first?.seconds, 120)
     }
     func testEachEventUsesItsOwnDateAndMissingZoneUsesEastern() throws {
         let iso = ISO8601DateFormatter()
@@ -41,6 +43,41 @@ nonisolated final class UsageParityTests: XCTestCase {
         XCTAssertEqual(tokyo.timeIntervalSince(newYork), 28 * 3600)
         let days = UsageDay.summarize(events, dates: [jan10, jan11, jan12], calendar: viewer, resetHour: 3)
         XCTAssertEqual([jan10, jan11, jan12].map { days[$0]?.lookups }, [1, 2, 0])
+    }
+
+    @MainActor func testUsageKeepsNovemberInThePreviousZoneAndSplitsASessionAtCutover() async throws {
+        let directory = try directory(); defer { try? FileManager.default.removeItem(at: directory) }
+        let iso = ISO8601DateFormatter()
+        let start = try XCTUnwrap(iso.date(from: "2026-12-01T10:50:00Z"))
+        let end = try XCTUnwrap(iso.date(from: "2026-12-01T11:10:00Z"))
+        let history = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles")))
+        let viewer = StatisticsZone.calendar(zone: try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo")))
+        let november = try XCTUnwrap(ReadingDay.parse("2026-11-30", calendar: viewer))
+        let december = try XCTUnwrap(ReadingDay.parse("2026-12-01", calendar: viewer))
+        let log = UsageLog(directory: directory)
+        func event(_ type: UsageEventType, at date: Date, started: Date? = nil) -> UsageEvent {
+            UsageEvent(at: Int64(date.timeIntervalSince1970 * 1000), utcOffset: "+09:00", type: type,
+                session: "cutover", startedAt: started.map { Int64($0.timeIntervalSince1970 * 1000) }, timeZone: viewer.timeZone.identifier)
+        }
+        log.append(event(.started, at: start))
+        log.append(event(.lookup, at: start))
+        log.append(event(.lookup, at: end))
+        log.append(event(.stopped, at: end, started: start))
+
+        let model = UsageStatisticsModel()
+        await model.reload(resetHour: 3, now: start, log: log, calendar: viewer, historyCalendar: history)
+        XCTAssertEqual(model.today.date, november)
+        XCTAssertEqual(model.today.lookups, 1)
+        XCTAssertEqual(model.today.spans.map(\.seconds), [600])
+        XCTAssertEqual(model.today.spans.first?.zone, history.timeZone)
+        XCTAssertEqual(model.firstDay, november)
+
+        await model.reload(resetHour: 3, now: end, log: log, calendar: viewer, historyCalendar: history)
+        XCTAssertEqual(model.today.date, december)
+        XCTAssertEqual(model.today.lookups, 1)
+        XCTAssertEqual(model.today.spans.map(\.seconds), [600])
+        XCTAssertEqual(model.today.spans.first?.zone, viewer.timeZone)
+        XCTAssertEqual(model.values(\.lookups)[november], 1)
     }
 
     func testSpanCanRestartAtTheSameInstantOnThePreviousLocalDate() throws {
@@ -65,13 +102,13 @@ nonisolated final class UsageParityTests: XCTestCase {
 
     func testJumpDoesNotCountAsPageTurn() {
         let now = Date()
-        let day = UsageDay.summarize([event(.page, date: now, source: "jump"), event(.page, date: now)], date: now)
+        let day = UsageDay.summarize([event(.page, date: now, source: "jump"), event(.page, date: now)], date: now, historyCalendar: .current)
         XCTAssertEqual(day.pages, 1)
     }
     func testRollingRatioUsesWindowTotalsAndRespectsRecordingStart() {
         let calendar = Calendar.current, today = calendar.startOfDay(for: .now)
         let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
-        let points = ReadingTrends.series(values: [yesterday: 3, today: 10], denominators: [yesterday: 1, today: 50], days: 14, since: yesterday, now: today)
+        let points = ReadingTrends.series(values: [yesterday: 3, today: 10], denominators: [yesterday: 1, today: 50], days: 14, since: yesterday, now: today, historyCalendar: calendar)
         XCTAssertEqual(points.count, 2)
         XCTAssertEqual(points[0].average, 3)
         XCTAssertEqual(points[1].value, 0.2, accuracy: 0.0001)
@@ -81,7 +118,7 @@ nonisolated final class UsageParityTests: XCTestCase {
         let calendar = Calendar.current, today = calendar.startOfDay(for: .now)
         let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
         let dayBefore = calendar.date(byAdding: .day, value: -2, to: today)!
-        let points = ReadingTrends.series(values: [today: 3, yesterday: 6, dayBefore: 9], days: 1, now: today)
+        let points = ReadingTrends.series(values: [today: 3, yesterday: 6, dayBefore: 9], days: 1, now: today, historyCalendar: calendar)
         XCTAssertEqual(points.first?.average, 6)
     }
     func testTornLogLineDoesNotSwallowNextEvent() async throws {
@@ -200,7 +237,8 @@ nonisolated final class UsageParityTests: XCTestCase {
         let calendar = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
         let january = try XCTUnwrap(ReadingDay.parse("2026-01-31", calendar: calendar))
         let february = try XCTUnwrap(ReadingDay.parse("2026-02-01", calendar: calendar))
-        let days = UsageDay.summarize(snapshot.events, dates: [january, february], calendar: calendar, resetHour: 3)
+        let history = StatisticsZone.calendar(zone: StatisticsZone.legacyZone)
+        let days = UsageDay.summarize(snapshot.events, dates: [january, february], calendar: calendar, resetHour: 3, historyCalendar: history)
         XCTAssertEqual(days[january]?.lookups, 2)
         XCTAssertEqual(days[february]?.lookups, 0)
         let requests = await kv.requests

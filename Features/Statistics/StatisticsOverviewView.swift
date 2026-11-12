@@ -6,8 +6,9 @@ struct StatisticsOverviewView: View {
     @State private var model = StatisticsOverview()
     @State private var usage = UsageStatisticsModel()
     @State private var selectedTab = 0
-    @State private var readingDate = ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour)
+    @State private var readingDate = ReadingDay.today(at: .now, resetHour: ReadingDay.resetHour)
     @AppStorage(ReadingDay.resetKey) private var resetHour = 3
+    @AppStorage(StatisticsPreferencesStore.zoneKey) private var historyZoneID: String?
 
     var body: some View {
         List {
@@ -30,19 +31,20 @@ struct StatisticsOverviewView: View {
             refresh(); Task { await HttpStatisticsLane.shared.refresh(); await usage.reload(resetHour: resetHour) }
         }
         .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now in
-            let day = ReadingDay.date(at: now, resetHour: resetHour)
+            let day = ReadingDay.today(at: now, resetHour: resetHour)
             if day != readingDate { refresh(); Task { await usage.reload(resetHour: resetHour) } }
         }
         .onReceive(NotificationCenter.default.publisher(for: .usageLogChanged).receive(on: RunLoop.main).debounce(for: .milliseconds(200), scheduler: RunLoop.main)) { _ in Task { await usage.reload() } }
         .onReceive(NotificationCenter.default.publisher(for: .readingStatisticsChanged)) { _ in refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .hoshiLibraryChanged)) { _ in refresh() }
         .onChange(of: resetHour) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
+        .onChange(of: historyZoneID) { _, _ in refresh(); Task { await usage.reload(resetHour: resetHour) } }
         .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
             refresh(); Task { await usage.reload(resetHour: resetHour) }
         }
     }
     private func refresh() {
-        readingDate = ReadingDay.date(at: .now, resetHour: resetHour)
+        readingDate = ReadingDay.today(at: .now, resetHour: resetHour)
         model.scheduleReload(resetHour: resetHour)
     }
     @ViewBuilder private var overviewSections: some View {
@@ -180,12 +182,14 @@ private struct StreakSections: View {
                 ForEach(0..<24, id: \.self) { hour in Text(Self.hourLabel(hour)).tag(hour) }
             }
             .accessibilityIdentifier("statistics-day-reset")
-            LabeledContent("This device’s time zone", value: StatisticsFormat.zoneName(.current))
+            let historical = Date.now < ReadingDay.travelCutover(resetHour: resetHour)
+            LabeledContent(historical ? "Reading day time zone" : "This device’s time zone",
+                           value: StatisticsFormat.zoneName(historical ? StatisticsZone.historyCalendar.timeZone : .current))
                 .accessibilityIdentifier("statistics-time-zone")
         } header: {
             Text("Reading day")
         } footer: {
-            Text("Reading before \(Self.hourLabel(resetHour)) counts toward the previous day in the time zone where you read. Today follows this device’s clock. Earlier entries without a time zone use US Eastern.")
+            Text("Through November 30, 2026, reading uses the previous statistics time zone. Starting December 1, reading uses the time zone where you read. Reading before \(Self.hourLabel(resetHour)) counts toward the previous day.")
         }
     }
 }

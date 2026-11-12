@@ -19,7 +19,7 @@ struct ReadingHeatmap: View {
 
     var body: some View {
         let calendar = StatisticsZone.calendar
-        let today = ReadingDay.date(at: .now, resetHour: resetHour)
+        let today = ReadingDay.today(at: .now, resetHour: resetHour)
         let mondayOffset = (calendar.component(.weekday, from: today) + 5) % 7
         let start = ReadingDay.shift(today, by: -(15 * 7 + mondayOffset), calendar: calendar)
         let seconds = Dictionary(days.map { ($0.date, $0.seconds) }, uniquingKeysWith: StatisticsNumbers.adding)

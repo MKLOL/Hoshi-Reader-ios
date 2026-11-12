@@ -28,16 +28,19 @@ nonisolated struct UsageDay {
         }
     }
 
-    static func summarize(_ events: [UsageEvent], date: Date, calendar: Calendar = .current, resetHour: Int = 0) -> Self {
+    static func summarize(_ events: [UsageEvent], date: Date, calendar: Calendar = .current, resetHour: Int = 0,
+                          historyCalendar: Calendar = StatisticsZone.historyCalendar) -> Self {
         let day = calendar.startOfDay(for: date)
-        return summarize(events, dates: [day], calendar: calendar, resetHour: resetHour)[day] ?? Self(date: day)
+        return summarize(events, dates: [day], calendar: calendar, resetHour: resetHour, historyCalendar: historyCalendar)[day] ?? Self(date: day)
     }
 
-    /// Resolve sessions and order events once for the whole history. Only a span crossing a
-    /// reading-day boundary is split; a large usage log is never rescanned for every chart day.
-    static func summarize(_ events: [UsageEvent], dates: [Date], calendar: Calendar = .current, resetHour: Int = 0) -> [Date: Self] {
+    /// Resolve sessions and order events once for the whole history. Split spans at a
+    /// reading-day boundary or at the move from the shared zone to recorded local time.
+    static func summarize(_ events: [UsageEvent], dates: [Date], calendar: Calendar = .current, resetHour: Int = 0,
+                          historyCalendar: Calendar = StatisticsZone.historyCalendar) -> [Date: Self] {
         let dates = Set(dates.map { calendar.startOfDay(for: $0) }).sorted()
         guard let first = dates.first, let lastDay = dates.last else { return [:] }
+        let cutover = ReadingDay.travelCutover(resetHour: resetHour, historyCalendar: historyCalendar)
         var result = Dictionary(uniqueKeysWithValues: dates.map { ($0, Self(date: $0)) })
         let ordered = events.sorted { $0.at < $1.at }
         var opened: [String: UsageEvent] = [:], last: [String: Date] = [:]
@@ -46,8 +49,7 @@ nonisolated struct UsageDay {
             guard let day = target.date(from: source.dateComponents([.year, .month, .day], from: date)) else { return nil }
             return target.startOfDay(for: day)
         }
-        func addSpan(from: Date, to: Date, event: UsageEvent, zone: TimeZone) {
-            let source = StatisticsZone.calendar(zone: zone)
+        func addSpan(from: Date, to: Date, event: UsageEvent, source: Calendar) {
             guard let firstLocal = matchingDate(first, from: calendar, to: source),
                   let lastLocal = matchingDate(lastDay, from: calendar, to: source) else { return }
             let start = ReadingDay.boundary(on: firstLocal, resetHour: resetHour, calendar: source)
@@ -61,13 +63,21 @@ nonisolated struct UsageDay {
                 let spanEnd = min(b, ReadingDay.boundary(on: next, resetHour: resetHour, calendar: source))
                 if spanEnd > spanStart, let label = matchingDate(day, from: source, to: calendar), var summary = result[label] {
                     summary.spans.append(UsageSpan(start: spanStart, end: spanEnd, title: event.bookTitle ?? "Untitled",
-                        session: event.session ?? "", zone: zone))
-                    summary.noteActivity(spanStart, zone: zone)
-                    summary.noteActivity(spanEnd, zone: zone)
+                        session: event.session ?? "", zone: source.timeZone))
+                    summary.noteActivity(spanStart, zone: source.timeZone)
+                    summary.noteActivity(spanEnd, zone: source.timeZone)
                     result[label] = summary
                 }
                 if spanEnd >= b || next <= day { break }
                 day = next
+            }
+        }
+        func addRecordedSpan(from: Date, to: Date, event: UsageEvent, recordedZone: TimeZone) {
+            if from < cutover {
+                addSpan(from: from, to: min(to, cutover), event: event, source: historyCalendar)
+            }
+            if to > cutover {
+                addSpan(from: max(from, cutover), to: to, event: event, source: StatisticsZone.calendar(zone: recordedZone))
             }
         }
         for (index, event) in ordered.enumerated() {
@@ -80,13 +90,12 @@ nonisolated struct UsageDay {
                 if start != nil { opened[session] = nil }
                 let began = event.startedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? start?.date ?? at
                 let zone = StatisticsZone.zone(event.startedTimeZone) ?? start?.recordedZone ?? event.recordedZone
-                addSpan(from: began, to: at, event: event, zone: zone)
+                addRecordedSpan(from: began, to: at, event: event, recordedZone: zone)
             }
-            let zone = event.instantZone
-            let source = StatisticsZone.calendar(zone: zone)
+            let source = at < cutover ? historyCalendar : StatisticsZone.calendar(zone: event.instantZone)
             let localDay = ReadingDay.date(at: at, resetHour: resetHour, calendar: source)
             guard let day = matchingDate(localDay, from: source, to: calendar), var summary = result[day] else { continue }
-            summary.noteActivity(at, zone: zone)
+            summary.noteActivity(at, zone: source.timeZone)
             switch event.type {
             case .opened: summary.sessions += 1
             case .page: if event.source != "jump" { summary.pages += 1 }
@@ -106,7 +115,7 @@ nonisolated struct UsageDay {
             result[day] = summary
         }
         for (session, event) in opened {
-            addSpan(from: event.date, to: last[session] ?? event.date, event: event, zone: event.recordedZone)
+            addRecordedSpan(from: event.date, to: last[session] ?? event.date, event: event, recordedZone: event.recordedZone)
         }
         for day in dates {
             var summary = result[day]!
@@ -126,8 +135,9 @@ nonisolated struct ReadingTrendPoint: Identifiable {
 }
 nonisolated enum ReadingTrends {
     /// A ratio's average is the ratio of the window sums, never an average of daily ratios.
-    static func series(values: [Date: Double], denominators: [Date: Double]? = nil, days: Int, since: Date? = nil, now: Date = .now, resetHour: Int = 0, calendar: Calendar = .current) -> [ReadingTrendPoint] {
-        let today = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
+    static func series(values: [Date: Double], denominators: [Date: Double]? = nil, days: Int, since: Date? = nil, now: Date = .now,
+                       resetHour: Int = 0, calendar: Calendar = .current, historyCalendar: Calendar = StatisticsZone.historyCalendar) -> [ReadingTrendPoint] {
+        let today = ReadingDay.today(at: now, resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar)
         guard days > 0 else { return [] }
         return (0..<days).reversed().compactMap { offset in
             let date = ReadingDay.shift(today, by: -offset, calendar: calendar)
@@ -148,18 +158,19 @@ nonisolated enum ReadingTrends {
 @Observable @MainActor final class UsageStatisticsModel {
     var events: [UsageEvent] = []
     var firstDay: Date?
-    var today = UsageDay(date: ReadingDay.date(at: .now, resetHour: ReadingDay.resetHour))
+    var today = UsageDay(date: ReadingDay.today(at: .now, resetHour: ReadingDay.resetHour,
+        calendar: StatisticsZone.calendar, historyCalendar: StatisticsZone.historyCalendar))
     private var counts: [Date: UsageDay] = [:]
     private var reloadGeneration = 0
-    func reload(resetHour: Int = ReadingDay.resetHour, now: Date = .now, log: UsageLog = .shared) async {
+    func reload(resetHour: Int = ReadingDay.resetHour, now: Date = .now, log: UsageLog = .shared,
+                calendar: Calendar = StatisticsZone.calendar, historyCalendar: Calendar = StatisticsZone.historyCalendar) async {
         reloadGeneration += 1
         let generation = reloadGeneration
-        let snapshot = await log.read(now: now, resetHour: resetHour)
-        let calendar = StatisticsZone.calendar
-        let readingToday = ReadingDay.date(at: now, resetHour: resetHour, calendar: calendar)
+        let snapshot = await log.read(now: now, resetHour: resetHour, historyCalendar: historyCalendar)
+        let readingToday = ReadingDay.today(at: now, resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar)
         let summaries = await Task.detached {
             let dates = (0...92).map { ReadingDay.shift(readingToday, by: -$0, calendar: calendar) }
-            return UsageDay.summarize(snapshot.events, dates: dates, calendar: calendar, resetHour: resetHour)
+            return UsageDay.summarize(snapshot.events, dates: dates, calendar: calendar, resetHour: resetHour, historyCalendar: historyCalendar)
         }.value
         guard generation == reloadGeneration else { return }
         events = snapshot.events
