@@ -314,11 +314,10 @@ nonisolated enum StatisticsMath {
         if value >= 3600 { return "\(value / 3600)h \(value % 3600 / 60)m \(value % 60)s" }
         return "\(value / 60)m \(value % 60)s"
     }
-    /// Hours and minutes, with seconds only under a minute: "0m", "45s", "32m", "6h", "2h 14m".
+    /// Show reading time to the second, with compact units for long sessions and totals.
     static func readingTime(_ seconds: Double, locale: Locale = .current) -> String {
-        let value = StatisticsNumbers.integer(seconds)
-        let style = Duration.UnitsFormatStyle(allowedUnits: value == 0 || value >= 60 ? [.hours, .minutes] : [.seconds], width: .narrow).locale(locale)
-        return Duration.seconds(value < 60 ? value : value / 60 * 60).formatted(style)
+        let style = Duration.UnitsFormatStyle(allowedUnits: [.hours, .minutes, .seconds], width: .narrow).locale(locale)
+        return Duration.seconds(StatisticsNumbers.integer(seconds)).formatted(style)
     }
     /// The smallest round axis top whose half is a round gridline too: 134 → 150, 21,000 → 30,000.
     static func axisTop(_ largest: Double) -> Double {

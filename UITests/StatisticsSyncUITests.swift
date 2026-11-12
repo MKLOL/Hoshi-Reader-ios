@@ -8,6 +8,8 @@ final class StatisticsSyncUITests: XCTestCase {
         app.launch()
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(app.staticTexts["猫"].firstMatch.waitForExistence(timeout: 15), app.debugDescription)
+        let readingTime = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "2h 14m 39s")).firstMatch
+        XCTAssertTrue(readingTime.waitForExistence(timeout: 5), app.debugDescription)
         capture(app, "statistics-synced-today")
         let reset = app.buttons["statistics-day-reset"]
         for _ in 0..<6 { if reset.isHittable { break }; app.swipeUp() }

@@ -51,7 +51,7 @@ struct PopupLayout {
     }
     
     private var showBelow: Bool {
-        spaceBelow >= height
+        spaceBelow >= preferredHeight
     }
     
     /// iPad gets an even taller popup floor than the phone: the user wants the definition readable
@@ -60,6 +60,7 @@ struct PopupLayout {
     var preferTallPopup = false
     var customWidth = false
     var customHeight = false
+    var mangaAction: MangaLookupAction?
 
     // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
     // user's configured max. A definition panel that filled most of the page was overwhelming and
@@ -78,7 +79,7 @@ struct PopupLayout {
         return max(1, min(max(maxHeight, screenSize.height * 0.30), screenSize.height * 0.38))
     }
 
-    var width: CGFloat {
+    private var preferredWidth: CGFloat {
         if isFullWidth {
             return screenSize.width - screenBorderPadding * 2
         }
@@ -90,7 +91,7 @@ struct PopupLayout {
         return min(screenSize.width - screenBorderPadding * 2, cappedMaxWidth)
     }
 
-    var height: CGFloat {
+    private var preferredHeight: CGFloat {
         if useSidePlacement || isFullWidth {
             return cappedMaxHeight
         }
@@ -98,7 +99,8 @@ struct PopupLayout {
         return max(1, min(max(spaceAbove, spaceBelow) - screenBorderPadding, cappedMaxHeight))
     }
 
-    var position: CGPoint {
+    private var preferredPosition: CGPoint {
+        let width = preferredWidth, height = preferredHeight
         var x: CGFloat
         var y: CGFloat
 
@@ -132,6 +134,23 @@ struct PopupLayout {
         }
         return CGPoint(x: x, y: y)
     }
+
+    var frame: CGRect {
+        let bounds = CGRect(x: screenBorderPadding, y: topInset + screenBorderPadding,
+                            width: max(0, screenSize.width - screenBorderPadding * 2),
+                            height: max(0, screenSize.height - topInset - bottomInset - screenBorderPadding * 2))
+        let mangaSize = CGSize(width: isFullWidth ? bounds.width : cappedMaxWidth, height: cappedMaxHeight)
+        if let mangaFrame = mangaAction?.popupFrame(around: selectionRect, within: bounds,
+                                                    size: mangaSize, gap: popupPadding, fullWidth: isFullWidth) {
+            return mangaFrame
+        }
+        let width = preferredWidth, height = preferredHeight, center = preferredPosition
+        return CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
+    }
+
+    var width: CGFloat { frame.width }
+    var height: CGFloat { frame.height }
+    var position: CGPoint { CGPoint(x: frame.midX, y: frame.midY) }
 }
 
 struct PopupView: View {
@@ -207,7 +226,7 @@ struct PopupView: View {
         _lookupEntries = State(initialValue: cache.lookupEntries)
     }
     
-    private var layout: PopupLayout? {
+    private var layout: CGRect? {
         guard let selectionData else {
             return nil
         }
@@ -225,15 +244,17 @@ struct PopupView: View {
         result.preferTallPopup = UIDevice.current.userInterfaceIdiom == .pad
         result.customWidth = userConfig.dictionaryCard.normalized.width != nil
         result.customHeight = userConfig.dictionaryCard.normalized.height != nil
+        result.mangaAction = selectionData.mangaAction
         
-        guard result.width.isFinite,
-              result.height.isFinite,
-              result.position.x.isFinite,
-              result.position.y.isFinite else {
+        let frame = result.frame
+        guard frame.width.isFinite,
+              frame.height.isFinite,
+              frame.midX.isFinite,
+              frame.midY.isFinite else {
             return nil
         }
         
-        return result
+        return frame
     }
     
     @ViewBuilder
@@ -294,7 +315,7 @@ struct PopupView: View {
                         }
                         PopupWebView(
                             content: content,
-                            position: CGPoint(x: layout.position.x - layout.width / 2, y: layout.position.y - layout.height / 2 + sasayakiBarHeight),
+                            position: CGPoint(x: layout.minX, y: layout.minY + sasayakiBarHeight),
                             clearSelection: clearSelection,
                             dictionaryStyles: dictionaryStyles,
                             lookupEntries: lookupEntries,
@@ -311,7 +332,7 @@ struct PopupView: View {
                     .frame(width: max(1, layout.width), height: max(1, layout.height))
                     .reportsLookupPopupBounds()
                     .glassEffect(.regular, in: .rect(cornerRadius: 8))
-                    .position(layout.position)
+                    .position(x: layout.midX, y: layout.midY)
                 }
             }
         } else {
@@ -323,7 +344,7 @@ struct PopupView: View {
                         }
                         PopupWebView(
                             content: content,
-                            position: CGPoint(x: layout.position.x - layout.width / 2, y: layout.position.y - layout.height / 2 + sasayakiBarHeight),
+                            position: CGPoint(x: layout.minX, y: layout.minY + sasayakiBarHeight),
                             clearSelection: clearSelection,
                             dictionaryStyles: dictionaryStyles,
                             lookupEntries: lookupEntries,
@@ -341,7 +362,7 @@ struct PopupView: View {
                     .reportsLookupPopupBounds()
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.2), lineWidth: 1))
-                    .position(layout.position)
+                    .position(x: layout.midX, y: layout.midY)
                 }
             }
         }

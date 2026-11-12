@@ -231,6 +231,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     /// crop overlay and the go-to-page dialog so those aren't disturbed by a stray key/drag.
     var onBubbleRevealed: (String, String?) -> Void = { _, _ in }
     var pageTurnEnabled: Bool = true
+    var onLookupViewportMoved: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -423,6 +424,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler,
                              WKURLSchemeHandler, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var selectionTask: Task<Void, Never>?
+        private var lookupViewport: MangaViewportState?
         var preparedWebView: MangaWebViewPreloader.Prepared?
         var documentIdentity: String?
         weak var swipeLeftRecognizer: UISwipeGestureRecognizer?
@@ -564,19 +566,25 @@ struct MangaReaderWebView: UIViewRepresentable {
                 guard let body = message.body as? [String: Any],
                       let text = body["text"] as? String,
                       let sentence = body["sentence"] as? String,
-                      let rectData = body["rect"] as? [String: Any],
-                      let x = numeric(rectData["x"]),
-                      let y = numeric(rectData["y"]),
-                      let w = numeric(rectData["width"]),
-                      let h = numeric(rectData["height"]) else {
+                      let rect = messageRect(body["rect"]) else {
                     return
                 }
-                let rect = CGRect(x: x, y: y, width: w, height: h)
                 let normalizedOffset = body["normalizedOffset"] as? Int
                 let verticalBlock = body["verticalBlock"] as? Bool
+                let mangaAction: MangaLookupAction?
+                if let action = body["mangaAction"] as? [String: Any],
+                   let rawSide = action["side"] as? String,
+                   let side = MangaLookupAction.Side(rawValue: rawSide),
+                   let frame = messageRect(action["rect"]), !frame.isEmpty {
+                    mangaAction = MangaLookupAction(side: side, frame: frame)
+                } else {
+                    mangaAction = nil
+                }
                 let selection = SelectionData(text: text, sentence: sentence, rect: rect,
-                                              normalizedOffset: normalizedOffset, verticalBlock: verticalBlock)
+                                              normalizedOffset: normalizedOffset, verticalBlock: verticalBlock,
+                                              mangaAction: mangaAction)
                 selectionTask?.cancel()
+                lookupViewport = parent.controller.captureViewport()
                 selectionTask = Task {
                     if let count = await parent.onTextSelected(selection), !Task.isCancelled { highlightSelection(count: count, in: message.webView) }
                 }
@@ -608,17 +616,20 @@ struct MangaReaderWebView: UIViewRepresentable {
                     parent.onBubbleRevealed(body["text"] as? String ?? "", body["blockId"] as? String)
                 case "selectedNothing":
                     selectionTask?.cancel()
+                    lookupViewport = nil
                     parent.onTapOutside() // empty artwork tap
                 default:
                     break
                 }
             case "hoshiMangaAi":
+                lookupViewport = nil
                 if let body = message.body as? [String: Any], let text = body["text"] as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     let blockId = (body["blockId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     if !trimmed.isEmpty { parent.onAskAi(trimmed, blockId) }
                 }
             case "hoshiMangaClipboard":
+                lookupViewport = nil
                 if let body = message.body as? [String: Any], let text = body["text"] as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty { parent.onCopy(trimmed) }
@@ -699,10 +710,22 @@ struct MangaReaderWebView: UIViewRepresentable {
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             parent.controller.syncHostViewport()
+            dismissLookupIfViewportMoved()
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             parent.controller.syncHostViewport()
+            dismissLookupIfViewportMoved()
+        }
+
+        private func dismissLookupIfViewportMoved() {
+            guard let before = lookupViewport, let current = parent.controller.captureViewport(),
+                  abs(current.zoomScale - before.zoomScale) > 0.01 ||
+                  abs(current.offsetX - before.offsetX) > 1 || abs(current.offsetY - before.offsetY) > 1 else { return }
+            lookupViewport = nil
+            selectionTask?.cancel()
+            parent.controller.webView?.evaluateJavaScript("window.hoshiSelection?.clearSelection()") { _, _ in }
+            parent.onLookupViewportMoved()
         }
 
         @objc func observeNativePinch(_ gesture: UIPinchGestureRecognizer) {
@@ -1062,6 +1085,14 @@ struct MangaReaderWebView: UIViewRepresentable {
                 return !pinchIsActive && !viewportNeedsPan(scrollView)
             }
             return true
+        }
+
+        private func messageRect(_ value: Any?) -> CGRect? {
+            guard let fields = value as? [String: Any],
+                  let x = numeric(fields["x"]), let y = numeric(fields["y"]),
+                  let width = numeric(fields["width"]), let height = numeric(fields["height"]),
+                  [x, y, width, height].allSatisfy(\.isFinite), width >= 0, height >= 0 else { return nil }
+            return CGRect(x: x, y: y, width: width, height: height)
         }
 
         private func numeric(_ value: Any?) -> CGFloat? {

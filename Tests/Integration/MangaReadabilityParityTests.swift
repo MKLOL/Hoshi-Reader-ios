@@ -11,10 +11,10 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     }
     private func config(enlarge: Bool = true, copy: Bool = false, furigana: Bool = true,
                         amount: Int = 50, threshold: Int = 30,
-                        viewport: CGSize = CGSize(width: 320, height: 640)) -> MangaPageRenderConfig {
+                        viewport: CGSize = CGSize(width: 320, height: 640), selectionScript: String = "") -> MangaPageRenderConfig {
         MangaPageRenderConfig(backgroundCssColor: "#000", scanNonJapaneseText: false,
             viewportCssWidth: Int(viewport.width), viewportCssHeight: Int(viewport.height), singleTapLookup: false,
-            useNotoSansJpFont: false, showActionButtons: true, selectionScript: "",
+            useNotoSansJpFont: false, showActionButtons: true, selectionScript: selectionScript,
             showCopyButton: copy, enlargeSmallText: enlarge, textEnlargementAmount: amount,
             smallTextThreshold: threshold, showFurigana: furigana)
     }
@@ -415,6 +415,59 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         }
     }
 
+    @MainActor func testMangaLookupSendsTheVisibleActionRowInHostCoordinates() async throws {
+        let viewport = CGSize(width: 320, height: 640)
+        let browser = try MangaTestBrowser(viewport: viewport)
+        defer { browser.close() }
+        browser.web.configuration.userContentController.add(browser, name: "textSelected")
+        defer { browser.web.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected") }
+        let scriptURL = try XCTUnwrap(Bundle.main.url(forResource: "selection", withExtension: "js"))
+        let script = try String(contentsOf: scriptURL, encoding: .utf8)
+        let cache = MangaPageRenderCache()
+        try await load(await cache.htmlFor(page: page, config: config(copy: true, furigana: false, selectionScript: script)), in: browser)
+        let sent = expectation(description: "The real selection script posted a manga lookup")
+        var payload: [String: Any]?
+        browser.onSelection = { payload = $0; sent.fulfill() }
+        let result = try await browser.web.evaluateJavaScript("""
+        (() => {
+          const box = document.querySelector('.ocr-box');
+          box.classList.add('revealed');
+          const manga = window.hoshiManga;
+          manga.setHostViewport(1.6, 0, 0, 0);
+          manga.placeActions(box);
+          const row = document.querySelector('.ocr-actions');
+          const range = document.createRange();
+          range.setStart(box.querySelector('p').firstChild, 0);
+          range.setEnd(box.querySelector('p').firstChild, 1);
+          const glyph = range.getBoundingClientRect();
+          const text = window.hoshiSelection.selectText(glyph.x + glyph.width / 2, glyph.y + glyph.height / 2, 12);
+          return { text, side: row.dataset.placement, rect: row.getBoundingClientRect().toJSON() };
+        })()
+        """)
+        await fulfillment(of: [sent], timeout: 5)
+        let actual = try XCTUnwrap(result as? [String: Any])
+        XCTAssertTrue((actual["text"] as? String)?.contains("こんにちは") == true)
+        let fields = try XCTUnwrap(payload)
+        let action = try XCTUnwrap(fields["mangaAction"] as? [String: Any])
+        let rawSide = try XCTUnwrap(action["side"] as? String)
+        XCTAssertEqual(rawSide, actual["side"] as? String)
+        let dimensions = try XCTUnwrap(action["rect"] as? [String: Double])
+        let css = try XCTUnwrap(actual["rect"] as? [String: Double])
+        for key in ["x", "y", "width", "height"] {
+            XCTAssertEqual(try XCTUnwrap(dimensions[key]), try XCTUnwrap(css[key]) * 1.6, accuracy: 0.01)
+        }
+        func frame(_ rect: [String: Double]) throws -> CGRect {
+            CGRect(x: try XCTUnwrap(rect["x"]), y: try XCTUnwrap(rect["y"]),
+                   width: try XCTUnwrap(rect["width"]), height: try XCTUnwrap(rect["height"]))
+        }
+        let row = try frame(dimensions)
+        let selection = try frame(XCTUnwrap(fields["rect"] as? [String: Double]))
+        let layout = PopupLayout(selectionRect: selection, screenSize: viewport, maxWidth: 240, maxHeight: 170,
+            isVertical: false, isFullWidth: false,
+            mangaAction: MangaLookupAction(side: try XCTUnwrap(.init(rawValue: rawSide)), frame: row))
+        XCTAssertFalse(layout.frame.intersects(row))
+    }
+
     @MainActor func testSoloTranslateHasThirtyPercentMoreAreaAndKeepsClearOfRevealedText() async throws {
         let cache = MangaPageRenderCache()
         let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
@@ -598,6 +651,7 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     var finished: XCTestExpectation?
     var failure: Error?
     var loaded = false
+    var onSelection: (([String: Any]) -> Void)?
 
     init(viewport: CGSize) throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -626,7 +680,11 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         previous?.makeKeyAndVisible()
     }
     private func finish() { finished?.fulfill(); finished = nil }
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {}
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "textSelected", let payload = message.body as? [String: Any] {
+            onSelection?(payload)
+        }
+    }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded = true; finish() }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         failure = error; finish()

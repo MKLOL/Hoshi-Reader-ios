@@ -1109,6 +1109,15 @@ nonisolated enum MangaPageHtml {
           actions.classList.add('is-visible');
           actions.setAttribute('aria-hidden', 'false');
         },
+        actionPlacementFor: function(box) {
+          var frame = box.closest('.frame');
+          var actions = frame && frame.querySelector('.ocr-actions.is-visible');
+          if (!actions || !box.classList.contains('revealed')) return null;
+          return {
+            side: actions.dataset.placement,
+            rect: this.hostRectFromViewportRect(actions.getBoundingClientRect())
+          };
+        },
         actionLayoutProbe: function() {
           var boxes = document.querySelectorAll('.ocr-box[data-hoshi-ui-test]');
           var results = [];

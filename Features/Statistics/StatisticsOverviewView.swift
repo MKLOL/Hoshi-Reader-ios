@@ -143,10 +143,10 @@ private struct StreakSections: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ProgressView(value: min(todaySeconds / goalSeconds, 1)).tint(reached ? .orange : .accentColor)
                         .accessibilityLabel("Today's goal")
-                        .accessibilityValue("\(Int(min(todaySeconds, goalSeconds) / 60)) of \(Self.minutes(goalMinutes))")
+                        .accessibilityValue("\(StatisticsMath.readingTime(min(todaySeconds, goalSeconds))) of \(Self.minutes(goalMinutes))")
                     Text(reached && streak.current > 1 && streak.current == streak.longest ? "Today's goal reached · new record"
                          : reached ? "Today's goal reached"
-                         : streak.current > 0 ? "\(StatisticsMath.readingTime(((goalSeconds - todaySeconds) / 60).rounded(.up) * 60)) more today keeps your streak"
+                         : streak.current > 0 ? "\(StatisticsMath.readingTime((goalSeconds - todaySeconds).rounded(.up))) more today keeps your streak"
                          : todaySeconds > 0 ? "\(StatisticsMath.readingTime(todaySeconds)) of \(StatisticsMath.readingTime(goalSeconds)) today"
                          : "Read \(StatisticsMath.readingTime(goalSeconds)) today to start a streak")
                         .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()

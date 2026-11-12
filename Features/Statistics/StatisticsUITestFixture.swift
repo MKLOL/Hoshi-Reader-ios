@@ -59,8 +59,8 @@ struct StatisticsUITestFixture: View {
             logs[folder, default: [:]][ReadingDay.key(at, calendar: calendar), default: Data()].append(try! JSONEncoder().encode(value) + Data([10]))
         }
         /// One reading session: statistics by hour, as the reader records them, and its usage events.
-        func read(_ book: Book, on device: ReadingDevice, from start: Date, minutes: Int, lookups: [String] = [], logged: Bool) {
-            let end = start.addingTimeInterval(Double(minutes) * 60)
+        func read(_ book: Book, on device: ReadingDevice, from start: Date, minutes: Int, seconds: Int = 0, lookups: [String] = [], logged: Bool) {
+            let end = start.addingTimeInterval(Double(minutes * 60 + seconds))
             for (hour, seconds) in ReadingDay.hours(from: start, to: end, calendar: calendar) {
                 let day = String(hour.prefix(10)), key = day + "|" + device.id
                 var row = rows[book.id]?[key] ?? Statistics.empty(title: book.title, day: day, device: device)
@@ -96,7 +96,7 @@ struct StatisticsUITestFixture: View {
 
         // Today, from the morning until after midnight.
         let morning = (0..<11).map { words[$0 % 5] } + ["猫", "猫", "曖昧", "気配"]
-        read(books[1], on: devices[2], from: at(today, 9, 10), minutes: 32, lookups: morning + ["猫", "呟く", "仕草"], logged: true)
+        read(books[1], on: devices[2], from: at(today, 9, 10), minutes: 32, seconds: 39, lookups: morning + ["猫", "呟く", "仕草"], logged: true)
         read(books[2], on: devices[0], from: at(today, 13, 0), minutes: 25, lookups: ["猫", "曖昧", "気配", "猫", "曖昧", "気配", "仕草", "呟く", "猫", "曖昧", "気配"], logged: true)
         read(books[2], on: devices[0], from: at(today, 22, 30), minutes: 45, lookups: ["猫", "曖昧", "気配", "猫", "曖昧", "気配", "猫", "曖昧", "仕草", "呟く", "結局"], logged: true)
         read(books[1], on: devices[2], from: at(today, 24, 52), minutes: 32, lookups: ["猫", "猫", "曖昧", "気配", "仕草", "呟く", "眩しい"], logged: true)

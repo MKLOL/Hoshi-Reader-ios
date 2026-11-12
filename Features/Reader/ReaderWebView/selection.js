@@ -425,6 +425,7 @@ window.hoshiSelection = {
             // squat multi-column vertical bubbles (wider than tall), which the popup
             // layout would otherwise treat as horizontal text and cover the bubble.
             verticalBlock: this.lastBlockVertical ?? null,
+            mangaAction: this.lastMangaAction ?? null,
             normalizedOffset
         });
         
@@ -470,6 +471,7 @@ window.hoshiSelection = {
         const selEl = selNode && (selNode.nodeType === 1 ? selNode : selNode.parentElement);
         const ocrBox = selEl && selEl.closest && selEl.closest('.ocr-box');
         this.lastBlockVertical = null;
+        this.lastMangaAction = null;
         if (ocrBox) {
             let r = null;
             const pointRect = this.getPointSelectionRect(x, y);
@@ -499,6 +501,7 @@ window.hoshiSelection = {
                 r = window.hoshiManga.hostRectFromViewportRect(r);
             }
             this.lastBlockVertical = ocrBox.classList.contains('vertical');
+            this.lastMangaAction = window.hoshiManga?.actionPlacementFor?.(ocrBox) ?? null;
             return { x: r.x, y: r.y, width: r.width, height: r.height };
         }
 
