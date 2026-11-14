@@ -313,7 +313,6 @@ struct MangaReaderView: View {
                         // Shared dictionary popups — identical presentation to the EPUB reader.
                         ForEach($model.popups) { $popup in
                             let popupId = popup.id
-                            let mangaAction = popup.currentSelection?.mangaAction
                             PopupView(
                                 userConfig: userConfig,
                                 isVisible: $popup.showPopup,
@@ -334,8 +333,6 @@ struct MangaReaderView: View {
                                     if let index = model.popups.firstIndex(where: { $0.id == popupId }) {
                                         model.closeChildPopups(parent: index)
                                     }
-                                    var selection = selection
-                                    selection.mangaAction = mangaAction
                                     return await model.handleTextSelection(
                                         selection,
                                         maxResults: userConfig.maxResults,
@@ -376,6 +373,7 @@ struct MangaReaderView: View {
                             .zIndex(500)
                         }
                     }
+                    .onPreferenceChange(LookupPopupBoundsKey.self) { controller.setLookupFrames($0) }
                 }
     }
 
@@ -450,8 +448,7 @@ struct MangaReaderView: View {
                 // Keep hardware keys and trackpad gestures from changing the page behind a
                 // translation, history, settings, statistics, crop or page-jump presentation.
                 onBubbleRevealed: { text, block in model.usage?.reveal(text: text, block: block, page: model.pageIndex + 1) },
-                pageTurnEnabled: pageNavigationEnabled,
-                onLookupViewportMoved: { model.closePopups() }
+                pageTurnEnabled: pageNavigationEnabled
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)

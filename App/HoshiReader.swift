@@ -42,7 +42,7 @@ struct HoshiReaderApp: App {
         let fixtures = HoshiAutomation.fixtureEnvironment
         if fixtures["HOSHI_UI_TESTING_ZOOM"] == "1" {
             HttpSyncSettingsStore.shared.token = ""
-            do { try ZoomUITestFixture.seed() }
+            do { try ZoomUITestFixture.seed(lookup: fixtures["HOSHI_UI_TESTING_MANGA_LOOKUP"] == "1") }
             catch { assertionFailure("Could not prepare the zoom fixture: \(error)") }
         }
         if fixtures["HOSHI_UI_TESTING_STATISTICS"] == "1" {
@@ -430,7 +430,7 @@ private enum OfflineLlmLaunchSelfTest {
 /// Generated only inside an explicitly requested UI-test process. Each launch resets this one
 /// synthetic book, so zoom scenarios do not depend on a developer's library or a seeded simulator.
 @MainActor private enum ZoomUITestFixture {
-    static func seed() throws {
+    static func seed(lookup: Bool) throws {
         let title = "IDB Zoom Fixture"
         let root = try BookStorage.getBooksDirectory().appendingPathComponent(title, isDirectory: true)
         if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
@@ -440,7 +440,9 @@ private enum OfflineLlmLaunchSelfTest {
         let textPreview = ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_TEXT_SIZE"] == "1"
         let width = textPreview ? 400 : 1179
         let height = textPreview ? 600 : (ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_CHROME"] == "1" ? 1796 : 2556)
-        let blocks: [[String: Any]] = textPreview ? [
+        let blocks: [[String: Any]] = lookup ? [
+            ["box": [225, 1480, 920, 1650], "vertical": false, "font_size": 95, "lines": ["猫"]]
+        ] : textPreview ? [
             ["box": [85, 65, 285, 105], "vertical": false, "font_size": 12, "lines": ["学校で本を読む"]],
             ["box": [85, 180, 285, 225], "vertical": false, "font_size": 20, "lines": ["こんにちは"]],
             ["box": [85, 400, 295, 465], "vertical": false, "font_size": 40, "lines": ["大きな文字"]]
@@ -480,6 +482,23 @@ private enum OfflineLlmLaunchSelfTest {
                                     contentType: .mokuro, syncId: "ui_zoom_fixture_\(UUID().uuidString)")
         try BookStorage.save(metadata, inside: root, as: FileNames.metadata)
         try BookStorage.save(Bookmark(chapterIndex: 0, progress: 0, characterCount: 0), inside: root, as: FileNames.bookmark)
+        if lookup { try seedLookupDictionary() }
+    }
+
+    private static func seedLookupDictionary() throws {
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: work) }
+        let archive = work.appendingPathComponent("dictionary.zip")
+        // A generated two-file Yomitan archive with the single term 猫 → Fixture cat definition.
+        let fixture = Data(base64Encoded: """
+            UEsDBBQAAAAIALgSbl2je7jNYwAAAHgAAAAKAAAAaW5kZXguanNvbjWMQQrDMAwEv2J07iX01j/0mAcoWC4iimVsuQ2U/D1WIMednd0/GJsQvAK8MX8wiOraS0i8W68EjwBJ64Y2jOcIlb7cWLMPJm+5zSWi4XKdJJRGTnOkfa7imltRf1kU442OE1BLAwQUAAAACAC4Em5dQnM0ozoAAABBAAAAEAAAAHRlcm1fYmFua18xLmpzb26LjlZ63rNaSUdB6XHj2seNk0EsKDbQUYhWcsusKCktSlVITixRSElNy8zLLMnMz1OK1VEwBKmKjQUAUEsBAhQDFAAAAAgAuBJuXaN7uM1jAAAAeAAAAAoAAAAAAAAAAAAAAIABAAAAAGluZGV4Lmpzb25QSwECFAMUAAAACAC4Em5dQnM0ozoAAABBAAAAEAAAAAAAAAAAAAAAgAGLAAAAdGVybV9iYW5rXzEuanNvblBLBQYAAAAAAgACAHYAAADzAAAAAAA=
+            """)!
+        try fixture.write(to: archive)
+        let dictionaries = try BookStorage.getAppDirectory().appendingPathComponent("Dictionaries/Term", isDirectory: true)
+        _ = try DictionaryDownloads.importArchive(at: archive, to: dictionaries)
+        DictionaryManager.shared.loadDictionaries()
+        DictionaryManager.shared.rebuildLookupQuery()
     }
 }
 #endif

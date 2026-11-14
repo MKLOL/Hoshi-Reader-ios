@@ -11,10 +11,10 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     }
     private func config(enlarge: Bool = true, copy: Bool = false, furigana: Bool = true,
                         amount: Int = 50, threshold: Int = 30,
-                        viewport: CGSize = CGSize(width: 320, height: 640), selectionScript: String = "") -> MangaPageRenderConfig {
+                        viewport: CGSize = CGSize(width: 320, height: 640)) -> MangaPageRenderConfig {
         MangaPageRenderConfig(backgroundCssColor: "#000", scanNonJapaneseText: false,
             viewportCssWidth: Int(viewport.width), viewportCssHeight: Int(viewport.height), singleTapLookup: false,
-            useNotoSansJpFont: false, showActionButtons: true, selectionScript: selectionScript,
+            useNotoSansJpFont: false, showActionButtons: true, selectionScript: "",
             showCopyButton: copy, enlargeSmallText: enlarge, textEnlargementAmount: amount,
             smallTextThreshold: threshold, showFurigana: furigana)
     }
@@ -415,57 +415,79 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         }
     }
 
-    @MainActor func testMangaLookupSendsTheVisibleActionRowInHostCoordinates() async throws {
-        let viewport = CGSize(width: 320, height: 640)
-        let browser = try MangaTestBrowser(viewport: viewport)
+    @MainActor func testTranslateAndCopySlideClearOfLookupCardsAndRestoreOnDismiss() async throws {
+        let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
         defer { browser.close() }
-        browser.web.configuration.userContentController.add(browser, name: "textSelected")
-        defer { browser.web.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected") }
-        let scriptURL = try XCTUnwrap(Bundle.main.url(forResource: "selection", withExtension: "js"))
-        let script = try String(contentsOf: scriptURL, encoding: .utf8)
         let cache = MangaPageRenderCache()
-        try await load(await cache.htmlFor(page: page, config: config(copy: true, furigana: false, selectionScript: script)), in: browser)
-        let sent = expectation(description: "The real selection script posted a manga lookup")
-        var payload: [String: Any]?
-        browser.onSelection = { payload = $0; sent.fulfill() }
+        try await load(await cache.htmlFor(page: page, config: config(copy: true, furigana: false)), in: browser)
         let result = try await browser.web.evaluateJavaScript("""
         (() => {
-          const box = document.querySelector('.ocr-box');
-          box.classList.add('revealed');
           const manga = window.hoshiManga;
-          manga.setHostViewport(1.6, 0, 0, 0);
-          manga.placeActions(box);
+          const box = document.querySelector('.ocr-box');
           const row = document.querySelector('.ocr-actions');
-          const range = document.createRange();
-          range.setStart(box.querySelector('p').firstChild, 0);
-          range.setEnd(box.querySelector('p').firstChild, 1);
-          const glyph = range.getBoundingClientRect();
-          const text = window.hoshiSelection.selectText(glyph.x + glyph.width / 2, glyph.y + glyph.height / 2, 12);
-          return { text, side: row.dataset.placement, rect: row.getBoundingClientRect().toJSON() };
+          const frame = box.closest('.frame');
+          const hostFrame = () => manga.hostRectFromViewportRect(row.getBoundingClientRect());
+          const overlaps = (a,b) => a.x < b.x + b.width && a.x + a.width > b.x &&
+            a.y < b.y + b.height && a.y + a.height > b.y;
+          const same = (a,b) => ['x','y','width','height'].every(key => a[key] === b[key]);
+          box.classList.add('revealed');
+          manga.placeActions(box);
+          const home = hostFrame();
+          manga.setLookupFrames([{x:220,y:370,width:100,height:130}]);
+          const staysWhenClear = same(home, hostFrame());
+          const card = {x:home.x,y:0,width:home.width,height:home.y + home.height + 35};
+          manga.setLookupFrames([card]);
+          const slid = hostFrame();
+          const visibleAfterSlide = row.classList.contains('is-visible');
+          const ai = row.querySelector('.ocr-ai-btn').getBoundingClientRect();
+          const copy = row.querySelector('.ocr-copy-btn').getBoundingClientRect();
+          const bothTappable = document.elementFromPoint(ai.x + ai.width/2, ai.y + ai.height/2).closest('.ocr-ai-btn') &&
+            document.elementFromPoint(copy.x + copy.width/2, copy.y + copy.height/2).closest('.ocr-copy-btn');
+          const bubbleClear = manga.renderedTextRects(box).every(r => !overlaps(manga.hostRectFromViewportRect(r), slid));
+          manga.placeActions(box);
+          const repeatStable = same(slid, hostFrame());
+          manga.setLookupFrames([{x:0,y:0,width:320,height:640}]);
+          const hiddenWhenCovered = !row.classList.contains('is-visible');
+          manga.setLookupFrames([]);
+          const restored = same(home, hostFrame());
+
+          // Mirror WKWebView's panned DOM origin and scale projection.
+          const actualFrame = frame.getBoundingClientRect.bind(frame);
+          frame.getBoundingClientRect = () => {
+            const rect = actualFrame();
+            return new DOMRect(rect.x - 32, rect.y - 44, rect.width, rect.height);
+          };
+          const actualBox = box.getBoundingClientRect.bind(box);
+          box.getBoundingClientRect = () => {
+            const rect = actualBox();
+            return new DOMRect(rect.x - 32, rect.y - 44, rect.width, rect.height);
+          };
+          const actualTextRects = manga.renderedTextRects;
+          manga.renderedTextRects = function(element) {
+            return actualTextRects.call(this, element).map(rect =>
+              new DOMRect(rect.left - 32, rect.top - 44, rect.width, rect.height));
+          };
+          const actualRow = row.getBoundingClientRect.bind(row);
+          row.getBoundingClientRect = () => {
+            const rect = actualRow();
+            return new DOMRect(rect.x - 32, rect.y - 44, rect.width, rect.height);
+          };
+          manga.setHostViewport(1.6, 51.2, 70.4, 0);
+          manga.placeActions(box);
+          const pannedHome = hostFrame();
+          manga.setLookupFrames([pannedHome]);
+          const moved = hostFrame();
+          const zoomedClear = row.classList.contains('is-visible') && !overlaps(moved,pannedHome) &&
+            moved.x >= 0 && moved.y >= 0 && moved.x + moved.width <= 320 && moved.y + moved.height <= 640;
+          manga.setLookupFrames([]);
+          return {staysWhenClear, visibleAfterSlide, separated: !overlaps(card,slid),
+            slidesAlongTop: slid.y === home.y, bothTappable: !!bothTappable, bubbleClear, repeatStable,
+            hiddenWhenCovered, restored, zoomedClear, restoredZoom: same(pannedHome, hostFrame())};
         })()
         """)
-        await fulfillment(of: [sent], timeout: 5)
-        let actual = try XCTUnwrap(result as? [String: Any])
-        XCTAssertTrue((actual["text"] as? String)?.contains("こんにちは") == true)
-        let fields = try XCTUnwrap(payload)
-        let action = try XCTUnwrap(fields["mangaAction"] as? [String: Any])
-        let rawSide = try XCTUnwrap(action["side"] as? String)
-        XCTAssertEqual(rawSide, actual["side"] as? String)
-        let dimensions = try XCTUnwrap(action["rect"] as? [String: Double])
-        let css = try XCTUnwrap(actual["rect"] as? [String: Double])
-        for key in ["x", "y", "width", "height"] {
-            XCTAssertEqual(try XCTUnwrap(dimensions[key]), try XCTUnwrap(css[key]) * 1.6, accuracy: 0.01)
-        }
-        func frame(_ rect: [String: Double]) throws -> CGRect {
-            CGRect(x: try XCTUnwrap(rect["x"]), y: try XCTUnwrap(rect["y"]),
-                   width: try XCTUnwrap(rect["width"]), height: try XCTUnwrap(rect["height"]))
-        }
-        let row = try frame(dimensions)
-        let selection = try frame(XCTUnwrap(fields["rect"] as? [String: Double]))
-        let layout = PopupLayout(selectionRect: selection, screenSize: viewport, maxWidth: 240, maxHeight: 170,
-            isVertical: false, isFullWidth: false,
-            mangaAction: MangaLookupAction(side: try XCTUnwrap(.init(rawValue: rawSide)), frame: row))
-        XCTAssertFalse(layout.frame.intersects(row))
+        let checks = try XCTUnwrap(result as? [String: Bool])
+        XCTAssertEqual(checks.count, 11)
+        for (name, passed) in checks { XCTAssertTrue(passed, name) }
     }
 
     @MainActor func testSoloTranslateHasThirtyPercentMoreAreaAndKeepsClearOfRevealedText() async throws {
@@ -651,7 +673,6 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     var finished: XCTestExpectation?
     var failure: Error?
     var loaded = false
-    var onSelection: (([String: Any]) -> Void)?
 
     init(viewport: CGSize) throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
@@ -681,9 +702,6 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     }
     private func finish() { finished?.fulfill(); finished = nil }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "textSelected", let payload = message.body as? [String: Any] {
-            onSelection?(payload)
-        }
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded = true; finish() }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

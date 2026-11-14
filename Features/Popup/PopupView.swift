@@ -60,7 +60,6 @@ struct PopupLayout {
     var preferTallPopup = false
     var customWidth = false
     var customHeight = false
-    var mangaAction: MangaLookupAction?
 
     // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
     // user's configured max. A definition panel that filled most of the page was overwhelming and
@@ -136,14 +135,6 @@ struct PopupLayout {
     }
 
     var frame: CGRect {
-        let bounds = CGRect(x: screenBorderPadding, y: topInset + screenBorderPadding,
-                            width: max(0, screenSize.width - screenBorderPadding * 2),
-                            height: max(0, screenSize.height - topInset - bottomInset - screenBorderPadding * 2))
-        let mangaSize = CGSize(width: isFullWidth ? bounds.width : cappedMaxWidth, height: cappedMaxHeight)
-        if let mangaFrame = mangaAction?.popupFrame(around: selectionRect, within: bounds,
-                                                    size: mangaSize, gap: popupPadding, fullWidth: isFullWidth) {
-            return mangaFrame
-        }
         let width = preferredWidth, height = preferredHeight, center = preferredPosition
         return CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
     }
@@ -244,7 +235,6 @@ struct PopupView: View {
         result.preferTallPopup = UIDevice.current.userInterfaceIdiom == .pad
         result.customWidth = userConfig.dictionaryCard.normalized.width != nil
         result.customHeight = userConfig.dictionaryCard.normalized.height != nil
-        result.mangaAction = selectionData.mangaAction
         
         let frame = result.frame
         guard frame.width.isFinite,

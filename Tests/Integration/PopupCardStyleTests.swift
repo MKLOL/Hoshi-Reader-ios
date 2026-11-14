@@ -3,42 +3,15 @@ import CoreGraphics
 @testable import Hoshi_Reader
 
 nonisolated final class PopupCardStyleTests: XCTestCase {
-    @MainActor func testMangaDictionaryUsesTheOppositeSideFromTheActionRow() {
-        let bubble = CGRect(x: 230, y: 280, width: 140, height: 120)
-        let cases: [(MangaLookupAction.Side, CGRect, (CGRect) -> Bool)] = [
-            (.above, CGRect(x: 270, y: 242, width: 60, height: 26), { $0.minY > bubble.maxY }),
-            (.below, CGRect(x: 270, y: 412, width: 60, height: 26), { $0.maxY < bubble.minY }),
-            (.left, CGRect(x: 158, y: 315, width: 60, height: 26), { $0.minX > bubble.maxX }),
-            (.right, CGRect(x: 382, y: 315, width: 60, height: 26), { $0.maxX < bubble.minX }),
-        ]
-        for (side, toolbar, onOppositeSide) in cases {
-            let layout = PopupLayout(selectionRect: bubble, screenSize: CGSize(width: 600, height: 800),
-                                     maxWidth: 240, maxHeight: 230, isVertical: true, isFullWidth: false,
-                                     mangaAction: MangaLookupAction(side: side, frame: toolbar))
-            XCTAssertTrue(onOppositeSide(layout.frame), "Toolbar is \(side)")
-            XCTAssertFalse(layout.frame.intersects(toolbar))
+    @MainActor func testDictionaryNearPageBottomKeepsItsHeightAboveTheSelection() {
+        let bubble = CGRect(x: 30, y: 690, width: 330, height: 95)
+        let screen = CGSize(width: 390, height: 800)
+        for vertical in [false, true] {
+            let layout = PopupLayout(selectionRect: bubble, screenSize: screen, maxWidth: 240, maxHeight: 170,
+                                     isVertical: vertical, isFullWidth: false, topInset: 24, bottomInset: 10)
+            XCTAssertEqual(layout.frame.height, 240, accuracy: 0.1)
+            XCTAssertEqual(layout.frame.maxY, bubble.minY - 4, accuracy: 0.1)
         }
-    }
-
-    @MainActor func testMangaFullWidthAndZoomedLayoutsKeepTheActionRowClear() {
-        let screen = CGSize(width: 390, height: 390)
-        let bubble = CGRect(x: 100, y: 120, width: 180, height: 220)
-        let below = MangaLookupAction(side: .below, frame: CGRect(x: 158, y: 350, width: 64, height: 26))
-        let full = PopupLayout(selectionRect: bubble, screenSize: screen, maxWidth: 250, maxHeight: 150,
-                               isVertical: false, isFullWidth: true, mangaAction: below).frame
-        XCTAssertEqual(full.width, screen.width - 12)
-        XCTAssertLessThan(full.maxY, bubble.minY)
-        XCTAssertFalse(full.intersects(below.frame))
-
-        let edgeBubble = CGRect(x: -12, y: 30, width: 435, height: 360)
-        let above = MangaLookupAction(side: .above, frame: CGRect(x: 145, y: 21, width: 95, height: 42))
-        let zoomed = PopupLayout(selectionRect: edgeBubble, screenSize: screen, maxWidth: 250, maxHeight: 150,
-                                 isVertical: true, isFullWidth: false, topInset: 20, bottomInset: 10,
-                                 mangaAction: above).frame
-        XCTAssertGreaterThan(zoomed.minY, above.frame.maxY)
-        XCTAssertGreaterThanOrEqual(zoomed.height, 96)
-        XCTAssertFalse(zoomed.intersects(above.frame))
-        XCTAssertTrue(CGRect(x: 6, y: 26, width: 378, height: 348).contains(zoomed))
     }
 
     @MainActor func testUnsetControlsKeepResponsiveDefaultsAndOverridesStayInsideViewport() throws {

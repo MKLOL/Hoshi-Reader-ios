@@ -371,6 +371,45 @@ final class ZoomPopupUITests: XCTestCase {
         }
     }
 
+    func testLowMangaLookupKeepsDictionaryReadableAndMovesTranslate() throws {
+        continueAfterFailure = false
+        let app = try launchZoomFixture(aiStub: true, syntheticFixture: true, chromeFixture: true, lookupFixture: true)
+        let page = app.webViews.firstMatch
+        let bubble = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "猫")).firstMatch
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(bubble.frame.minY, page.frame.midY)
+        bubble.tap()
+
+        let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Ask about this bubble")).firstMatch
+        let copy = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Copy bubble text")).firstMatch
+        XCTAssertTrue(translate.waitForExistence(timeout: 5))
+        let original = translate.frame
+        XCTAssertLessThan(original.maxY, bubble.frame.minY)
+
+        let boxFrame = bubble.frame
+        let selection = app.descendants(matching: .any)["manga-selection-probe"].firstMatch
+        _ = try tapUntilSelectionProbeUpdates(app: app, boxFrame: boxFrame, visibleBounds: page.frame,
+            probe: selection, offsets: [CGVector(dx: 0.06, dy: 0.3), CGVector(dx: 0.09, dy: 0.42)])
+        let definition = app.staticTexts["Fixture cat definition"].firstMatch
+        XCTAssertTrue(definition.waitForExistence(timeout: 5), selection.label)
+        let card = app.webViews.containing(.staticText, identifier: "Fixture cat definition").firstMatch
+        XCTAssertTrue(card.exists)
+        let cardFrame = card.frame
+        XCTAssertGreaterThan(cardFrame.height, page.frame.height * 0.28)
+        XCTAssertLessThan(cardFrame.maxY, boxFrame.minY)
+        XCTAssertTrue(cardFrame.intersects(original), "The fixture must cover Translate’s original position.")
+        let relocated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            translate.exists && copy.exists && !cardFrame.intersects(translate.frame) &&
+                !cardFrame.intersects(copy.frame) && !translate.frame.isEmpty && translate.frame != original
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [relocated], timeout: 5), .completed)
+        XCTAssertEqual(card.frame, cardFrame)
+        XCTAssertTrue(translate.isHittable)
+        saveScreenshot(app, name: "manga-dictionary-relocated-translate")
+        translate.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.waitForExistence(timeout: 5))
+    }
+
     @MainActor func testPopupCardsLivePreview() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -855,7 +894,7 @@ final class ZoomPopupUITests: XCTestCase {
         add(attachment)
     }
 
-    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false, chromeFixture: Bool = false, textSizePreview: Bool = false) throws -> XCUIApplication {
+    private func launchZoomFixture(aiStub: Bool = false, showCopy: Bool = true, syntheticFixture: Bool = false, chromeFixture: Bool = false, textSizePreview: Bool = false, lookupFixture: Bool = false) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["HOSHI_UI_TESTING"] = "1"
         app.launchArguments += ["-mangaShowCopyButton", showCopy ? "YES" : "NO"]
@@ -865,6 +904,7 @@ final class ZoomPopupUITests: XCTestCase {
         }
         if chromeFixture { app.launchEnvironment["HOSHI_UI_TESTING_CHROME"] = "1" }
         if textSizePreview { app.launchEnvironment["HOSHI_UI_TESTING_TEXT_SIZE"] = "1" }
+        if lookupFixture { app.launchEnvironment["HOSHI_UI_TESTING_MANGA_LOOKUP"] = "1" }
         if aiStub {
             app.launchEnvironment["HOSHI_UI_TESTING_AI_STUB"] = "1"
         }
