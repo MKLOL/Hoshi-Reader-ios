@@ -330,11 +330,16 @@ struct MangaReaderView: View {
                                 documentTitle: model.title,
                                 clearSelection: popup.clearSelection,
                                 onTextSelected: { selection in
+                                    var childSelection = selection
+                                    if let side = model.popups.first?.currentSelection?.mangaLookupOnRight {
+                                        childSelection.mangaBubbleRect = selection.rect
+                                        childSelection.mangaLookupOnRight = side
+                                    }
                                     if let index = model.popups.firstIndex(where: { $0.id == popupId }) {
                                         model.closeChildPopups(parent: index)
                                     }
                                     return await model.handleTextSelection(
-                                        selection,
+                                        childSelection,
                                         maxResults: userConfig.maxResults,
                                         scanLength: userConfig.scanLength,
                                         isVertical: false,
@@ -373,7 +378,6 @@ struct MangaReaderView: View {
                             .zIndex(500)
                         }
                     }
-                    .onPreferenceChange(LookupPopupBoundsKey.self) { controller.setLookupFrames($0) }
                 }
     }
 
@@ -406,9 +410,7 @@ struct MangaReaderView: View {
                         selection,
                         maxResults: userConfig.maxResults,
                         scanLength: userConfig.scanLength,
-                        // The block's true orientation when the source reports it (manga);
-                        // the rect-aspect heuristic misreads squat multi-column vertical bubbles.
-                        isVertical: selection.verticalBlock ?? (selection.rect.height > selection.rect.width),
+                        isVertical: false,
                         isFullWidth: userConfig.popupFullWidth
                     )
                 },
@@ -448,7 +450,8 @@ struct MangaReaderView: View {
                 // Keep hardware keys and trackpad gestures from changing the page behind a
                 // translation, history, settings, statistics, crop or page-jump presentation.
                 onBubbleRevealed: { text, block in model.usage?.reveal(text: text, block: block, page: model.pageIndex + 1) },
-                pageTurnEnabled: pageNavigationEnabled
+                pageTurnEnabled: pageNavigationEnabled,
+                onLookupViewportMoved: { model.closePopups() }
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)

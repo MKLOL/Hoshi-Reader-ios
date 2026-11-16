@@ -23,6 +23,9 @@ struct SelectionData {
     /// The tapped OCR block's true writing orientation (manga only, from the mokuro data).
     /// `nil` when the source can't report it — callers fall back to the rect-aspect heuristic.
     var verticalBlock: Bool?
+    var mangaBubbleRect: CGRect?
+    var mangaGlyphRect: CGRect?
+    var mangaLookupOnRight: Bool?
 }
 
 struct HighlightData {

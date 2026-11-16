@@ -441,7 +441,7 @@ private enum OfflineLlmLaunchSelfTest {
         let width = textPreview ? 400 : 1179
         let height = textPreview ? 600 : (ProcessInfo.processInfo.environment["HOSHI_UI_TESTING_CHROME"] == "1" ? 1796 : 2556)
         let blocks: [[String: Any]] = lookup ? [
-            ["box": [225, 1480, 920, 1650], "vertical": false, "font_size": 95, "lines": ["猫"]]
+            ["box": [345, 1480, 650, 1650], "vertical": false, "font_size": 95, "lines": ["猫"]]
         ] : textPreview ? [
             ["box": [85, 65, 285, 105], "vertical": false, "font_size": 12, "lines": ["学校で本を読む"]],
             ["box": [85, 180, 285, 225], "vertical": false, "font_size": 20, "lines": ["こんにちは"]],

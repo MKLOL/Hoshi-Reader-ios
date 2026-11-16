@@ -60,6 +60,9 @@ struct PopupLayout {
     var preferTallPopup = false
     var customWidth = false
     var customHeight = false
+    var mangaBubbleRect: CGRect?
+    var mangaGlyphRect: CGRect?
+    var mangaLookupOnRight: Bool?
 
     // Keep the popup compact: never wider/taller than a fraction of the screen, regardless of the
     // user's configured max. A definition panel that filled most of the page was overwhelming and
@@ -134,7 +137,30 @@ struct PopupLayout {
         return CGPoint(x: x, y: y)
     }
 
+    private func mangaSideFrame(bubble: CGRect) -> CGRect {
+        let onRight = mangaLookupOnRight ?? (bubble.midX < screenSize.width / 2)
+        func availableWidth(beside anchor: CGRect) -> CGFloat {
+            let room = onRight ? screenSize.width - anchor.maxX : anchor.minX
+            return room - popupPadding - screenBorderPadding
+        }
+        let maximumWidth = min(cappedMaxWidth, max(1, screenSize.width - 2 * screenBorderPadding))
+        let minimumWidth = min(120, maximumWidth)
+        let usesTightLane = availableWidth(beside: bubble) < minimumWidth
+        let anchor = usesTightLane ? mangaGlyphRect ?? bubble : bubble
+        let midpoint = screenSize.width / 2
+        let laneStart = onRight && usesTightLane ? midpoint : screenBorderPadding
+        let laneEnd = !onRight && usesTightLane ? midpoint : screenSize.width - screenBorderPadding
+        let width = min(maximumWidth, max(1, laneEnd - laneStart), max(minimumWidth, availableWidth(beside: anchor)))
+        let height = min(cappedMaxHeight, max(1, screenSize.height - topInset - bottomInset - 2 * screenBorderPadding))
+        let x = onRight ? anchor.maxX + popupPadding : anchor.minX - width - popupPadding
+        let safeX = max(laneStart, min(x, laneEnd - width))
+        let safeY = max(topInset + screenBorderPadding,
+                        min(anchor.minY, screenSize.height - bottomInset - height - screenBorderPadding))
+        return CGRect(x: safeX, y: safeY, width: width, height: height)
+    }
+
     var frame: CGRect {
+        if let mangaBubbleRect, !isFullWidth { return mangaSideFrame(bubble: mangaBubbleRect) }
         let width = preferredWidth, height = preferredHeight, center = preferredPosition
         return CGRect(x: center.x - width / 2, y: center.y - height / 2, width: width, height: height)
     }
@@ -230,7 +256,10 @@ struct PopupView: View {
             isVertical: isVertical,
             isFullWidth: isFullWidth,
             topInset: topInset,
-            bottomInset: bottomInset
+            bottomInset: bottomInset,
+            mangaBubbleRect: selectionData.mangaBubbleRect,
+            mangaGlyphRect: selectionData.mangaGlyphRect,
+            mangaLookupOnRight: selectionData.mangaLookupOnRight
         )
         result.preferTallPopup = UIDevice.current.userInterfaceIdiom == .pad
         result.customWidth = userConfig.dictionaryCard.normalized.width != nil

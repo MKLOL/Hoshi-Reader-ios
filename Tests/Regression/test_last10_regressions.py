@@ -802,11 +802,11 @@ assertEqual(
         self.assertIn("Copy bubble text' + uiTestSuffix", place_actions)
         self.assertIn("var left = box.offsetLeft + (boxWidth / 2) - (actionsWidth / 2);", place_actions)
         self.assertIn("box.closest('.frame')", place_actions)
-        self.assertIn("var minLeft = gap;", place_actions)
-        self.assertIn("var maxLeft = frame.clientWidth - actionsWidth - gap;", place_actions)
+        self.assertIn("var minLeft = Math.max(gap, gap - frameRect.left);", place_actions)
+        self.assertIn("page.clientWidth / scale - frameRect.left", place_actions)
         self.assertIn("var minGlobalTop = gap;", place_actions)
         self.assertIn("var minTop = minGlobalTop;", place_actions)
-        self.assertIn("var maxTop = frame.clientHeight - actionsHeight - gap;", place_actions)
+        self.assertIn("page.clientHeight / scale - frameRect.top", place_actions)
         self.assertIn("minGlobalTop = Math.max(minGlobalTop, hostMinTop + gap);", place_actions)
         self.assertIn("hostTappableTopInset", html)
         self.assertIn(".ocr-box::before", html)
@@ -854,6 +854,8 @@ assertEqual(
 
         if shutil.which("node") is None:
             self.skipTest("node is required to execute the toolbar geometry regression")
+        lookup_bubble_rect = method_body(html, "lookupBubbleRect: function")
+        lookup_opens_on_right = method_body(html, "lookupOpensOnRight: function")
         js = textwrap.dedent(f"""
             const placeActions = function(box) {{
             {place_actions}
@@ -887,12 +889,16 @@ assertEqual(
                 }}),
                 querySelector: (selector) => selector === '.ocr-actions' ? actions : null,
               }};
+              global.document = {{ querySelector: () => frame }};
               global.window = {{
                 hoshiManga: {{
                   bubbleText: (box) => box.querySelector('p').textContent,
                   hostOffsetTop: () => 0,
                   hostTappableTopInset: () => topInset,
                   hostScale: () => 1,
+                  hostRectFromViewportRect: (rect) => rect,
+                  lookupBubbleRect: function(box) {{ {lookup_bubble_rect} }},
+                  lookupOpensOnRight: function(bubble) {{ {lookup_opens_on_right} }},
                   renderedBoxRect: (box) => {{
                     const rect = box.getBoundingClientRect();
                     const textRect = box.querySelector('p').getBoundingClientRect();
@@ -977,16 +983,16 @@ assertEqual(
               throw new Error(`left-edge clamp expected 4, got ${{leftEdge.left}}`);
             }}
             const normal = run(300, 120, 80, 20, 80);
-            if (normal.left !== 132) {{
-              throw new Error(`normal bubble expected 132, got ${{normal.left}}`);
+            if (normal.left !== 215 || normal.placement !== 'right') {{
+              throw new Error(`normal bubble expected the right side at 215, got ${{normal.left}},${{normal.placement}}`);
             }}
             const topEdge = run(300, 120, 80, 20, 10);
-            if (topEdge.left !== 49 || topEdge.top !== 7 || topEdge.placement !== 'left') {{
-              throw new Error(`top-edge fallback expected side placement at 49,7,left, got ${{topEdge.left}},${{topEdge.top}},${{topEdge.placement}}`);
+            if (topEdge.left !== 215 || topEdge.top !== 7 || topEdge.placement !== 'right') {{
+              throw new Error(`top-edge expected side placement at 215,7,right, got ${{topEdge.left}},${{topEdge.top}},${{topEdge.placement}}`);
             }}
             const overflowedText = run(300, 120, 80, 20, 10, 300, 0, 60);
-            if (overflowedText.left !== 49 || overflowedText.top !== 37 || overflowedText.placement !== 'left') {{
-              throw new Error(`overflowed text expected side placement at 49,37,left, got ${{overflowedText.left}},${{overflowedText.top}},${{overflowedText.placement}}`);
+            if (overflowedText.left !== 215 || overflowedText.top !== 37 || overflowedText.placement !== 'right') {{
+              throw new Error(`overflowed text expected side placement at 215,37,right, got ${{overflowedText.left}},${{overflowedText.top}},${{overflowedText.placement}}`);
             }}
             const impossible = run(120, 0, 120, 260, 20, 300);
             if (impossible.visible || impossible.placement !== 'hidden') {{

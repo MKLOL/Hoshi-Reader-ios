@@ -371,7 +371,7 @@ final class ZoomPopupUITests: XCTestCase {
         }
     }
 
-    func testLowMangaLookupKeepsDictionaryReadableAndMovesTranslate() throws {
+    func testLowMangaLookupKeepsTranslateAndCopyOnTheOppositeSide() throws {
         continueAfterFailure = false
         let app = try launchZoomFixture(aiStub: true, syntheticFixture: true, chromeFixture: true, lookupFixture: true)
         let page = app.webViews.firstMatch
@@ -383,8 +383,10 @@ final class ZoomPopupUITests: XCTestCase {
         let translate = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Ask about this bubble")).firstMatch
         let copy = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Copy bubble text")).firstMatch
         XCTAssertTrue(translate.waitForExistence(timeout: 5))
+        XCTAssertTrue(copy.exists)
         let original = translate.frame
-        XCTAssertLessThan(original.maxY, bubble.frame.minY)
+        let originalCopy = copy.frame
+        XCTAssertLessThan(original.maxX, bubble.frame.minX)
 
         let boxFrame = bubble.frame
         let selection = app.descendants(matching: .any)["manga-selection-probe"].firstMatch
@@ -396,16 +398,13 @@ final class ZoomPopupUITests: XCTestCase {
         XCTAssertTrue(card.exists)
         let cardFrame = card.frame
         XCTAssertGreaterThan(cardFrame.height, page.frame.height * 0.28)
-        XCTAssertLessThan(cardFrame.maxY, boxFrame.minY)
-        XCTAssertTrue(cardFrame.intersects(original), "The fixture must cover Translate’s original position.")
-        let relocated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            translate.exists && copy.exists && !cardFrame.intersects(translate.frame) &&
-                !cardFrame.intersects(copy.frame) && !translate.frame.isEmpty && translate.frame != original
-        }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [relocated], timeout: 5), .completed)
-        XCTAssertEqual(card.frame, cardFrame)
+        XCTAssertGreaterThan(cardFrame.minX, boxFrame.maxX)
+        XCTAssertEqual(translate.frame, original)
+        XCTAssertEqual(copy.frame, originalCopy)
+        XCTAssertFalse(cardFrame.intersects(translate.frame))
+        XCTAssertFalse(cardFrame.intersects(copy.frame))
         XCTAssertTrue(translate.isHittable)
-        saveScreenshot(app, name: "manga-dictionary-relocated-translate")
+        saveScreenshot(app, name: "manga-dictionary-opposite-translate")
         translate.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.waitForExistence(timeout: 5))
     }

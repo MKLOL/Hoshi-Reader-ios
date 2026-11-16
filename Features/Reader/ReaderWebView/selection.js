@@ -425,6 +425,9 @@ window.hoshiSelection = {
             // squat multi-column vertical bubbles (wider than tall), which the popup
             // layout would otherwise treat as horizontal text and cover the bubble.
             verticalBlock: this.lastBlockVertical ?? null,
+            mangaBubbleRect: this.lastMangaBubbleRect ?? null,
+            mangaGlyphRect: this.lastMangaGlyphRect ?? null,
+            mangaLookupOnRight: this.lastMangaLookupOnRight ?? null,
             normalizedOffset
         });
         
@@ -460,46 +463,28 @@ window.hoshiSelection = {
             return null;
         }
 
-        // Manga (mokuro) only: anchor the popup to the WHOLE OCR bubble, not the tapped character,
-        // so it can be placed clear of the bubble being read. EPUB has no `.ocr-box`, so it keeps
-        // using the precise character rect below. When the native WKWebView is zoomed/panned, the
-        // whole bubble may be mostly off-screen; anchor to the tapped character so the native popup
-        // stays near the word the user pressed. Done here at the source (rather than via a fragile
-        // messageHandler shim) so it's reliable. Convert to host coords if the manga bridge is present.
+        // Manga supplies both the painted bubble and the tapped glyph in host coordinates.
+        // EPUB and dictionary-card text continue to report their original character rect.
         const selNode = this.selection.startNode;
         const selEl = selNode && (selNode.nodeType === 1 ? selNode : selNode.parentElement);
         const ocrBox = selEl && selEl.closest && selEl.closest('.ocr-box');
         this.lastBlockVertical = null;
+        this.lastMangaBubbleRect = null;
+        this.lastMangaGlyphRect = null;
+        this.lastMangaLookupOnRight = null;
         if (ocrBox) {
-            let r = null;
             const pointRect = this.getPointSelectionRect(x, y);
-            if (window.hoshiManga?.isHostZoomedOrPanned?.() && pointRect) {
-                r = this.inflateRect(pointRect, 8);
-            } else {
-                r = ocrBox.getBoundingClientRect();
-                // The revealed (boosted) text can overflow the box; union with the rendered
-                // text's own rect so the popup clears the glyphs actually on screen.
-                const textEl = ocrBox.querySelector('p');
-                if (textEl) {
-                    const tr = textEl.getBoundingClientRect();
-                    const left = Math.min(r.left, tr.left);
-                    const top = Math.min(r.top, tr.top);
-                    r = {
-                        x: left,
-                        y: top,
-                        width: Math.max(r.right, tr.right) - left,
-                        height: Math.max(r.bottom, tr.bottom) - top
-                    };
-                }
-                // Inflate a touch: the mokuro box hugs the text but the drawn balloon extends
-                // past it, so a margin keeps the popup off the balloon outline.
-                r = this.inflateRect(r, 8);
-            }
-            if (window.hoshiManga && window.hoshiManga.hostRectFromViewportRect) {
-                r = window.hoshiManga.hostRectFromViewportRect(r);
+            const manga = window.hoshiManga;
+            if (manga) {
+                this.lastMangaBubbleRect = manga.lookupBubbleRect(ocrBox);
+                this.lastMangaGlyphRect = pointRect ? manga.hostRectFromViewportRect(pointRect) : null;
+                this.lastMangaLookupOnRight = manga.lookupOpensOnRight(this.lastMangaBubbleRect);
             }
             this.lastBlockVertical = ocrBox.classList.contains('vertical');
-            return { x: r.x, y: r.y, width: r.width, height: r.height };
+            if (window.hoshiManga?.isHostZoomedOrPanned?.() && pointRect) {
+                return manga.hostRectFromViewportRect(this.inflateRect(pointRect, 8));
+            }
+            return this.lastMangaBubbleRect ?? ocrBox.getBoundingClientRect().toJSON();
         }
 
         return this.getPointSelectionRect(x, y);

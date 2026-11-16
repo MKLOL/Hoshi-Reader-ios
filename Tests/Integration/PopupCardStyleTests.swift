@@ -3,6 +3,27 @@ import CoreGraphics
 @testable import Hoshi_Reader
 
 nonisolated final class PopupCardStyleTests: XCTestCase {
+    @MainActor func testMangaCardStaysOnItsSideUsingTheGlyphWhenTheBubbleIsWide() {
+        let bubble = CGRect(x: 50, y: 180, width: 305, height: 80)
+        let glyph = CGRect(x: 100, y: 200, width: 20, height: 22)
+        let screen = CGSize(width: 390, height: 800)
+        let layout = PopupLayout(selectionRect: bubble, screenSize: screen, maxWidth: 240, maxHeight: 170,
+                                 isVertical: false, isFullWidth: false, mangaBubbleRect: bubble,
+                                 mangaGlyphRect: glyph, mangaLookupOnRight: true)
+        XCTAssertEqual(layout.frame.minX, screen.width / 2)
+        XCTAssertGreaterThanOrEqual(layout.frame.width, 120)
+        XCTAssertEqual(layout.frame.minY, glyph.minY)
+    }
+
+    @MainActor func testFullWidthOverridesMangaSidePlacement() {
+        let bubble = CGRect(x: 120, y: 180, width: 70, height: 70)
+        let screen = CGSize(width: 390, height: 800)
+        let layout = PopupLayout(selectionRect: bubble, screenSize: screen, maxWidth: 240, maxHeight: 170,
+                                 isVertical: false, isFullWidth: true, bottomInset: 20, mangaBubbleRect: bubble)
+        XCTAssertEqual(layout.frame.width, 378)
+        XCTAssertEqual(layout.frame.maxY, 774)
+    }
+
     @MainActor func testDictionaryNearPageBottomKeepsItsHeightAboveTheSelection() {
         let bubble = CGRect(x: 30, y: 690, width: 330, height: 95)
         let screen = CGSize(width: 390, height: 800)

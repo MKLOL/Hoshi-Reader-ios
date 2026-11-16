@@ -122,10 +122,7 @@ nonisolated enum MangaPageHtml {
         </div>
         <script>
         window.scanNonJapaneseText = \(scanNonJapaneseText);
-        // NOTE: anchoring the popup to the whole OCR bubble (rect substitution + the block's
-        // verticalBlock orientation) happens at the source in selection.js `getSelectionRect`
-        // — see the `.ocr-box` branch there. A messageHandlers shim that used to live here
-        // never fired reliably and has been removed.
+        // selection.js sends the painted bubble and tapped glyph in host coordinates.
         \(selectionScript)
         \(furiganaScript)
         \(mangaTapHandlerScript)
@@ -338,6 +335,7 @@ nonisolated enum MangaPageHtml {
           align-items: center;
           z-index: 50;
           overflow: visible;
+          transform-origin: top left;
           pointer-events: auto;
           touch-action: manipulation;
         }
@@ -516,19 +514,14 @@ nonisolated enum MangaPageHtml {
         hostOffsetTopValue: 0,
         hostTappableTopInsetValue: 0,
         singleTapLookupValue: false,
-        lookupFrames: [],
-        setLookupFrames: function(frames) {
-          this.lookupFrames = Array.isArray(frames) ? frames.filter(function(frame) {
-            return frame && [frame.x, frame.y, frame.width, frame.height].every(Number.isFinite) &&
-              frame.width > 0 && frame.height > 0;
-          }) : [];
-          var box = this.actionBox;
-          if (box && box.isConnected && box.classList.contains('revealed')) this.placeActions(box);
-        },
         setHostScale: function(scale) {
           this.setHostViewport(scale, this.hostOffsetLeftValue, this.hostOffsetTopValue, this.hostTappableTopInsetValue);
         },
         setHostViewport: function(scale, offsetLeft, offsetTop, tappableTopInset) {
+          var previousScale = this.hostScaleValue;
+          var previousLeft = this.hostOffsetLeftValue;
+          var previousTop = this.hostOffsetTopValue;
+          var previousInset = this.hostTappableTopInsetValue;
           this.hostScaleValue = (typeof scale === 'number' && isFinite(scale) && scale > 0)
             ? scale
             : 1;
@@ -543,7 +536,9 @@ nonisolated enum MangaPageHtml {
             : 0;
           this.notifyScrollableBubbleRegions();
           var box = this.actionBox;
-          if (this.lookupFrames.length && box && box.isConnected && box.classList.contains('revealed')) {
+          var changed = previousScale !== this.hostScaleValue || previousLeft !== this.hostOffsetLeftValue ||
+            previousTop !== this.hostOffsetTopValue || previousInset !== this.hostTappableTopInsetValue;
+          if (changed && box && box.isConnected && box.classList.contains('revealed')) {
             this.placeActions(box);
           }
         },
@@ -593,6 +588,17 @@ nonisolated enum MangaPageHtml {
             width: rect.width * scale,
             height: rect.height * scale
           };
+        },
+        lookupBubbleRect: function(box) {
+          var rect = this.renderedBoxRect(box);
+          // Leave a little space outside the OCR plate for the drawn balloon outline.
+          return this.hostRectFromViewportRect({
+            x: rect.left - 8, y: rect.top - 8, width: rect.width + 16, height: rect.height + 16
+          });
+        },
+        lookupOpensOnRight: function(bubble) {
+          var width = document.querySelector('.page').clientWidth;
+          return width - bubble.x - bubble.width > bubble.x;
         },
         imageCropFromHostRect: function(left, top, right, bottom, hostWidth, hostHeight) {
           var scale = this.hostScale();
@@ -967,15 +973,41 @@ nonisolated enum MangaPageHtml {
           // Position in frame-local coordinates so the toolbar is not clipped by an ultra-thin box.
           var left = box.offsetLeft + (boxWidth / 2) - (actionsWidth / 2);
           var top = -actionsHeight - gap;
+          var actionScale = 1;
           if (frame) {
-            var minLeft = gap;
-            var maxLeft = frame.clientWidth - actionsWidth - gap;
+            var page = document.querySelector('.page');
+            var frameRect = frame.getBoundingClientRect();
+            var scale = this.hostScale();
+            var bubble = this.lookupBubbleRect(box);
+            var actionsOnLeft = this.lookupOpensOnRight(bubble);
+            var minLeft = Math.max(gap, gap - frameRect.left);
+            var laneRight = Math.min(frame.clientWidth, page.clientWidth / scale - frameRect.left) - gap;
+            var tightLane = Math.max(bubble.x, page.clientWidth - bubble.x - bubble.width) < 130;
+            if (tightLane) {
+              var midpoint = page.clientWidth / (2 * scale) - frameRect.left;
+              var oppositeMin = actionsOnLeft ? minLeft : Math.max(minLeft, midpoint + gap);
+              var oppositeRight = actionsOnLeft ? Math.min(laneRight, midpoint - gap) : laneRight;
+              if (oppositeMin < oppositeRight) {
+                minLeft = oppositeMin;
+                laneRight = oppositeRight;
+                if (scale > 1) {
+                  actionScale = Math.min(1, (laneRight - minLeft) / actionsWidth);
+                  actionsWidth *= actionScale;
+                  actionsHeight *= actionScale;
+                }
+              }
+            }
+            var maxLeft = laneRight - actionsWidth;
             if (isFinite(minLeft) && isFinite(maxLeft) && minLeft <= maxLeft) {
               left = Math.max(minLeft, Math.min(left, maxLeft));
             }
             var minGlobalTop = gap;
             var minTop = minGlobalTop;
-            var maxTop = frame.clientHeight - actionsHeight - gap;
+            var maxTop = Math.min(frame.clientHeight, page.clientHeight / scale - frameRect.top) - actionsHeight - gap;
+            if (minLeft > maxLeft) {
+              this.hideActions(actions);
+              return;
+            }
             var frameTop = frame.offsetTop || 0;
             if (window.hoshiManga && window.hoshiManga.hostTappableTopInset) {
               var hostMinTop = (
@@ -985,6 +1017,10 @@ nonisolated enum MangaPageHtml {
                 minGlobalTop = Math.max(minGlobalTop, hostMinTop + gap);
                 minTop = minGlobalTop - frameTop;
               }
+            }
+            if (minTop > maxTop) {
+              this.hideActions(actions);
+              return;
             }
             var belowClearance = Math.max(gap + 10, Math.ceil(actionsHeight * 0.65));
             var renderedTop = box.offsetTop;
@@ -1082,17 +1118,14 @@ nonisolated enum MangaPageHtml {
                 topClamped: Math.abs(candidateTop - topValue) > 0.5
               };
             }
-            var preferRight = frame.clientWidth - renderedRight >= renderedLeft;
-            var sideA = preferRight
-              ? makeCandidate('right', rightLeft, sideTop)
-              : makeCandidate('left', leftLeft, sideTop);
-            var sideB = preferRight
+            // Reserve the roomier side for the dictionary before the user taps a word.
+            var oppositeSide = actionsOnLeft
               ? makeCandidate('left', leftLeft, sideTop)
               : makeCandidate('right', rightLeft, sideTop);
+            if (tightLane) left = actionsOnLeft ? leftLeft : rightLeft;
             var candidates = [
+              oppositeSide,
               makeCandidate('above', left, aboveTop),
-              sideA,
-              sideB,
               makeCandidate('below', left, belowTop)
             ];
             var selected = null;
@@ -1103,13 +1136,9 @@ nonisolated enum MangaPageHtml {
                 break;
               }
             }
-            if (this.lookupFrames && this.lookupFrames.length) {
-              selected = this.placeActionsAroundLookup({
-                normal: selected, frame: frame, actionsWidth: actionsWidth, actionsHeight: actionsHeight,
-                avoidRects: avoidRects, avoidGap: avoidGap, gap: gap,
-                renderedLeft: renderedLeft, renderedRight: renderedRight,
-                renderedTop: renderedTop, renderedBottom: renderedBottom
-              });
+            var useViewportEdge = !selected && tightLane && scale > 1;
+            if (useViewportEdge) {
+              selected = makeCandidate(actionsOnLeft ? 'left' : 'right', actionsOnLeft ? minLeft : maxLeft, sideTop);
             }
             if (!selected) {
               window.hoshiManga.hideActions(actions);
@@ -1118,112 +1147,20 @@ nonisolated enum MangaPageHtml {
             left = selected.left;
             top = selected.top;
             actions.dataset.placement = selected.name;
-            if (!this.lookupFrames || !this.lookupFrames.length) {
-              if (frameTop + top < minGlobalTop) {
-                top = minGlobalTop - frameTop;
-              }
-              top = clampTop(top);
-              if (overlapArea(left, top) > 0) {
-                window.hoshiManga.hideActions(actions);
-                return;
-              }
+            if (frameTop + top < minGlobalTop) {
+              top = minGlobalTop - frameTop;
+            }
+            top = clampTop(top);
+            if (!useViewportEdge && overlapArea(left, top) > 0) {
+              window.hoshiManga.hideActions(actions);
+              return;
             }
           }
           actions.style.left = Math.round(left) + 'px';
           actions.style.top = Math.round(top) + 'px';
+          actions.style.transform = actionScale < 1 ? 'scale(' + actionScale + ')' : '';
           actions.classList.add('is-visible');
           actions.setAttribute('aria-hidden', 'false');
-        },
-        placeActionsAroundLookup: function(layout) {
-          var frameRect = layout.frame.getBoundingClientRect();
-          var scale = this.hostScale();
-          var width = layout.actionsWidth, height = layout.actionsHeight;
-          var gap = layout.gap;
-          var page = document.querySelector('.page');
-          var viewportWidth = (page && page.clientWidth || window.innerWidth) / scale;
-          var viewportHeight = (page && page.clientHeight || window.innerHeight) / scale;
-          var visible = {
-            left: Math.ceil(gap - frameRect.left),
-            top: Math.ceil(Math.max(gap, this.hostTappableTopInset() / scale + gap) - frameRect.top),
-            right: Math.floor(viewportWidth - gap - frameRect.left - width),
-            bottom: Math.floor(viewportHeight - gap - frameRect.top - height)
-          };
-          var artwork = {
-            left: Math.max(visible.left, gap),
-            top: Math.max(visible.top, gap),
-            right: Math.min(visible.right, layout.frame.clientWidth - width - gap),
-            bottom: Math.min(visible.bottom, layout.frame.clientHeight - height - gap)
-          };
-          // WKWebView DOM rectangles already account for native pan, so the frame origin and
-          // the unscaled host rectangle are in the same CSS coordinate space.
-          var cards = this.lookupFrames.map(function(rect) {
-            var left = rect.x / scale - frameRect.left, top = rect.y / scale - frameRect.top;
-            var padding = 4 / scale;
-            return {
-              left: left - padding, top: top - padding,
-              right: left + rect.width / scale + padding,
-              bottom: top + rect.height / scale + padding
-            };
-          });
-          var glyphs = layout.avoidRects.map(function(rect) {
-            return {
-              left: rect.left - layout.avoidGap, top: rect.top - layout.avoidGap,
-              right: rect.right + layout.avoidGap, bottom: rect.bottom + layout.avoidGap
-            };
-          });
-          var obstructions = cards.concat(glyphs);
-          function clear(left, top) {
-            return !obstructions.some(function(rect) {
-              return left < rect.right && left + width > rect.left &&
-                     top < rect.bottom && top + height > rect.top;
-            });
-          }
-          var normal = layout.normal;
-          var originX = normal ? Math.round(normal.left) : (layout.renderedLeft + layout.renderedRight - width) / 2;
-          var originY = normal ? Math.round(normal.top) : layout.renderedTop - height - layout.avoidGap;
-          function fits(left, top, bounds) {
-            return left >= bounds.left && left <= bounds.right && top >= bounds.top && top <= bounds.bottom;
-          }
-          if (normal && fits(originX, originY, visible) && clear(originX, originY)) {
-            return { left: originX, top: originY, name: normal.name };
-          }
-
-          function findPosition(bounds) {
-            if (bounds.left > bounds.right || bounds.top > bounds.bottom) return null;
-            function clamp(value, lower, upper) {
-              return Math.max(lower, Math.min(value, upper));
-            }
-            var xs = [clamp(Math.round(originX), bounds.left, bounds.right), bounds.left, bounds.right];
-            var ys = [clamp(Math.round(originY), bounds.top, bounds.bottom), bounds.top, bounds.bottom];
-            // An unobstructed point closest to the normal position lies on a safe boundary, or
-            // shares an axis with that position. Try these lines so a row can slide around a
-            // partial-width popup instead of jumping to the other end of the bubble.
-            cards.concat([{
-              left: layout.renderedLeft - layout.avoidGap, right: layout.renderedRight + layout.avoidGap,
-              top: layout.renderedTop - layout.avoidGap, bottom: layout.renderedBottom + layout.avoidGap
-            }]).forEach(function(rect) {
-              xs.push(clamp(Math.floor(rect.left - width), bounds.left, bounds.right));
-              xs.push(clamp(Math.ceil(rect.right), bounds.left, bounds.right));
-              ys.push(clamp(Math.floor(rect.top - height), bounds.top, bounds.bottom));
-              ys.push(clamp(Math.ceil(rect.bottom), bounds.top, bounds.bottom));
-            });
-            var best = null, distance = Infinity;
-            for (var x of new Set(xs)) {
-              for (var y of new Set(ys)) {
-                var dx = x - originX, dy = y - originY;
-                var cost = dx * dx + dy * dy;
-                if (cost >= distance || !clear(x, y)) continue;
-                distance = cost;
-                var name = y + height <= layout.renderedTop ? 'above' :
-                  y >= layout.renderedBottom ? 'below' : x + width <= layout.renderedLeft ? 'left' :
-                  x >= layout.renderedRight ? 'right' : 'offset';
-                best = { left: x, top: y, name: name };
-              }
-            }
-            return best;
-          }
-          // In a two-page spread, do not put a button for one page over the facing page.
-          return findPosition(artwork) || (document.querySelectorAll('.frame').length === 1 ? findPosition(visible) : null);
         },
         actionLayoutProbe: function() {
           var boxes = document.querySelectorAll('.ocr-box[data-hoshi-ui-test]');

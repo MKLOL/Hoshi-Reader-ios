@@ -415,7 +415,7 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         }
     }
 
-    @MainActor func testTranslateAndCopySlideClearOfLookupCardsAndRestoreOnDismiss() async throws {
+    @MainActor func testMangaLookupUsesRoomierSideAndActionsUseTheOtherSide() async throws {
         let browser = try MangaTestBrowser(viewport: CGSize(width: 320, height: 640))
         defer { browser.close() }
         let cache = MangaPageRenderCache()
@@ -425,69 +425,43 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
           const manga = window.hoshiManga;
           const box = document.querySelector('.ocr-box');
           const row = document.querySelector('.ocr-actions');
-          const frame = box.closest('.frame');
           const hostFrame = () => manga.hostRectFromViewportRect(row.getBoundingClientRect());
-          const overlaps = (a,b) => a.x < b.x + b.width && a.x + a.width > b.x &&
-            a.y < b.y + b.height && a.y + a.height > b.y;
           const same = (a,b) => ['x','y','width','height'].every(key => a[key] === b[key]);
+          box.style.cssText = 'left:85px;top:200px;width:48px;height:52px;font-size:14px';
+          box.querySelector('p').textContent = '猫';
           box.classList.add('revealed');
-          manga.placeActions(box);
-          const home = hostFrame();
-          manga.setLookupFrames([{x:220,y:370,width:100,height:130}]);
-          const staysWhenClear = same(home, hostFrame());
-          const card = {x:home.x,y:0,width:home.width,height:home.y + home.height + 35};
-          manga.setLookupFrames([card]);
-          const slid = hostFrame();
-          const visibleAfterSlide = row.classList.contains('is-visible');
-          const ai = row.querySelector('.ocr-ai-btn').getBoundingClientRect();
-          const copy = row.querySelector('.ocr-copy-btn').getBoundingClientRect();
-          const bothTappable = document.elementFromPoint(ai.x + ai.width/2, ai.y + ai.height/2).closest('.ocr-ai-btn') &&
-            document.elementFromPoint(copy.x + copy.width/2, copy.y + copy.height/2).closest('.ocr-copy-btn');
-          const bubbleClear = manga.renderedTextRects(box).every(r => !overlaps(manga.hostRectFromViewportRect(r), slid));
-          manga.placeActions(box);
-          const repeatStable = same(slid, hostFrame());
-          manga.setLookupFrames([{x:0,y:0,width:320,height:640}]);
-          const hiddenWhenCovered = !row.classList.contains('is-visible');
-          manga.setLookupFrames([]);
-          const restored = same(home, hostFrame());
-
-          // Mirror WKWebView's panned DOM origin and scale projection.
-          const actualFrame = frame.getBoundingClientRect.bind(frame);
-          frame.getBoundingClientRect = () => {
-            const rect = actualFrame();
-            return new DOMRect(rect.x - 32, rect.y - 44, rect.width, rect.height);
-          };
-          const actualBox = box.getBoundingClientRect.bind(box);
-          box.getBoundingClientRect = () => {
-            const rect = actualBox();
-            return new DOMRect(rect.x - 32, rect.y - 44, rect.width, rect.height);
-          };
-          const actualTextRects = manga.renderedTextRects;
-          manga.renderedTextRects = function(element) {
-            return actualTextRects.call(this, element).map(rect =>
-              new DOMRect(rect.left - 32, rect.top - 44, rect.width, rect.height));
-          };
-          const actualRow = row.getBoundingClientRect.bind(row);
-          row.getBoundingClientRect = () => {
-            const rect = actualRow();
-            return new DOMRect(rect.x - 32, rect.y - 44, rect.width, rect.height);
-          };
-          manga.setHostViewport(1.6, 51.2, 70.4, 0);
-          manga.placeActions(box);
-          const pannedHome = hostFrame();
-          manga.setLookupFrames([pannedHome]);
-          const moved = hostFrame();
-          const zoomedClear = row.classList.contains('is-visible') && !overlaps(moved,pannedHome) &&
-            moved.x >= 0 && moved.y >= 0 && moved.x + moved.width <= 320 && moved.y + moved.height <= 640;
-          manga.setLookupFrames([]);
-          return {staysWhenClear, visibleAfterSlide, separated: !overlaps(card,slid),
-            slidesAlongTop: slid.y === home.y, bothTappable: !!bothTappable, bubbleClear, repeatStable,
-            hiddenWhenCovered, restored, zoomedClear, restoredZoom: same(pannedHome, hostFrame())};
+          const snapshots = [];
+          for (const vertical of [false, true]) {
+            box.classList.toggle('vertical', vertical);
+            for (const left of [85, 197]) {
+              box.style.left = left + 'px';
+              manga.placeActions(box);
+              const bubble = manga.lookupBubbleRect(box);
+              const dictionaryOnRight = manga.lookupOpensOnRight(bubble);
+              const home = hostFrame();
+              const buttonsTappable = ['.ocr-ai-btn', '.ocr-copy-btn'].every(selector => {
+                const button = row.querySelector(selector).getBoundingClientRect();
+                return document.elementFromPoint(button.x + button.width/2, button.y + button.height/2)?.closest(selector);
+              });
+              manga.placeActions(box);
+              snapshots.push({
+                visible: row.classList.contains('is-visible'),
+                opposite: dictionaryOnRight ? home.x + home.width <= bubble.x : home.x >= bubble.x + bubble.width,
+                correctSide: dictionaryOnRight === (left === 85),
+                steady: same(home, hostFrame()),
+                buttonsTappable
+              });
+            }
+          }
+          return snapshots;
         })()
         """)
-        let checks = try XCTUnwrap(result as? [String: Bool])
-        XCTAssertEqual(checks.count, 11)
-        for (name, passed) in checks { XCTAssertTrue(passed, name) }
+        let checks = try XCTUnwrap(result as? [[String: Bool]])
+        XCTAssertEqual(checks.count, 4)
+        for snapshot in checks {
+            XCTAssertEqual(snapshot.count, 5)
+            for (name, passed) in snapshot { XCTAssertTrue(passed, name) }
+        }
     }
 
     @MainActor func testSoloTranslateHasThirtyPercentMoreAreaAndKeepsClearOfRevealedText() async throws {
