@@ -2,7 +2,7 @@ import XCTest
 @testable import Hoshi_Reader
 
 /// Android `MangaReadingPaceTest`: completed manga pages persist as a per-day/device seconds
-/// histogram, merge without losing samples, and estimate time to finish from the median.
+/// histogram and merge without losing samples. The ETA uses all logged time and pages.
 nonisolated final class MangaReadingPaceTests: XCTestCase {
     private let phone = ReadingDevice(id: "phone", name: "Phone")
     private let tablet = ReadingDevice(id: "tablet", name: "Tablet")
@@ -22,7 +22,6 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
     func testAnIdlePageCannotDistortTheMedianOfCompletedPages() {
         let statistics = day(samples: [30: 1, 40: 1, 50: 1, 3600: 1])
         XCTAssertEqual(statistics.medianPageSeconds, 45)
-        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: 10, medianPageSeconds: statistics.medianPageSeconds), 450)
     }
     func testTheMedianWeightsEveryPageRatherThanEveryDistinctDuration() {
         XCTAssertEqual(day(samples: [30: 3, 40: 1, 3600: 1]).medianPageSeconds, 30)
@@ -46,11 +45,35 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
     @MainActor func testTtuDayExportsDoNotDuplicateDevicePageSamples() {
         XCTAssertEqual(ReadingStatisticsStore.collapsed([day(samples: [30: 2])]).first?.mangaPageSeconds, [:])
     }
-    func testRemainingTimeStaysUnknownUntilThereIsACompletedPage() {
-        XCTAssertNil(day().medianPageSeconds)
-        XCTAssertNil(MangaStatisticsView.secondsRemaining(remainingPages: 10, medianPageSeconds: nil))
-        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: 0, medianPageSeconds: nil), 0)
-        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: -1, medianPageSeconds: 30), 0)
+    func testRemainingTimeUsesTheSameUnroundedAverageAsTheMangaPace() throws {
+        // These short page samples would put the median at 232.3 pages per hour.
+        var statistics = day(samples: [15: 75, 16: 75])
+        statistics.charactersRead = 150
+        statistics.readingTime = 6_164
+
+        let average = try XCTUnwrap(MangaStatisticsView.averagePageSeconds(statistics))
+        XCTAssertEqual(3600 / average, 87.60545100584037, accuracy: 0.000_001)
+        let seconds = try XCTUnwrap(MangaStatisticsView.secondsRemaining(remainingPages: 103, averagePageSeconds: average))
+        XCTAssertEqual(seconds, 4_232.613333333334, accuracy: 0.000_001)
+
+        statistics.mangaPageSeconds = [:] // Old history with no page samples works too.
+        XCTAssertEqual(MangaStatisticsView.averagePageSeconds(statistics), average)
+    }
+    func testRemainingTimeRequiresValidReadingHistoryUnlessTheBookIsFinished() {
+        var statistics = day(samples: [30: 1])
+        XCTAssertNil(MangaStatisticsView.averagePageSeconds(statistics))
+        statistics.charactersRead = 10
+        for time in [0.0, -30, .nan, .infinity, .leastNonzeroMagnitude] {
+            statistics.readingTime = time
+            XCTAssertNil(MangaStatisticsView.averagePageSeconds(statistics))
+        }
+        statistics.charactersRead = 0
+        statistics.readingTime = 10
+        XCTAssertNil(MangaStatisticsView.averagePageSeconds(statistics))
+        XCTAssertNil(MangaStatisticsView.secondsRemaining(remainingPages: 10, averagePageSeconds: nil))
+        XCTAssertNil(MangaStatisticsView.secondsRemaining(remainingPages: 10, averagePageSeconds: .greatestFiniteMagnitude))
+        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: 0, averagePageSeconds: nil), 0)
+        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: -1, averagePageSeconds: 30), 0)
     }
     func testAndroidWireFormatRoundTripsDropsInvalidBucketsAndOmitsEmptyHistograms() throws {
         let json = #"[{"title":"Manga","dateKey":"2026-11-01","charactersRead":2,"readingTime":70.0,"minReadingSpeed":0,"altMinReadingSpeed":0,"lastReadingSpeed":0,"maxReadingSpeed":0,"lastStatisticModified":5,"deviceId":"tablet","mangaPageSeconds":{"30":1,"40":1,"x":9,"-5":2}}]"#

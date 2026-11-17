@@ -6,7 +6,7 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 //  Manga reading statistics sheet, presented from the reader's overflow menu. Mirrors Android's
-//  `features/mangareader/MangaStatisticsSheet.kt`: saved All Time totals and the median-pace
+//  `features/mangareader/MangaStatisticsSheet.kt`: saved All Time totals and the average-pace
 //  estimate first, then Session and Today, with a start/pause control and a progress bar.
 //  "Pages" are stored in the shared `Statistics.charactersRead` field by `MangaStatisticsTracker`.
 //
@@ -44,15 +44,13 @@ struct MangaStatisticsView: View {
 
                 if let statistics {
                     let allTime = statistics.allTime
-                    let median = allTime.medianPageSeconds
                     statisticsSection(
                         title: "All Time",
                         stat: allTime,
                         characters: model.allTimeCharacters,
-                        pace: ("Median Pace", median.map { "\((3600 / $0).formatted(.number.precision(.fractionLength(1)))) pages / h" } ?? Self.pacePending),
                         extraRows: [
                             ("Pages Remaining", remainingPages.formatted()),
-                            ("Time to Finish", Self.secondsRemaining(remainingPages: remainingPages, medianPageSeconds: median)
+                            ("Time to Finish", Self.secondsRemaining(remainingPages: remainingPages, averagePageSeconds: Self.averagePageSeconds(allTime))
                                 .map { StatisticsNumbers.formattedDuration($0) } ?? Self.pacePending),
                         ]
                     )
@@ -89,7 +87,6 @@ struct MangaStatisticsView: View {
         title: String,
         stat: Statistics,
         characters: Int,
-        pace: (label: String, value: String)? = nil,
         extraRows: [(String, String)] = [],
         isTracking: Bool = false,
         showToggle: Bool = false
@@ -97,8 +94,10 @@ struct MangaStatisticsView: View {
         Section {
             statRow("Characters Read", characters.formatted())
             statRow("Pages Read", "\(stat.charactersRead.formatted())")
-            let pace = pace ?? ("Average Pace", "\(stat.lastReadingSpeed.formatted()) pages / h")
-            statRow(pace.label, pace.value)
+            let pace = Self.averagePageSeconds(stat).map { seconds in
+                "\((3600 / seconds).formatted(.number.precision(.fractionLength(1)))) pages / h"
+            }
+            statRow("Average Pace", pace ?? Self.pacePending)
             statRow("Reading Time", StatisticsNumbers.formattedDuration(stat.readingTime))
             ForEach(extraRows, id: \.0) { statRow($0.0, $0.1) }
         } header: {
@@ -133,10 +132,17 @@ struct MangaStatisticsView: View {
 
     nonisolated static let pacePending = "Read a page to estimate"
 
-    /// Remaining pages at the book's median completed-page time; unknown until a page completes.
-    nonisolated static func secondsRemaining(remainingPages: Int, medianPageSeconds: Double?) -> Double? {
+    /// Manga's shared statistics row stores the number of pages in charactersRead.
+    nonisolated static func averagePageSeconds(_ statistics: Statistics) -> Double? {
+        guard statistics.charactersRead > 0, statistics.readingTime.isFinite, statistics.readingTime > 0 else { return nil }
+        let seconds = statistics.readingTime / Double(statistics.charactersRead)
+        return seconds > 0 && (3600 / seconds).isFinite ? seconds : nil
+    }
+
+    nonisolated static func secondsRemaining(remainingPages: Int, averagePageSeconds: Double?) -> Double? {
         if remainingPages <= 0 { return 0 }
-        guard let medianPageSeconds, medianPageSeconds.isFinite, medianPageSeconds > 0 else { return nil }
-        return Double(remainingPages) * medianPageSeconds
+        guard let averagePageSeconds, averagePageSeconds.isFinite, averagePageSeconds > 0 else { return nil }
+        let seconds = Double(remainingPages) * averagePageSeconds
+        return seconds.isFinite ? seconds : nil
     }
 }

@@ -23,7 +23,7 @@ nonisolated final class StatisticsRobustnessTests: XCTestCase {
         XCTAssertEqual(StatisticsNumbers.safeDuration(.nan), .zero)
         XCTAssertEqual(StatisticsNumbers.safeDuration(-1), .zero)
         XCTAssertEqual(StatisticsNumbers.safeDuration(1.5), .milliseconds(1500))
-        let estimate = MangaStatisticsView.secondsRemaining(remainingPages: 100, medianPageSeconds: Double(Int.max))!
+        let estimate = MangaStatisticsView.secondsRemaining(remainingPages: 100, averagePageSeconds: Double(Int.max))!
         XCTAssertEqual(StatisticsNumbers.safeDuration(estimate), cap)
         XCTAssertFalse(StatisticsNumbers.formattedDuration(estimate).isEmpty)
         XCTAssertFalse(StatisticsNumbers.formattedDuration(.greatestFiniteMagnitude).isEmpty)
