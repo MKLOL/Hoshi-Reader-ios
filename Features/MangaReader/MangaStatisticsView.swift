@@ -6,7 +6,7 @@
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
 //  Manga reading statistics sheet, presented from the reader's overflow menu. Mirrors Android's
-//  `features/mangareader/MangaStatisticsSheet.kt`: saved All Time totals and the average-pace
+//  `features/mangareader/MangaStatisticsSheet.kt`: saved All Time totals and the estimated-pace
 //  estimate first, then Session and Today, with a start/pause control and a progress bar.
 //  "Pages" are stored in the shared `Statistics.charactersRead` field by `MangaStatisticsTracker`.
 //
@@ -44,13 +44,15 @@ struct MangaStatisticsView: View {
 
                 if let statistics {
                     let allTime = statistics.allTime
+                    let estimatedSeconds = Self.estimatedPageSeconds(allTime)
                     statisticsSection(
                         title: "All Time",
                         stat: allTime,
                         characters: model.allTimeCharacters,
+                        pace: ("Estimated Pace", estimatedSeconds),
                         extraRows: [
                             ("Pages Remaining", remainingPages.formatted()),
-                            ("Time to Finish", Self.secondsRemaining(remainingPages: remainingPages, averagePageSeconds: Self.averagePageSeconds(allTime))
+                            ("Time to Finish", Self.secondsRemaining(remainingPages: remainingPages, averagePageSeconds: estimatedSeconds)
                                 .map { StatisticsNumbers.formattedDuration($0) } ?? Self.pacePending),
                         ]
                     )
@@ -87,6 +89,7 @@ struct MangaStatisticsView: View {
         title: String,
         stat: Statistics,
         characters: Int,
+        pace: (label: String, secondsPerPage: Double?)? = nil,
         extraRows: [(String, String)] = [],
         isTracking: Bool = false,
         showToggle: Bool = false
@@ -94,10 +97,11 @@ struct MangaStatisticsView: View {
         Section {
             statRow("Characters Read", characters.formatted())
             statRow("Pages Read", "\(stat.charactersRead.formatted())")
-            let pace = Self.averagePageSeconds(stat).map { seconds in
+            let readingPace = pace ?? (label: "Average Pace", secondsPerPage: Self.averagePageSeconds(stat))
+            let formattedPace = readingPace.secondsPerPage.map { seconds in
                 "\((3600 / seconds).formatted(.number.precision(.fractionLength(1)))) pages / h"
             }
-            statRow("Average Pace", pace ?? Self.pacePending)
+            statRow(readingPace.label, formattedPace ?? Self.pacePending)
             statRow("Reading Time", StatisticsNumbers.formattedDuration(stat.readingTime))
             ForEach(extraRows, id: \.0) { statRow($0.0, $0.1) }
         } header: {
@@ -137,6 +141,36 @@ struct MangaStatisticsView: View {
         guard statistics.charactersRead > 0, statistics.readingTime.isFinite, statistics.readingTime > 0 else { return nil }
         let seconds = statistics.readingTime / Double(statistics.charactersRead)
         return seconds > 0 && (3600 / seconds).isFinite ? seconds : nil
+    }
+
+    /// Trim page observations only if the histogram accounts for almost all reading and pages.
+    nonisolated static func estimatedPageSeconds(_ statistics: Statistics) -> Double? {
+        guard let average = averagePageSeconds(statistics) else { return nil }
+        let pageCount = statistics.charactersRead
+        let samples = statistics.mangaPageSeconds.filter { $0.key > 0 && $0.value > 0 }
+        var timedCount = 0
+        var timedSeconds = 0.0
+        for (seconds, count) in samples {
+            guard count <= pageCount - timedCount else { return average }
+            timedCount += count
+            timedSeconds += Double(seconds) * Double(count)
+        }
+        let coverage = timedSeconds / statistics.readingTime
+        guard timedCount >= 10, timedCount >= pageCount - pageCount / 10, (0.9...1.1).contains(coverage) else {
+            return average
+        }
+
+        let trim = timedCount / 10
+        let end = timedCount - trim
+        var retainedSeconds = 0.0
+        var position = 0
+        for (seconds, count) in samples.sorted(by: { $0.key < $1.key }) {
+            let next = position + count
+            let retained = max(0, min(end, next) - max(trim, position))
+            retainedSeconds += Double(seconds) * Double(retained)
+            position = next
+        }
+        return retainedSeconds / Double(end - trim)
     }
 
     nonisolated static func secondsRemaining(remainingPages: Int, averagePageSeconds: Double?) -> Double? {

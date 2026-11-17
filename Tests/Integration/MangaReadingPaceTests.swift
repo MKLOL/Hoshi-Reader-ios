@@ -2,7 +2,7 @@ import XCTest
 @testable import Hoshi_Reader
 
 /// Android `MangaReadingPaceTest`: completed manga pages persist as a per-day/device seconds
-/// histogram and merge without losing samples. The ETA uses all logged time and pages.
+/// histogram and merge without losing samples. The ETA trims reliable page observations.
 nonisolated final class MangaReadingPaceTests: XCTestCase {
     private let phone = ReadingDevice(id: "phone", name: "Phone")
     private let tablet = ReadingDevice(id: "tablet", name: "Tablet")
@@ -45,7 +45,7 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
     @MainActor func testTtuDayExportsDoNotDuplicateDevicePageSamples() {
         XCTAssertEqual(ReadingStatisticsStore.collapsed([day(samples: [30: 2])]).first?.mangaPageSeconds, [:])
     }
-    func testRemainingTimeUsesTheSameUnroundedAverageAsTheMangaPace() throws {
+    func testRemainingTimeFallsBackToUnroundedAverageWithIncompleteTiming() throws {
         // These short page samples would put the median at 232.3 pages per hour.
         var statistics = day(samples: [15: 75, 16: 75])
         statistics.charactersRead = 150
@@ -53,11 +53,61 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
 
         let average = try XCTUnwrap(MangaStatisticsView.averagePageSeconds(statistics))
         XCTAssertEqual(3600 / average, 87.60545100584037, accuracy: 0.000_001)
-        let seconds = try XCTUnwrap(MangaStatisticsView.secondsRemaining(remainingPages: 103, averagePageSeconds: average))
+        let estimate = try XCTUnwrap(MangaStatisticsView.estimatedPageSeconds(statistics))
+        XCTAssertEqual(estimate, average)
+        let seconds = try XCTUnwrap(MangaStatisticsView.secondsRemaining(remainingPages: 103, averagePageSeconds: estimate))
         XCTAssertEqual(seconds, 4_232.613333333334, accuracy: 0.000_001)
 
         statistics.mangaPageSeconds = [:] // Old history with no page samples works too.
-        XCTAssertEqual(MangaStatisticsView.averagePageSeconds(statistics), average)
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), average)
+    }
+
+    func testReliableTimingTrimsPageObservationsAndKeepsPartialBuckets() throws {
+        var statistics = day(samples: [1: 3, 20: 4, 40: 11, 500: 2, -1: 100, 900: 0])
+        statistics.charactersRead = 20
+        statistics.readingTime = 1_523
+        XCTAssertEqual(MangaStatisticsView.averagePageSeconds(statistics), 76.15)
+        let estimate = try XCTUnwrap(MangaStatisticsView.estimatedPageSeconds(statistics))
+        XCTAssertEqual(estimate, 32.5625)
+        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: 103, averagePageSeconds: estimate), 3_353.9375)
+    }
+
+    func testSparseOrDisproportionateTimingUsesAllRecordedPagesAndSeconds() {
+        var statistics = day(samples: [1: 1, 30: 7, 89: 1])
+        statistics.charactersRead = 9
+        statistics.readingTime = 300
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 300.0 / 9)
+
+        statistics.mangaPageSeconds = [1: 1, 30: 16, 119: 1] // 18 pages and 600 seconds
+        statistics.charactersRead = 20
+        statistics.readingTime = 600
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 30)
+        statistics.charactersRead = 21
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 600.0 / 21)
+        statistics.charactersRead = 17
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 600.0 / 17)
+
+        statistics.charactersRead = 20
+        statistics.readingTime = 700
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 35)
+        statistics.readingTime = 500
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 25)
+    }
+
+    func testTenPagesAndBothTimeCoverageBoundariesCount() {
+        var statistics = day(samples: [1: 1, 99: 1, 100: 8]) // 900 of 1,000 seconds
+        statistics.charactersRead = 10
+        statistics.readingTime = 1_000
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 799.0 / 8)
+        statistics.mangaPageSeconds = [1: 1, 100: 8, 299: 1] // 1,100 of 1,000 seconds
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 100)
+    }
+
+    func testExcessiveHistogramCountsCannotOverflow() {
+        var statistics = day(samples: [1: .max, 2: .max])
+        statistics.charactersRead = .max
+        statistics.readingTime = Double(Int.max)
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 1)
     }
     func testRemainingTimeRequiresValidReadingHistoryUnlessTheBookIsFinished() {
         var statistics = day(samples: [30: 1])
@@ -66,6 +116,7 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
         for time in [0.0, -30, .nan, .infinity, .leastNonzeroMagnitude] {
             statistics.readingTime = time
             XCTAssertNil(MangaStatisticsView.averagePageSeconds(statistics))
+            XCTAssertNil(MangaStatisticsView.estimatedPageSeconds(statistics))
         }
         statistics.charactersRead = 0
         statistics.readingTime = 10
