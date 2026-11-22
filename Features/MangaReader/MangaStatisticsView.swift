@@ -138,45 +138,27 @@ struct MangaStatisticsView: View {
 
     /// Manga's shared statistics row stores the number of pages in charactersRead.
     nonisolated static func averagePageSeconds(_ statistics: Statistics) -> Double? {
-        guard statistics.charactersRead > 0, statistics.readingTime.isFinite, statistics.readingTime > 0 else { return nil }
-        let seconds = statistics.readingTime / Double(statistics.charactersRead)
-        return seconds > 0 && (3600 / seconds).isFinite ? seconds : nil
+        pageSeconds(statistics, estimate: false)
     }
 
-    /// Trim page observations only if the histogram accounts for almost all reading and pages.
     nonisolated static func estimatedPageSeconds(_ statistics: Statistics) -> Double? {
-        guard let average = averagePageSeconds(statistics) else { return nil }
-        let pageCount = statistics.charactersRead
-        let samples = statistics.mangaPageSeconds.filter { $0.key > 0 && $0.value > 0 }
-        var timedCount = 0
-        var timedSeconds = 0.0
-        for (seconds, count) in samples {
-            guard count <= pageCount - timedCount else { return average }
-            timedCount += count
-            timedSeconds += Double(seconds) * Double(count)
-        }
-        let coverage = timedSeconds / statistics.readingTime
-        guard timedCount >= 10, timedCount >= pageCount - pageCount / 10, (0.9...1.1).contains(coverage) else {
-            return average
-        }
+        pageSeconds(statistics, estimate: true)
+    }
 
-        let trim = timedCount / 10
-        let end = timedCount - trim
-        var retainedSeconds = 0.0
-        var position = 0
-        for (seconds, count) in samples.sorted(by: { $0.key < $1.key }) {
-            let next = position + count
-            let retained = max(0, min(end, next) - max(trim, position))
-            retainedSeconds += Double(seconds) * Double(retained)
-            position = next
+    nonisolated private static func pageSeconds(_ statistics: Statistics, estimate: Bool) -> Double? {
+        guard statistics.readingTime.isFinite else { return nil }
+        var payload: [String: Any] = ["pages": statistics.charactersRead, "readingSeconds": statistics.readingTime]
+        if estimate {
+            payload["samples"] = statistics.mangaPageSeconds.map { [$0.key, $0.value] }
         }
-        return retainedSeconds / Double(end - trim)
+        return ((try? HoshiCore.call("manga.pace", payload: payload)) as? String).flatMap(Double.init)
     }
 
     nonisolated static func secondsRemaining(remainingPages: Int, averagePageSeconds: Double?) -> Double? {
-        if remainingPages <= 0 { return 0 }
-        guard let averagePageSeconds, averagePageSeconds.isFinite, averagePageSeconds > 0 else { return nil }
-        let seconds = Double(remainingPages) * averagePageSeconds
-        return seconds.isFinite ? seconds : nil
+        var payload: [String: Any] = ["remainingPages": remainingPages]
+        if let averagePageSeconds, averagePageSeconds.isFinite {
+            payload["secondsPerPage"] = averagePageSeconds
+        }
+        return ((try? HoshiCore.call("manga.remaining-seconds", payload: payload)) as? String).flatMap(Double.init)
     }
 }

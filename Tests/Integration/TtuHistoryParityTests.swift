@@ -102,6 +102,75 @@ nonisolated final class ReadingPositionRemoteTests: XCTestCase {
             seen: [:], missingTimestamp: false, bookId: "book")
     }
 
+    func testCausallyObservedForwardMoveLosesToEarlierClockAndOrphanedLegacyLeavesFrontier() throws {
+        let forward = event(2, distinctOrigin: true)
+        var backwards = event(1, distinctOrigin: true)
+        backwards.seen = [forward.originId: forward.sequence, "legacy-unreachable": 18]
+        var legacy = event(0, distinctOrigin: true)
+        legacy.originId = "legacy-live"
+        legacy.missingTimestamp = true
+        let initial = ReadingPositionState(bookId: "book")
+        let state = try initial.merging([forward, backwards, legacy])
+        XCTAssertEqual(state.winner, backwards)
+        XCTAssertEqual(state.frontier, [forward.originId: 3, backwards.originId: 2, legacy.originId: 1])
+        XCTAssertEqual(try state.merging([legacy, backwards, forward]), state)
+    }
+
+    func testPositionTrimsHistoryPerDeviceAndKeepsPendingHeadOutsideWindow() throws {
+        let remote = (1...55).map { event($0) }
+        var slowHead = event(0, distinctOrigin: true)
+        slowHead.originId = "disconnected"
+        var tablet = event(0, distinctOrigin: true)
+        tablet.id = "tablet"
+        tablet.deviceId = "tablet"
+        let input = remote + [slowHead, tablet]
+        let state = try ReadingPositionState(bookId: "book").merging(input, ownPending: Set(input.map(\.id)))
+        XCTAssertEqual(state.events, [tablet] + Array(remote.dropFirst(5)))
+        XCTAssertEqual(state.pending.count, 52)
+        XCTAssertTrue(state.pending.contains(slowHead.id))
+        XCTAssertEqual(state.heads[slowHead.originId], slowHead)
+        XCTAssertEqual(state.winner, remote.last)
+    }
+
+    func testFrontierLimitKeepsLocalAndChosenOriginsAndNewestKnownHeads() {
+        let events = (0..<258).map { event($0, distinctOrigin: true) }
+        let heads = Dictionary(uniqueKeysWithValues: events.map { ($0.originId, $0) })
+        let source = Dictionary(uniqueKeysWithValues: events.map { ($0.originId, $0.sequence) })
+        let bounded = ReadingPositionProtocol.boundedFrontier(source, ownOrigin: "clock-reset",
+            winnerOrigin: events[0].originId, heads: heads)
+        XCTAssertEqual(bounded.count, 256)
+        XCTAssertEqual(bounded["clock-reset"], 0)
+        XCTAssertEqual(bounded[events[0].originId], events[0].sequence)
+        XCTAssertEqual(bounded[events[257].originId], events[257].sequence)
+        XCTAssertNil(bounded[events[1].originId])
+        XCTAssertNil(bounded[events[2].originId])
+    }
+
+    @MainActor func testCommittedRemoteWinnerIsReusedWhenAnEarlierLocalTurnFinishesLate() async throws {
+        let (_, root, repository) = try fixture()
+        let savedAt = Date(timeIntervalSinceReferenceDate: 1000)
+        let session = repository.open(bookId: "book", root: root)
+        let pending = try XCTUnwrap(session.navigate(bookmark: Bookmark(
+            chapterIndex: 1, progress: 0.2, characterCount: 10, lastModified: savedAt
+        )))
+        let peer = event(12)
+        let body = try JSONEncoder().encode(ReadingPositionJournal(
+            bookId: "book", deviceId: peer.deviceId, events: [peer], heads: [peer]
+        ))
+        _ = try await repository.mergeRemote(body: body, bookId: "book", writer: peer.deviceId, root: root)
+
+        XCTAssertEqual(repository.record(root: root, event: pending), peer.bookmark)
+        XCTAssertEqual(BookStorage.loadBookmark(root: root), peer.bookmark)
+        XCTAssertTrue(repository.snapshot(bookId: "book").pending.contains(pending.id))
+
+        let reopened = repository.open(bookId: "book", root: root)
+        let rewind = try XCTUnwrap(reopened.navigate(bookmark: Bookmark(
+            chapterIndex: 2, progress: 0.25, characterCount: 20, lastModified: savedAt
+        )))
+        XCTAssertGreaterThan(rewind.compatibilityAt, peer.compatibilityAt)
+        XCTAssertEqual(repository.record(root: root, event: rewind)?.chapterIndex, 2)
+    }
+
     @MainActor func testLargeRemoteJournalPreparesOffMainIncludingWinnerAcross512Origins() async throws {
         let (directory, root, repository) = try fixture()
         // Every origin is a concurrent head, exercising the quadratic winner calculation as

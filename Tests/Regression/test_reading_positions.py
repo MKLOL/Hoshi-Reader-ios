@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from hoshi_core_build import swift_hoshi_core_flags
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -19,7 +21,8 @@ class ReadingPositionBehaviorTests(unittest.TestCase):
                 ROOT / "Features/ReadingPosition/HttpReadingPositionLane.swift",
                 ROOT / "Tests/Fixtures/reading-position-harness.swift",
             ]
-            subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library", *map(str, sources), "-o", str(binary)], check=True, timeout=90)
+            subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library",
+                            *swift_hoshi_core_flags(), *map(str, sources), "-o", str(binary)], check=True, timeout=90)
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=30)
             self.assertIn("PASS:", result.stdout)
 

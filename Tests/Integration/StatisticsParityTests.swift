@@ -55,11 +55,38 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         XCTAssertEqual(ReadingDevice.resolve(defaults: defaults, vendorID: nil, name: "Tablet").id, restored.id)
         XCTAssertEqual(ReadingDevice.resolve(defaults: defaults, vendorID: "tablet", name: "Tablet").id, restored.id)
     }
-    func testEqualStampMergeIsCommutative() {
-        let a = row(count: 20), b = row(count: 30)
-        XCTAssertEqual(Statistics.merged([a, b]), Statistics.merged([b, a]))
+    func testPageSaveBatchPreservesOtherDatesAndNormalizesOnlyConflictingRows() {
+        let older = (1...28).map { row(String(format: "2026-10-%02d", $0)) }
+        var cached = row("2026-11-01", seconds: 90, count: 5, stamp: 1)
+        cached.mangaPageSeconds = [15: 4, 30: 1]
+        var refreshed = row("2026-11-01", seconds: 100, count: 6, stamp: 2)
+        refreshed.mangaPageSeconds = [15: 3, 45: 1]
+
+        var imported = row("2026-10-01", device: Statistics.ttuDeviceId, seconds: 600, count: 500)
+        imported.importedBaseline = ImportedReadingBaseline(charactersRead: 500, readingTime: 600, sourceModified: 1,
+            includedDevices: ["phone": ImportedReadingCheckpoint(charactersRead: 10, readingTime: 60, lastStatisticModified: 1)])
+        let input = older + [refreshed, imported] + older + [cached, refreshed]
+        let merged = Statistics.merged(input)
+        XCTAssertEqual(merged.filter { $0.dateKey.hasPrefix("2026-10") && $0.deviceId == "phone" }, older)
+        XCTAssertEqual(merged.first { $0.deviceId == Statistics.ttuDeviceId }?.readingTime, 540)
+        XCTAssertEqual(merged.first { $0.deviceId == Statistics.ttuDeviceId }?.charactersRead, 490)
+        var winner = refreshed
+        winner.mangaPageSeconds = [15: 4, 30: 1, 45: 1]
+        XCTAssertEqual(merged.last, winner)
+
+        let ocr = older.map { MangaTextStatistic(dateKey: $0.dateKey, charactersRead: 15, lastModified: 1, deviceId: "phone") }
+        let edited = MangaTextStatistic(dateKey: ocr.last!.dateKey, charactersRead: 100, lastModified: 2, deviceId: "phone")
+        XCTAssertEqual(MangaTextStatistic.merged(ocr + [edited] + ocr), Array(ocr.dropLast()) + [edited])
     }
-    func testEqualStampMergeUsesKotlinScientificNotation() {
+
+    func testEqualStampDefaultUsesAndroidIncomingOrderAndLegacyUsesRecordText() {
+        let a = row(count: 20), b = row(count: 30)
+        XCTAssertEqual(Statistics.merged([a, b]), [a])
+        XCTAssertEqual(Statistics.merged([b, a]), [b])
+        XCTAssertEqual(Statistics.mergedLegacy([a, b]), [b])
+        XCTAssertEqual(Statistics.mergedLegacy([b, a]), [b])
+    }
+    func testEqualStampLegacyMergeUsesKotlinScientificNotation() {
         XCTAssertEqual(StatisticsNumbers.kotlinDoubleText(10_000_000), "1.0E7")
         XCTAssertEqual(StatisticsNumbers.kotlinDoubleText(10_100_000), "1.01E7")
         XCTAssertEqual(StatisticsNumbers.kotlinDoubleText(0.0001), "1.0E-4")
@@ -67,19 +94,93 @@ nonisolated final class StatisticsParityTests: XCTestCase {
         XCTAssertEqual(StatisticsNumbers.kotlinDoubleText(1e20), "1.0E20")
         XCTAssertEqual(StatisticsNumbers.kotlinDoubleText(0), "0.0")
         for (a, b) in [(10_000_000.0, 10_100_000.0), (0.0001, 0.000101)] {
-            // Kotlin compares E after the shared '1.0', so the shorter mantissa wins here.
-            XCTAssertEqual(Statistics.merged([row(seconds: a), row(seconds: b)]).first?.readingTime, a)
-            XCTAssertEqual(Statistics.merged([row(seconds: b), row(seconds: a)]).first?.readingTime, a)
+            XCTAssertEqual(Statistics.mergedLegacy([row(seconds: a), row(seconds: b)]).first?.readingTime, a)
+            XCTAssertEqual(Statistics.mergedLegacy([row(seconds: b), row(seconds: a)]).first?.readingTime, a)
         }
     }
-    func testEqualStampMergeUsesKotlinUTF16OrderingForDeviceNames() {
+    func testEqualStampLegacyMergeUsesAndroidUTF16Ordering() {
         var emoji = row(), privateUse = row()
         emoji.deviceName = "😀"; privateUse.deviceName = "\u{e000}"
-        XCTAssertEqual(Statistics.merged([emoji, privateUse]).first?.deviceName, privateUse.deviceName)
-        XCTAssertEqual(Statistics.merged([privateUse, emoji]).first?.deviceName, privateUse.deviceName)
+        XCTAssertEqual(Statistics.mergedLegacy([emoji, privateUse]).first?.deviceName, privateUse.deviceName)
+        XCTAssertEqual(Statistics.mergedLegacy([privateUse, emoji]).first?.deviceName, privateUse.deviceName)
         let first = MangaTextStatistic(dateKey: emoji.dateKey, deviceId: "phone", deviceName: emoji.deviceName)
         let second = MangaTextStatistic(dateKey: emoji.dateKey, deviceId: "phone", deviceName: privateUse.deviceName)
-        XCTAssertEqual(MangaTextStatistic.merged([first, second]).first?.deviceName, privateUse.deviceName)
+        XCTAssertEqual(MangaTextStatistic.merged([first, second]).first?.deviceName, emoji.deviceName)
+        XCTAssertEqual(MangaTextStatistic.mergedLegacy([first, second]).first?.deviceName, privateUse.deviceName)
+    }
+    func testStatisticsMergeMatchesShippedAndroidCorpus() throws {
+        let file = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "statistics_merge_android", withExtension: "json"))
+        let document = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertEqual(document["baseline"] as? String, "0ae7fb34")
+        let cases = try XCTUnwrap(document["cases"] as? [[String: Any]])
+        XCTAssertGreaterThanOrEqual(cases.count, 20)
+        let decoder = JSONDecoder()
+        for fixture in cases {
+            let name = try XCTUnwrap(fixture["name"] as? String)
+            let rows = try JSONSerialization.data(withJSONObject: XCTUnwrap(fixture["rows"]))
+            let expected = try JSONSerialization.data(withJSONObject: XCTUnwrap(fixture["expected"]))
+            let legacy = try XCTUnwrap(fixture["legacy"] as? Bool)
+            switch fixture["kind"] as? String {
+            case "reading":
+                let input = try decoder.decode([Statistics].self, from: rows)
+                let result = legacy ? Statistics.mergedLegacy(input) : Statistics.merged(input)
+                XCTAssertEqual(result, try decoder.decode([Statistics].self, from: expected).sorted { $0.key < $1.key }, name)
+            case "manga-text":
+                let input = try decoder.decode([MangaTextStatistic].self, from: rows)
+                let result = legacy ? MangaTextStatistic.mergedLegacy(input) : MangaTextStatistic.merged(input)
+                XCTAssertEqual(result, try decoder.decode([MangaTextStatistic].self, from: expected).sorted { $0.key < $1.key }, name)
+            default:
+                XCTFail("Unknown fixture: \(name)")
+            }
+        }
+    }
+    @MainActor func testMonthlyAndLegacySyncPreserveTheirDistinctAndroidEqualTimestampRules() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let local = row(seconds: 900), remote = row(seconds: 600)
+        try ReadingStatisticsStore.save([local], root: root, scheduleSync: false)
+        let prepared = try await HttpStatisticsPreparedBook.prepare(root: root, reading: [remote], text: [])
+        XCTAssertTrue(prepared.changed)
+        XCTAssertTrue(try prepared.commit())
+        XCTAssertEqual(try ReadingStatisticsStore.strictReading(root: root), [remote])
+
+        let transport = StatisticsMemoryKV()
+        let key = "books/fixture/statistics"
+        _ = try await transport.put(key: key, contentType: "application/json",
+            body: JSONEncoder().encode(ReadingStatisticsBlob(syncId: "fixture", entries: [local])))
+        _ = try await HttpReadingStatisticsSync().exchange(root: root, syncId: "fixture", transport: transport)
+        XCTAssertEqual(try ReadingStatisticsStore.strictReading(root: root), [local])
+    }
+    @MainActor func testLegacyExchangePreservesIncomingRawHourOrderInEqualStampConflict() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        try ReadingStatisticsStore.migrate(root: root)
+        let local = Data(#"[{"title":"Fixture","dateKey":"2026-11-07","deviceId":"phone","readingTime":700,"lastStatisticModified":100,"readingTimeByHour":{"2026-11-07T03:00":600,"2026-11-07T04:00":100}}]"#.utf8)
+        let remote = Data(#"{"version":2,"syncId":"fixture","entries":[{"title":"Fixture","dateKey":"2026-11-07","deviceId":"phone","readingTime":700,"lastStatisticModified":100,"readingTimeByHour":{"2026-11-07T04:00":150,"2026-11-07T03:00":550}}]}"#.utf8)
+        try local.write(to: root.appendingPathComponent(FileNames.statistics))
+        let transport = StatisticsMemoryKV()
+        let key = "books/fixture/statistics"
+        _ = try await transport.put(key: key, contentType: "application/json", body: remote)
+        _ = try await HttpReadingStatisticsSync().exchange(root: root, syncId: "fixture", transport: transport)
+        let saved = try XCTUnwrap(ReadingStatisticsStore.strictReading(root: root).first)
+        XCTAssertEqual(saved.readingTimeByHour, ["2026-11-07T04:00": 150, "2026-11-07T03:00": 550])
+        let stored = try await transport.get(key: key)
+        XCTAssertEqual(stored?.body, remote, "matched Android's winning wire record")
+    }
+    @MainActor func testPreferenceRankingPreservesAnOlderNamedZoneAndSupportsReinstall() throws {
+        let suite = "SharedStatisticsPreferences." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = StatisticsPreferencesStore.load(defaults: defaults)
+        let old = HttpStatisticsPreferences(streakMinimumMinutes: 90, dayResetHour: 3, updatedAt: 9, timeZone: "Region/UnavailableZone")
+        let newest = HttpStatisticsPreferences(streakMinimumMinutes: 600, dayResetHour: 5, updatedAt: 10)
+        let choices = [("peer-a", old), ("local", newest)]
+        let ranked = try StatisticsPreferenceSelection.rank(choices, local: original, deviceId: "local")
+        XCTAssertEqual(ranked.newest, newest)
+        XCTAssertTrue(ranked.outranksLocal)
+        XCTAssertEqual(ranked.zone, old.timeZone)
+        var chosen = newest; chosen.timeZone = ranked.zone
+        StatisticsPreferencesStore.save(chosen, defaults: defaults)
+        XCTAssertEqual(StatisticsPreferencesStore.load(defaults: defaults), chosen)
+        XCTAssertFalse(try StatisticsPreferenceSelection.rank(choices, local: chosen, deviceId: "local").outranksLocal)
     }
     func testClockRollbackResumesAndStampsRemainMonotonic() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)

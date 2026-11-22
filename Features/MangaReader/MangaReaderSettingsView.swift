@@ -53,9 +53,7 @@ struct MangaReaderSettingsView: View {
 
 private struct MangaTextEnlargementControls: View {
     @Binding var settings: MangaTextEnlargement
-    private let presets: [(name: LocalizedStringKey, id: String, amount: Int, threshold: Int)] = [
-        ("Subtle", "subtle", 25, 24), ("Balanced", "balanced", 50, 30), ("Strong", "strong", 75, 40)
-    ]
+    private let configuration = MangaTextEnlargement.configuration
 
     var body: some View {
         Section {
@@ -64,7 +62,7 @@ private struct MangaTextEnlargementControls: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top, spacing: 8) {
-                    ForEach(presets, id: \.id) { preset in
+                    ForEach(configuration.presets, id: \.id) { preset in
                         presetButton(preset)
                     }
                 }
@@ -72,7 +70,7 @@ private struct MangaTextEnlargementControls: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     LabeledContent("Enlargement amount", value: "\(settings.amount)%")
-                    Slider(value: Binding(get: { Double(settings.amount) }, set: { settings.amount = Int($0) }), in: 0...100, step: 5)
+                    Slider(value: Binding(get: { Double(settings.amount) }, set: { settings.amount = Int($0) }), in: configuration.amount.sliderRange, step: Double(configuration.amount.step))
                         .accessibilityLabel("Enlargement amount")
                         .accessibilityValue("\(settings.amount)%")
                         .accessibilityIdentifier("manga-text-enlargement-amount")
@@ -83,7 +81,7 @@ private struct MangaTextEnlargementControls: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     LabeledContent("Small-text cutoff", value: "\(settings.threshold) px")
-                    Slider(value: Binding(get: { Double(settings.threshold) }, set: { settings.threshold = Int($0) }), in: 10...60, step: 1)
+                    Slider(value: Binding(get: { Double(settings.threshold) }, set: { settings.threshold = Int($0) }), in: configuration.threshold.sliderRange, step: Double(configuration.threshold.step))
                         .accessibilityLabel("Small-text cutoff")
                         .accessibilityValue("\(settings.threshold) image pixels")
                         .accessibilityIdentifier("manga-text-enlargement-threshold")
@@ -102,7 +100,7 @@ private struct MangaTextEnlargementControls: View {
         }
     }
 
-    private func presetButton(_ preset: (name: LocalizedStringKey, id: String, amount: Int, threshold: Int)) -> some View {
+    private func presetButton(_ preset: MangaTextPreset) -> some View {
         let value = MangaTextEnlargement(amount: preset.amount, threshold: preset.threshold)
         let selected = settings.enabled && settings.amount == preset.amount && settings.threshold == preset.threshold
         return Button {
@@ -111,7 +109,7 @@ private struct MangaTextEnlargementControls: View {
             VStack(spacing: 6) {
                 Text(verbatim: "学校").font(.system(size: CGFloat(value.fontSize(original: 12))))
                     .frame(height: 36)
-                Text(preset.name).font(.subheadline.weight(.semibold))
+                Text(preset.title).font(.subheadline.weight(.semibold))
                 Text("\(preset.amount)% · \(preset.threshold) px").font(.caption2)
             }
             .frame(maxWidth: .infinity)
@@ -134,8 +132,11 @@ private struct MangaTextEnlargementControls: View {
             }
             .font(.caption).foregroundStyle(.secondary)
 
-            ForEach([12, 20, 30, 40], id: \.self) { original in
-                let result = settings.fontSize(original: original)
+            let originals = [12, 20, 30, 40]
+            let adjusted = settings.fontSizes(originals: originals)
+            ForEach(originals.indices, id: \.self) { index in
+                let original = originals[index]
+                let result = adjusted[index]
                 HStack(alignment: .center, spacing: 12) {
                     sample(size: original)
                     sample(size: result)
@@ -156,5 +157,16 @@ private struct MangaTextEnlargementControls: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: 46)
+    }
+}
+
+extension MangaTextPreset {
+    var title: LocalizedStringKey {
+        switch id {
+        case "subtle": "Subtle"
+        case "balanced": "Balanced"
+        case "strong": "Strong"
+        default: preconditionFailure("Unknown manga text preset: \(id)")
+        }
     }
 }

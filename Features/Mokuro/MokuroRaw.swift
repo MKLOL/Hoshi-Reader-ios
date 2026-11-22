@@ -81,7 +81,13 @@ extension RawMokuro {
     /// Builds a `MokuroBook`. `fallbackTitle` is used when the document has no `volume`/`title`
     /// (the importer passes the book directory name). Returns `nil` if there are no pages.
     nonisolated func toMokuroBook(fallbackTitle: String) -> MokuroBook? {
-        let mapped = pages.enumerated().map { index, page in page.toMokuroPage(index: index) }
+        // OCR repeats glyph heights throughout a volume. Resolve each distinct size once.
+        let originals = Array(Set(pages.lazy.flatMap { $0.blocks.lazy.map { mokuroSafeInt($0.fontSize) } }))
+        let defaults = MangaTextEnlargement().fontSizes(originals: originals)
+        let defaultSizes = Dictionary(uniqueKeysWithValues: zip(originals, defaults))
+        let mapped = pages.enumerated().map { index, page in
+            page.toMokuroPage(index: index, defaultSizes: defaultSizes)
+        }
         guard !mapped.isEmpty else { return nil }
         let resolvedTitle = volume?.nonBlank
             ?? title?.nonBlank
@@ -95,7 +101,7 @@ extension RawMokuro {
 }
 
 extension RawMokuroPage {
-    nonisolated func toMokuroPage(index: Int) -> MokuroPage {
+    nonisolated func toMokuroPage(index: Int, defaultSizes: [Int: Int]) -> MokuroPage {
         MokuroPage(
             index: index,
             imagePath: imgPath,
@@ -104,13 +110,15 @@ extension RawMokuroPage {
             // enumerated() so each box remembers its ORIGINAL mokuro block index; compactMap drops
             // unusable blocks, which would otherwise silently renumber every later bubble and
             // break the offline pre-translation addresses (`p{page}b{block}`).
-            textBoxes: blocks.enumerated().compactMap { $1.toMokuroTextBox(blockIndex: $0) }
+            textBoxes: blocks.enumerated().compactMap { index, block in
+                block.toMokuroTextBox(blockIndex: index, defaultFontSize: defaultSizes[mokuroSafeInt(block.fontSize)])
+            }
         )
     }
 }
 
 extension RawMokuroBlock {
-    nonisolated func toMokuroTextBox(blockIndex: Int = 0) -> MokuroTextBox? {
+    nonisolated func toMokuroTextBox(blockIndex: Int = 0, defaultFontSize: Int? = nil) -> MokuroTextBox? {
         guard box.count >= 4 else { return nil }
         // mokuro stores box as [xMin, yMin, xMax, yMax] in image-pixel coordinates. Corrupt files
         // can carry NaN / infinite / out-of-Int-range values, and Int(Double) traps on those, so
@@ -124,13 +132,7 @@ extension RawMokuroBlock {
             top: yMin,
             width: width,
             height: height,
-            fontSize: clampMokuroFontSize(
-                mokuroFontSize: fontSize,
-                boxWidth: width,
-                boxHeight: height,
-                vertical: vertical,
-                lines: lines
-            ),
+            fontSize: defaultFontSize ?? MangaTextEnlargement().fontSize(original: mokuroSafeInt(fontSize)),
             vertical: vertical,
             lines: lines,
             blockIndex: blockIndex,

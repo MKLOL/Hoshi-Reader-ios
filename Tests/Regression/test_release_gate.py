@@ -102,8 +102,9 @@ class ReleaseGateTests(unittest.TestCase):
         success = thin + "\nTest Case '-[HoshiReaderUITests.ZoomPopupUITests testSelectionRectStaysNearZoomedMangaTap]' passed"
         success += "\nTest Case '-[HoshiReaderUITests.BookshelfNavigationUITests testEveryTabAndAddMangaStayDirectlyAccessibleInBothOrientations]' passed"
         without_import = success
-        success += "\nTest Case '-[HoshiReaderUITests.BookshelfNavigationUITests testAddMangaOpensFilesAndEPUBRemainsInBookshelfOptions]' passed"
-        for log, status, expected in [(without_import, 0, 1), (success, 0, 0), (thin, 0, 1), (cloud, 0, 1), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
+        without_low_lookup = success + "\nTest Case '-[HoshiReaderUITests.BookshelfNavigationUITests testAddMangaOpensFilesAndEPUBRemainsInBookshelfOptions]' passed"
+        success = without_low_lookup + "\nTest Case '-[HoshiReaderUITests.ZoomPopupUITests testLowMangaLookupKeepsDictionaryReadableAndMovesTranslate]' passed"
+        for log, status, expected in [(without_import, 0, 1), (without_low_lookup, 0, 1), (success, 0, 0), (thin, 0, 1), (cloud, 0, 1), (statistics, 0, 1), (podcasts_only, 0, 1), (playback_only, 0, 1), ("** TEST SUCCEEDED **", 0, 1), (success, 65, 65)]:
             with self.subTest(status=status, log=log), tempfile.TemporaryDirectory() as directory:
                 calls = []
                 def run(command, **kwargs):
@@ -136,6 +137,7 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertIn("-only-testing:HoshiReaderUITests/BookshelfNavigationUITests", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testUltraThinActionButtonsStayVisibleAndTappable", calls[4])
                 self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testSelectionRectStaysNearZoomedMangaTap", calls[4])
+                self.assertIn("-only-testing:HoshiReaderUITests/ZoomPopupUITests/testLowMangaLookupKeepsDictionaryReadableAndMovesTranslate", calls[4])
                 self.assertEqual(calls[-1], ["xcrun", "simctl", "delete", "owned-device"])
 
 

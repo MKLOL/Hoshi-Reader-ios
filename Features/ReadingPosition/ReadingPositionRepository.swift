@@ -15,11 +15,10 @@ final class ReadingPositionSession {
     private var seen: [String: Int64]
 
     init(bookId: String, initialBookmark: Bookmark?, device: ReadingDevice, origin: String,
-         state: ReadingPositionState, nextSequence: @escaping () -> Int64) {
+         state: ReadingPositionState, winner: ReadingPositionEvent?, nextSequence: @escaping () -> Int64) {
         self.bookId = bookId; self.initialBookmark = initialBookmark; self.device = device
         originId = origin; self.nextSequence = nextSequence
         previous = initialBookmark.map(ReadingPosition.init) ?? ReadingPosition(chapterIndex: 0, progress: 0, characterCount: 0)
-        let winner = state.winner
         parent = winner?.id
         stamp = initialBookmark?.lastModified?.timeIntervalSinceReferenceDate ?? 0
         seen = ReadingPositionProtocol.boundedFrontier(state.frontier, ownOrigin: origin,
@@ -66,6 +65,7 @@ final class ReadingPositionRepository {
     private var sequence: Int64 = 0
     private var sessions: [String: [WeakPositionSession]] = [:]
     private var cached: [String: ReadingPositionState] = [:]
+    private var cachedWinners: [String: ReadingPositionEvent] = [:]
     private var cachedStamps: [String: FileStamp] = [:]
     private var ownIndex: [String: Set<String>]?
     private var revisions: [String: UInt64] = [:]
@@ -89,11 +89,12 @@ final class ReadingPositionRepository {
         }
     }
     func open(bookId: String, root: URL) -> ReadingPositionSession {
-        let state = observing(bookId: bookId, root: root, state: read(bookId))
-        try? persist(state, root: root)
+        let state = observing(bookId: bookId, root: root)
+        let winner = (try? persist(state, root: root)) ?? state.winner
         sequence = max(sequence, state.heads[origin]?.sequence ?? 0)
-        let session = ReadingPositionSession(bookId: bookId, initialBookmark: state.winner?.bookmark ?? BookStorage.loadBookmark(root: root),
-            device: device, origin: origin, state: state, nextSequence: { [unowned self] in self.sequence += 1; return self.sequence })
+        let session = ReadingPositionSession(bookId: bookId, initialBookmark: winner?.bookmark ?? BookStorage.loadBookmark(root: root),
+            device: device, origin: origin, state: state, winner: winner,
+            nextSequence: { [unowned self] in self.sequence += 1; return self.sequence })
         sessions[bookId, default: []].removeAll { $0.value == nil }
         sessions[bookId, default: []].append(WeakPositionSession(session))
         return session
@@ -101,16 +102,15 @@ final class ReadingPositionRepository {
     @discardableResult
     func record(root: URL, event: ReadingPositionEvent) -> Bookmark? {
         do {
-            let state = observing(bookId: event.bookId, root: root, state: read(event.bookId))
+            let state = observing(bookId: event.bookId, root: root)
             let merged = try state.merging([event], ownPending: [event.id])
-            try persist(merged, root: root)
-            return merged.winner?.bookmark
+            return try persist(merged, root: root)?.bookmark
         } catch { return nil }
     }
     /// Ingest resolved map/TTU projections without assigning a new timestamp to the import.
     @discardableResult
     func saveLegacy(bookId: String, root: URL, bookmark: Bookmark) -> Bookmark? {
-        var state = observing(bookId: bookId, root: root, state: read(bookId))
+        var state = observing(bookId: bookId, root: root)
         let time = bookmark.lastModified?.timeIntervalSinceReferenceDate ?? 0
         let old = state.winner
         // A corrupt imported time cannot be ordered (and would trap the millisecond conversion).
@@ -118,12 +118,11 @@ final class ReadingPositionRepository {
             (ReadingPositionProtocol.wireMillis(time) == ReadingPositionProtocol.wireMillis(old!.compatibilityAt) && !sameBookmark(bookmark, old!.bookmark)) {
             state = Self.importing(bookmark, into: state)
         }
-        try? persist(state, root: root)
-        return state.winner?.bookmark
+        return (try? persist(state, root: root))?.bookmark ?? state.winner?.bookmark
     }
     func observe(bookId: String, root: URL) {
-        let state = observing(bookId: bookId, root: root, state: read(bookId))
-        try? persist(state, root: root)
+        let state = observing(bookId: bookId, root: root)
+        _ = try? persist(state, root: root)
     }
     /// A user-requested TTU import is a new deliberate navigation, even when the remote file
     /// is older. Automatic imports retain the remote timestamp through saveLegacy instead.
@@ -144,10 +143,11 @@ final class ReadingPositionRepository {
             throw ReadingPositionProtocolError.invalidJournal
         }
         let old = root.flatMap { BookStorage.loadBookmark(root: $0) }.map(ReadingPosition.init)
-        let state = root.map { observing(bookId: journal.bookId, root: $0, state: read(journal.bookId)) } ?? read(journal.bookId)
+        let state = root.map { observing(bookId: journal.bookId, root: $0) } ?? read(journal.bookId)
         let merged = try state.merging(incoming)
-        try persist(merged, root: root)
-        if let winner = merged.winner { return root != nil && (old == nil || !winner.position.samePlace(as: old!)) }
+        if let winner = try persist(merged, root: root) {
+            return root != nil && (old == nil || !winner.position.samePlace(as: old!))
+        }
         return false
     }
 
@@ -175,10 +175,14 @@ final class ReadingPositionRepository {
             guard root.flatMap(FileStamp.identity) == identity else { throw CancellationError() }
             guard indexGeneration == generation, (revisions[bookId] ?? 0) == revision,
                   root.flatMap({ BookStorage.loadBookmark(root: $0) }) == bookmark else { continue }
-            guard FileStamp.read(journal) == stamp else { cached[bookId] = nil; cachedStamps[bookId] = nil; continue }
+            guard FileStamp.read(journal) == stamp else {
+                cached[bookId] = nil; cachedWinners[bookId] = nil; cachedStamps[bookId] = nil
+                continue
+            }
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             if prepared.writeJournal { try prepared.body.write(to: journal, options: .atomic) }
             cached[bookId] = prepared.state
+            cachedWinners[bookId] = prepared.winner
             cachedStamps[bookId] = FileStamp.read(journal)
             revisions[bookId, default: 0] &+= 1
             if ownIndex != nil { ownIndex?[bookId] = prepared.ownHistory ? prepared.state.pending : nil }
@@ -350,7 +354,7 @@ final class ReadingPositionRepository {
     }
     func acknowledge(bookId: String, ids: Set<String>) {
         var state = read(bookId); state.pending.subtract(ids)
-        try? persist(state, root: nil)
+        _ = try? persist(state, root: nil)
     }
     func ownHistories() -> [String: Set<String>] {
         if ownIndex == nil {
@@ -380,7 +384,7 @@ final class ReadingPositionRepository {
     /// no sequence the server already holds is reused. Tests simulate a fresh install with it.
     func removeAllHistory() {
         try? FileManager.default.removeItem(at: directory)
-        cached = [:]; cachedStamps = [:]; ownIndex = nil; sessions = [:]; sequence = 0
+        cached = [:]; cachedWinners = [:]; cachedStamps = [:]; ownIndex = nil; sessions = [:]; sequence = 0
         indexGeneration += 1
         origin = UUID().uuidString.lowercased()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -404,7 +408,7 @@ final class ReadingPositionRepository {
     }
     private func invalidateCorrupt(_ bookId: String, file: URL) {
         try? FileManager.default.moveItem(at: file, to: file.appendingPathExtension(UUID().uuidString + ".corrupt"))
-        cached[bookId] = nil; cachedStamps[bookId] = nil; ownIndex?[bookId] = nil
+        cached[bookId] = nil; cachedWinners[bookId] = nil; cachedStamps[bookId] = nil; ownIndex?[bookId] = nil
         indexGeneration += 1
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("sync-index.json"))
         // A lost journal must never reuse a sequence whose higher value exists on the server.
@@ -412,11 +416,13 @@ final class ReadingPositionRepository {
         let identity = ["deviceId": device.id, "origin": origin]
         if let data = try? encoder.encode(identity) { try? data.write(to: directory.appendingPathComponent("origin.json"), options: .atomic) }
     }
-    private func observing(bookId: String, root: URL, state: ReadingPositionState) -> ReadingPositionState {
+    private func observing(bookId: String, root: URL) -> ReadingPositionState {
+        let state = read(bookId)
         guard let bookmark = BookStorage.loadBookmark(root: root) else { return state }
         let time = bookmark.lastModified?.timeIntervalSinceReferenceDate ?? 0
         guard abs(time) <= 1e12 else { return state }
-        if let winner = state.winner, ReadingPositionProtocol.wireMillis(time) <= ReadingPositionProtocol.wireMillis(winner.compatibilityAt) { return state }
+        if let winner = cachedWinners[bookId] ?? state.winner,
+           ReadingPositionProtocol.wireMillis(time) <= ReadingPositionProtocol.wireMillis(winner.compatibilityAt) { return state }
         return Self.importing(bookmark, into: state)
     }
     nonisolated private static func importing(_ projected: Bookmark, into state: ReadingPositionState) -> ReadingPositionState {
@@ -438,7 +444,8 @@ final class ReadingPositionRepository {
         var retired = state; retired.heads = retired.heads.filter { $0.value.action != "legacy" }
         return (try? retired.merging([event])) ?? state
     }
-    private func persist(_ state: ReadingPositionState, root: URL?) throws {
+    @discardableResult
+    private func persist(_ state: ReadingPositionState, root: URL?) throws -> ReadingPositionEvent? {
         let file = fileURL(state.bookId)
         let unchanged = cached[state.bookId] == state && cachedStamps[state.bookId] != nil &&
             cachedStamps[state.bookId] == FileStamp.read(file)
@@ -453,7 +460,10 @@ final class ReadingPositionRepository {
                 ownIndex?[state.bookId] = state.heads.values.contains { $0.deviceId == device.id } ? state.pending : nil
             }
         }
-        let winner = state.winner
+        // The displayed winner is already known for an unchanged journal. Reuse it on the
+        // next turn instead of sending the same causal frontier back through the core.
+        let winner = (unchanged ? cachedWinners[state.bookId] : nil) ?? state.winner
+        cachedWinners[state.bookId] = winner
         if let root, FileManager.default.fileExists(atPath: root.path), let winner,
            !sameBookmark(BookStorage.loadBookmark(root: root), winner.bookmark) {
             // The root must already exist; final queued writes cannot recreate a deleted book.
@@ -461,6 +471,7 @@ final class ReadingPositionRepository {
         }
         sessions[state.bookId]?.removeAll { $0.value == nil }
         for weakSession in sessions[state.bookId] ?? [] { weakSession.value?.adoptSamePlace(state, winner: winner) }
+        return winner
     }
     private func sameBookmark(_ lhs: Bookmark?, _ rhs: Bookmark) -> Bool {
         guard let lhs else { return false }

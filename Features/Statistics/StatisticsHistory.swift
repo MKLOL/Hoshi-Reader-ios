@@ -81,8 +81,8 @@ nonisolated struct StatisticsRoot: Sendable {
     }
     static func absorb(history: URL, into root: URL) throws {
         try ReadingStatisticsStore.migrate(root: root)
-        let reading = Statistics.merged(try ReadingStatisticsStore.strictReading(root: root) + ReadingStatisticsStore.strictReading(root: history))
-        let text = MangaTextStatistic.merged(try ReadingStatisticsStore.strictText(root: root) + ReadingStatisticsStore.strictText(root: history))
+        let reading = Statistics.merged(try ReadingStatisticsStore.strictReading(root: history) + ReadingStatisticsStore.strictReading(root: root))
+        let text = MangaTextStatistic.merged(try ReadingStatisticsStore.strictText(root: history) + ReadingStatisticsStore.strictText(root: root))
         try BookStorage.save(reading, inside: root, as: FileNames.statistics)
         if !text.isEmpty { try BookStorage.save(text, inside: root, as: FileNames.mangaStatistics) }
         try FileManager.default.removeItem(at: history)
@@ -107,8 +107,8 @@ nonisolated struct StatisticsRoot: Sendable {
         }
         guard !reading.isEmpty || !text.isEmpty else { return }
         let kept = try historyRoot(id, title: book.title, type: book.resolvedContentType)
-        try BookStorage.save(Statistics.merged(try ReadingStatisticsStore.strictReading(root: kept) + reading), inside: kept, as: FileNames.statistics)
-        try BookStorage.save(MangaTextStatistic.merged(try ReadingStatisticsStore.strictText(root: kept) + text), inside: kept, as: FileNames.mangaStatistics)
+        try BookStorage.save(Statistics.merged(reading + (try ReadingStatisticsStore.strictReading(root: kept))), inside: kept, as: FileNames.statistics)
+        try BookStorage.save(MangaTextStatistic.merged(text + (try ReadingStatisticsStore.strictText(root: kept))), inside: kept, as: FileNames.mangaStatistics)
         var value = info(kept)!
         let bookmark = BookStorage.loadBookmark(root: root)
         if let total = BookStorage.loadBookInfo(root: root)?.characterCount, total > 0, let bookmark {

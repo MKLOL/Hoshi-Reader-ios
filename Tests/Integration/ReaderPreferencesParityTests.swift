@@ -203,6 +203,49 @@ nonisolated final class ReaderPreferencesParityTests: XCTestCase {
         XCTAssertFalse(UserConfig().expandFirstDictionary)
     }
 
+    func testPreferenceEligibilityUsesAndroidUtf16LengthAndStrictKnownFields() throws {
+        let now = Date(timeIntervalSince1970: 100)
+        func record(_ value: ReaderPreferenceValue) -> ReaderPreferenceRecord {
+            ReaderPreferenceRecord(value: value, editedAt: 5, deviceId: "android-a")
+        }
+        let accepted: [(String, ReaderPreferenceValue)] = [
+            ("future", .string(String(repeating: "界", count: 4094))),
+            ("future", .string(String(repeating: "😀", count: 2047))),
+            ("dictionaryCard.height", .null), ("fontSize", .number(60)), ("theme", .string("Sepia")),
+            ("future.foo", .object(["value": .array([.bool(true), .null])])),
+            ("mangaEnlargeSmallText", .string("legacy untyped value")),
+        ]
+        let rejected: [(String, ReaderPreferenceValue)] = [
+            ("future", .string(String(repeating: "界", count: 4095))),
+            ("future", .string(String(repeating: "😀", count: 2048))),
+            ("fontSize", .string("22")), ("fontSize", .number(22.5)), ("uiTheme", .string("Sepia")),
+            ("selectedFont", .string("local/font.ttf")), ("statisticsTimeZone", .string("Asia/Tokyo")),
+            ("sasayaki.readerSkipButtonAction", .string("not a preset")), ("sasayaki.syncEnabled", .bool(true)),
+        ]
+        for (name, value) in accepted {
+            XCTAssertNoThrow(try ReaderPreferencesProtocol.validate([name: record(value)], now: now), name)
+        }
+        for (name, value) in rejected {
+            XCTAssertThrowsError(try ReaderPreferencesProtocol.validate([name: record(value)], now: now), name)
+        }
+    }
+
+    func testSharedPreferenceTieBreakRejectsDifferentPayloadFromSameRevision() throws {
+        let prior = ReaderPreferenceRecord(value: .number(25), editedAt: 50, deviceId: "android-a")
+        let sameRevision = ReaderPreferenceRecord(value: .number(39), editedAt: 50, deviceId: "android-a")
+        let laterWriter = ReaderPreferenceRecord(value: .null, editedAt: 50, deviceId: "ios-b")
+        let stale = ReaderPreferenceRecord(value: .bool(false), editedAt: 49, deviceId: "ios-z")
+        let current = ["fontSize": prior, "showTitle": prior, "dictionaryCard.height": prior]
+        let newer = try ReaderPreferencesProtocol.winningFields([
+            "fontSize": sameRevision, "showTitle": stale, "dictionaryCard.height": laterWriter, "future": prior,
+        ], current: current)
+        XCTAssertEqual(Set(newer), Set(["dictionaryCard.height", "future"]))
+        XCTAssertFalse(sameRevision.isNewer(than: prior))
+        XCTAssertTrue(laterWriter.isNewer(than: prior))
+        XCTAssertEqual(ReaderPreferencesProtocol.nextTimestamp(now: Date(timeIntervalSince1970: 0), previous: 50), 51)
+        XCTAssertNil(ReaderPreferencesProtocol.nextTimestamp(now: Date(), previous: ReaderPreferencesProtocol.maxTimestamp))
+    }
+
     @MainActor func testEmptyInstallationPublishesNoDefaultsAndClocksHaveStableTieBreak() async {
         let store = PreferencesMemoryStore(), kv = PreferencesMemoryKV()
         let outcome = await HttpReaderPreferencesLane(store: store).run(transport: kv)

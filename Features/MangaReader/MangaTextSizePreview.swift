@@ -250,12 +250,15 @@ struct MangaTextSizePreview: View {
                     Text("No recognized text on this page. Choose another page.").font(.caption)
                 }
                 Toggle("Enlarge Small Text", isOn: $draft.enabled).tint(.green)
-                HStack { preset("Subtle", 25, 24); preset("Balanced", 50, 30); preset("Strong", 75, 40) }
+                let configuration = MangaTextEnlargement.configuration
+                HStack {
+                    ForEach(configuration.presets, id: \.id) { presetButton($0) }
+                }
                 LabeledContent("Enlargement amount", value: "\(draft.amount)%")
-                Slider(value: Binding(get: { Double(draft.amount) }, set: { draft.amount = Int($0) }), in: 0...100, step: 5)
+                Slider(value: Binding(get: { Double(draft.amount) }, set: { draft.amount = Int($0) }), in: configuration.amount.sliderRange, step: Double(configuration.amount.step))
                     .disabled(!draft.enabled).accessibilityLabel("Enlargement amount").accessibilityValue("\(draft.amount)%")
                 LabeledContent("Small-text cutoff", value: "\(draft.threshold) px")
-                Slider(value: Binding(get: { Double(draft.threshold) }, set: { draft.threshold = Int($0) }), in: 10...60, step: 1)
+                Slider(value: Binding(get: { Double(draft.threshold) }, set: { draft.threshold = Int($0) }), in: configuration.threshold.sliderRange, step: Double(configuration.threshold.step))
                     .disabled(!draft.enabled).accessibilityLabel("Small-text cutoff").accessibilityValue("\(draft.threshold) image pixels")
                 Text("100% raises small text to the cutoff (image pixels).").font(.caption)
             }
@@ -274,13 +277,13 @@ struct MangaTextSizePreview: View {
                 .overlay(Capsule().strokeBorder(original == value ? .white : .clear, lineWidth: 2))
         }.accessibilityAddTraits(original == value ? .isSelected : [])
     }
-    private func preset(_ title: LocalizedStringKey, _ amount: Int, _ threshold: Int) -> some View {
-        let selected = draft.enabled && draft.amount == amount && draft.threshold == threshold
+    private func presetButton(_ preset: MangaTextPreset) -> some View {
+        let selected = draft.enabled && draft.amount == preset.amount && draft.threshold == preset.threshold
         return Button {
-            draft = .init(amount: amount, threshold: threshold)
+            draft = .init(amount: preset.amount, threshold: preset.threshold)
             original = false
         } label: {
-            Text(title).frame(maxWidth: .infinity, minHeight: 44)
+            Text(preset.title).frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
                 .overlay(Capsule().strokeBorder(selected ? .white : .clear, lineWidth: 2))
         }.accessibilityAddTraits(selected ? .isSelected : [])

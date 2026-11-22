@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from hoshi_core_build import swift_hoshi_core_flags
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -14,7 +16,7 @@ class ReaderPreferencesExchangeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "preferences"
             subprocess.run([
-                "swiftc", "-swift-version", "6", "-parse-as-library",
+                "swiftc", "-swift-version", "6", "-parse-as-library", *swift_hoshi_core_flags(),
                 str(ROOT / "Features/HttpSync/ReaderPreferencesProtocol.swift"),
                 str(ROOT / "Features/HttpSync/HttpReaderPreferencesLane.swift"),
                 str(ROOT / "Tests/Fixtures/ReaderPreferencesHarness.swift"),

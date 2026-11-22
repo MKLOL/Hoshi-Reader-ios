@@ -93,21 +93,72 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(oldBox.originalFontSize, oldBox.fontSize)
     }
 
+    func testRepeatedGlyphSizesAcrossPagesKeepTheirSourceBlockIndexes() throws {
+        let data = Data("""
+            {"pages":[
+              {"img_path":"first.jpg","blocks":[
+                {"box":[0,0,20,20],"font_size":8.9},
+                {"box":[0,0,20,20],"font_size":18},
+                {"box":[0,0,20,20],"font_size":30}
+              ]},
+              {"img_path":"second.jpg","blocks":[
+                {"box":[0,0],"font_size":12},
+                {"box":[0,0,20,20],"font_size":30},
+                {"box":[0,0,20,20],"font_size":8},
+                {"box":[0,0,20,20],"font_size":18}
+              ]}
+            ]}
+            """.utf8)
+        let book = try XCTUnwrap(JSONDecoder().decode(RawMokuro.self, from: data).toMokuroBook(fallbackTitle: "Fixture"))
+        XCTAssertEqual(book.pages[0].textBoxes.map(\.fontSize), [19, 24, 30])
+        XCTAssertEqual(book.pages[1].textBoxes.map(\.fontSize), [30, 19, 24])
+        XCTAssertEqual(book.pages[1].textBoxes.map(\.originalFontSize), [30, 8, 18])
+        XCTAssertEqual(book.pages[1].textBoxes.map(\.blockIndex), [1, 2, 3])
+    }
+
     func testEveryEnlargementSettingPreservesSourceSizeOrder() {
-        for threshold in 10...60 {
-            for amount in 0...100 {
+        let configuration = MangaTextEnlargement.configuration
+        let originals = Array(1...120)
+        for threshold in configuration.threshold.min...configuration.threshold.max {
+            for amount in configuration.amount.min...configuration.amount.max {
                 let settings = MangaTextEnlargement(amount: amount, threshold: threshold)
-                var previous = settings.fontSize(original: 1)
-                for original in 2...120 {
-                    let result = settings.fontSize(original: original)
-                    if result < previous || result < original || (original >= threshold && result != original) {
-                        XCTFail("Size order changed at source \(original), amount \(amount), cutoff \(threshold)")
-                        return
+                let output = settings.fontSizes(originals: originals)
+                XCTAssertEqual(output.count, originals.count)
+                guard zip(output, output.dropFirst()).allSatisfy({ $0 <= $1 }) else {
+                    return XCTFail("Size order changed at amount \(amount), cutoff \(threshold)")
+                }
+                for (original, result) in zip(originals, output) {
+                    if original < threshold && !(original...threshold).contains(result) ||
+                        original >= threshold && result != original {
+                        return XCTFail("Invalid size \(result) for source \(original), amount \(amount), cutoff \(threshold)")
                     }
-                    previous = result
                 }
             }
         }
+    }
+
+    func testPresetAndSliderValuesKeepTheAndroidBaseline() {
+        let configuration = MangaTextEnlargement.configuration
+        XCTAssertEqual(configuration.amount.sliderRange, 0...100)
+        XCTAssertEqual(configuration.amount.step, 5)
+        XCTAssertEqual(configuration.threshold.sliderRange, 10...60)
+        XCTAssertEqual(configuration.threshold.step, 1)
+        XCTAssertEqual(configuration.presets.map(\.id), ["subtle", "balanced", "strong"])
+        XCTAssertEqual(configuration.presets.map(\.amount), [25, 50, 75])
+        XCTAssertEqual(configuration.presets.map(\.threshold), [24, 30, 40])
+        let originals = [12, 20, 30, 40, 12]
+        XCTAssertEqual(configuration.presets.map {
+            MangaTextEnlargement(amount: $0.amount, threshold: $0.threshold).fontSizes(originals: originals)
+        }, [[15, 21, 30, 40, 15], [21, 25, 30, 40, 21], [33, 35, 37, 40, 33]])
+    }
+
+    func testCorruptedStoredSizesClampToAndroidLimitsAndPreserveBatchOrder() {
+        let originals = [Int.min, -10, 0, 1, 6, 50, Int.max]
+        XCTAssertEqual(MangaTextEnlargement(amount: .max, threshold: .min).fontSizes(originals: originals),
+                       [10, 10, 10, 10, 10, 50, .max])
+        XCTAssertEqual(MangaTextEnlargement(enabled: false, amount: .max, threshold: .max).fontSizes(originals: originals),
+                       [1, 1, 1, 1, 6, 50, .max])
+        XCTAssertTrue(MangaTextEnlargement().fontSizes(originals: []).isEmpty)
     }
 
     @MainActor func testPagePreviewRevealsEveryBubbleWithoutLookupAndKeepsOriginalComparison() async throws {

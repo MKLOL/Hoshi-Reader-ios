@@ -38,13 +38,20 @@ nonisolated enum ReadingDay {
         plain.importedBaseline!.readingTimeByHour = rich.importedBaseline!.readingTimeByHour
         plain.importedBaseline!.timeZone = "Asia/Tokyo"
         let richerFirst = Statistics.merged([rich, plain]), richerLast = Statistics.merged([plain, rich])
-        precondition(richerFirst == richerLast)
+        precondition(richerFirst.first!.readingTime == richerLast.first!.readingTime)
+        precondition(richerLast.first!.readingTimeByHour.isEmpty)
         precondition(richerFirst.first!.readingTimeByHour["2026-10-31T10:00"] == 80)
         var corrupt = row("malformed", 1, 1)
         corrupt.lastStatisticModified = Int.max
         let malformed = try JSONEncoder().encode(corrupt)
         do { _ = try JSONDecoder().decode(Statistics.self, from: malformed); preconditionFailure("Accepted invalid clock") }
         catch { }
+        let rawLocal = Data(#"[{"title":"Fixture","dateKey":"2026-11-07","deviceId":"phone","readingTime":700,"lastStatisticModified":100,"readingTimeByHour":{"2026-11-07T03:00":600,"2026-11-07T04:00":100}}]"#.utf8)
+        let rawRemote = Data(#"[{"title":"Fixture","dateKey":"2026-11-07","deviceId":"phone","readingTime":700,"lastStatisticModified":100,"readingTimeByHour":{"2026-11-07T04:00":150,"2026-11-07T03:00":550}}]"#.utf8)
+        let left = try JSONDecoder().decode([Statistics].self, from: rawLocal)
+        let right = try JSONDecoder().decode([Statistics].self, from: rawRemote)
+        precondition(Statistics.mergedLegacy(left + right) == left)
+        precondition(StatisticsMerge.legacyReading(left, right, localDocument: { rawLocal }, receivedDocument: rawRemote) == right)
         print("TTU imports: duplicate devices, checkpoint convergence, repeat import, replacement tombstones and wire round-trip passed")
     }
 }

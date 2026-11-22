@@ -34,8 +34,7 @@ nonisolated struct ReaderPreferenceRecord: Codable, Equatable, Sendable {
     var deviceId: String
 
     func isNewer(than old: Self?) -> Bool {
-        guard let old else { return true }
-        return editedAt > old.editedAt || (editedAt == old.editedAt && deviceId > old.deviceId)
+        (try? ReaderPreferencesProtocol.winningFields(["value": self], current: old.map { ["value": $0] } ?? [:])) == ["value"]
     }
 }
 
@@ -61,84 +60,80 @@ nonisolated enum ReaderPreferencesProtocol {
     static let maxBody = 64 * 1024
 
     static func validDevice(_ value: String) -> Bool {
-        value.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil
+        (try? HoshiCore.call("conflicts.settings-device", payload: ["id": value]) as? Bool) == true
     }
 
     static func validate(_ records: [String: ReaderPreferenceRecord], now: Date = Date()) throws {
-        let forbidden: Set<String> = ["statisticsSyncEnabled", "statisticsSyncMode",
-            "statisticsStreakMinimumMinutes", "statisticsDayResetHour", "statisticsSettingsUpdatedAt",
-            "statisticsTimeZone", "sasayaki.syncEnabled", "sasayaki.copyAudiobookToPrivateStorage"]
+        if records.isEmpty { return }
         guard records.count <= 256 else { throw HttpSyncError("Too many reader preferences.") }
-        let latest = min(maxTimestamp, Int64(now.timeIntervalSince1970 * 1000) + 86_400_000)
-        for (name, record) in records {
-            guard name.range(of: "^[A-Za-z][A-Za-z0-9_.-]{0,127}$", options: .regularExpression) != nil,
-                  !forbidden.contains(name), validDevice(record.deviceId), record.editedAt >= 0,
-                  record.editedAt <= latest,
-                  (try JSONEncoder().encode(record.value)).count <= 4096,
-                  validValue(record.value, name: name) else {
-                throw HttpSyncError("Invalid reader preference record.")
-            }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let fields = try records.map { name, record -> [String: Any] in
+            let encoded = try encoder.encode(record.value)
+            return [
+                "name": name, "editedAt": record.editedAt, "deviceId": record.deviceId,
+                "encodedLength": String(decoding: encoded, as: UTF8.self).utf16.count,
+                "value": validationValue(record.value, name: name),
+            ]
         }
+        let nowMillis = Int64(clamping: now.timeIntervalSince1970 * 1000)
+        let status = try HoshiCore.call("conflicts.settings-records", payload: [
+            "records": fields, "now": nowMillis, "sasayaki": true,
+        ]) as? String
+        guard status == "valid" else { throw HttpSyncError("Invalid reader preference record.") }
     }
 
     static func validValue(_ value: ReaderPreferenceValue, name: String) -> Bool {
-        if name == "mangaTextEnlargement.ios" || name == "mangaTextEnlargement.android" {
-            guard case .object(let object) = value,
-                  case .bool = object["enabled"],
-                  case .number(let amount) = object["amount"],
-                  case .number(let threshold) = object["threshold"] else { return false }
-            return amount.isFinite && (0...100).contains(amount) && amount.rounded() == amount
-                && threshold.isFinite && (10...60).contains(threshold) && threshold.rounded() == threshold
+        (try? HoshiCore.call("conflicts.settings-value", payload: [
+            "name": name, "value": validationValue(value, name: name), "sasayaki": true,
+        ]) as? Bool) == true
+    }
+
+    static func winningFields(_ candidates: [String: ReaderPreferenceRecord],
+                              current: [String: ReaderPreferenceRecord]) throws -> [String] {
+        if candidates.isEmpty { return [] }
+        let response = try HoshiCore.call("conflicts.settings-winners", payload: [
+            "candidates": candidates.map { name, record in
+                ["name": name, "editedAt": record.editedAt, "deviceId": record.deviceId] as [String: Any]
+            },
+            "current": current.filter { candidates[$0.key] != nil }.mapValues { record in
+                ["editedAt": record.editedAt, "deviceId": record.deviceId] as [String: Any]
+            },
+        ])
+        guard let names = response as? [String] else { throw HttpSyncError("Invalid reader preference merge.") }
+        return names
+    }
+
+    static func nextTimestamp(now: Date, previous: Int64) -> Int64? {
+        try? HoshiCore.call("conflicts.settings-next-clock", payload: [
+            "now": Int64(clamping: now.timeIntervalSince1970 * 1000), "previous": previous,
+        ]) as? Int64
+    }
+
+    private static func validationValue(_ value: ReaderPreferenceValue, name: String) -> Any {
+        if (name == "mangaTextEnlargement.ios" || name == "mangaTextEnlargement.android"),
+           case .object(let fields) = value {
+            return fields.filter { ["enabled", "amount", "threshold"].contains($0.key) }.mapValues(validationPrimitive)
         }
-        let booleans: Set<String> = ["eInkMode", "disablePageTurnAnimation", "systemLightSepia",
-            "sepiaInvertInDark", "verticalWriting", "hideFurigana", "showSentenceTranslations",
-            "continuousMode", "showStatisticsToggle", "showReadingSpeed", "showReadingTime",
-            "avoidPageBreak", "justifyText", "blurImages", "layoutAdvanced", "showTitle",
-            "showCharacters", "showPercentage", "alwaysShowProgress", "showProgressTop",
-            "showReaderBackButton", "popupActionBar", "popupFullWidth", "popupSwipeToDismiss",
-            "popupReducedMotionScrolling", "volumeKeysTurnPages", "volumeKeysSeekSasayaki",
-            "reverseVolumeKeyDirection", "keepScreenOnWhileReading", "mangaSingleTapLookup",
-            "mangaUseNotoSansJp", "mangaShowCopyButton", "mangaEnlargeSmallText", "mangaShowFurigana",
-            "sasayaki.enabled", "sasayaki.showReaderToggle", "sasayaki.showReaderBottomPlaybackControls",
-            "sasayaki.reverseVerticalReaderSkipButtons", "sasayaki.autoScroll", "sasayaki.autoPause"]
-        if booleans.contains(name) { if case .bool = value { return true }; return false }
-        let ranges: [String: ClosedRange<Double>] = ["fontSize": 16...60, "chapterSwipeDistance": 10...60,
-            "horizontalPadding": 0...50, "verticalPadding": 0...50, "popupWidth": 100...1600,
-            "popupHeight": 100...2000, "popupSwipeThreshold": 20...60,
-            "popupReducedMotionScrollPercent": 40...100, "popupReducedMotionSwipeThreshold": 0...100,
-            "lineHeight": 1...2.5, "characterSpacing": -10...10, "paragraphSpacing": 0...3,
-            "popupScale": 0.8...1.5]
-        if let range = ranges[name] {
-            guard case .number(let n) = value, n.isFinite, range.contains(n) else { return false }
-            return ["lineHeight", "characterSpacing", "paragraphSpacing", "popupScale"].contains(name) || n.rounded() == n
+        return validationPrimitive(value)
+    }
+
+    private static func validationPrimitive(_ value: ReaderPreferenceValue) -> Any {
+        switch value {
+        case .bool(let value): return value
+        case .number(let value): return value.isFinite ? value as Any : [Int]()
+        case .string(let value): return value
+        case .null: return NSNull()
+        case .array, .object: return [Int]()
         }
-        if name.hasPrefix("dictionaryCard.") || name.hasPrefix("translationCard.") {
-            let field = String(name.split(separator: ".").last ?? "")
-            guard ["width", "height", "scale", "fontScale"].contains(field) else { return true }
-            if value == .null { return true }
-            guard case .number(let n) = value, n.isFinite else { return false }
-            return (field == "width" ? 100...1600 : field == "height" ? 100...2000 : 0.5...3).contains(n)
-        }
-        if name.hasSuffix("Color") {
-            let colors: Set<String> = ["customBackgroundColor", "customTextColor", "customInfoColor",
-                "sasayaki.lightTextColor", "sasayaki.lightBackgroundColor", "sasayaki.darkTextColor", "sasayaki.darkBackgroundColor"]
-            if colors.contains(name) {
-                guard case .number(let n) = value else { return false }
-                return n.isFinite && (0...4_294_967_295).contains(n) && n.rounded() == n
-            }
-        }
-        if name == "theme" || name == "uiTheme" {
-            guard case .string(let s) = value else { return false }
-            return (name == "theme" ? ["System", "Light", "Dark", "Sepia", "Custom"] : ["System", "Light", "Dark"]).contains(s)
-        }
-        if name == "selectedFont" {
-            guard case .string(let s) = value else { return false }
-            return !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && s.utf16.count <= 255 && !s.contains("/") && !s.contains("\0")
-        }
-        if name == "sasayaki.readerSkipButtonAction" {
-            guard case .string(let s) = value else { return false }
-            return ["Cue", "Seconds5", "Seconds10", "Seconds15", "Seconds30"].contains(s)
-        }
-        return true // Safe future/platform-specific fields retain their clocks when mirrored.
+    }
+}
+
+private extension Int64 {
+    nonisolated init(clamping value: Double) {
+        if value.isNaN { self = 0 }
+        else if value >= Double(Int64.max) { self = .max }
+        else if value <= Double(Int64.min) { self = .min }
+        else { self = Int64(value) }
     }
 }

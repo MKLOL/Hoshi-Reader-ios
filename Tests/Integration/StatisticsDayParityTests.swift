@@ -73,13 +73,15 @@ nonisolated final class StatisticsDayParityTests: XCTestCase {
             XCTAssertEqual(streak.longest, 3, zone)
         }
     }
-    func testEqualStampRowsDifferingOnlyInZoneMergeInEitherOrderLikeAndroid() {
+    func testEqualStampDifferentZonesUseAndroidOrderForEachMergePath() {
         var tokyo = row("2026-10-01", seconds: 60, hours: ["2026-10-01T10:00": 60])
         tokyo.timeZone = "Asia/Tokyo"
         var newYork = tokyo
         newYork.timeZone = "America/New_York"
         XCTAssertEqual(Statistics.merged([tokyo, newYork]), [tokyo])
-        XCTAssertEqual(Statistics.merged([newYork, tokyo]), [tokyo])
+        XCTAssertEqual(Statistics.merged([newYork, tokyo]), [newYork])
+        XCTAssertEqual(Statistics.mergedLegacy([tokyo, newYork]), [tokyo])
+        XCTAssertEqual(Statistics.mergedLegacy([newYork, tokyo]), [tokyo])
     }
     func testLegacyJSONAndAndroidHourEvidenceRoundTripWithoutLosingFields() throws {
         let legacy = Data(#"{"title":"Fixture","dateKey":"2026-10-01","readingTime":600,"charactersRead":10}"#.utf8)

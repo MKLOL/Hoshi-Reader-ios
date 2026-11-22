@@ -80,7 +80,9 @@ final class HttpReaderPreferencesLane {
                     guard blob.deviceId == id else { throw HttpSyncError("Invalid reader preferences identity.") }
                     try ReaderPreferencesProtocol.validate(blob.records)
                     guard Set(merged.keys).union(blob.records.keys).count <= 256 else { throw HttpSyncError("Too many reader preferences.") }
-                    for (name, record) in blob.records where record.isNewer(than: merged[name]) { merged[name] = record }
+                    for name in try ReaderPreferencesProtocol.winningFields(blob.records, current: merged) {
+                        merged[name] = blob.records[name]
+                    }
                     if key == ownKey { own = blob }
                 } catch is CancellationError { throw CancellationError() }
                 catch { canPublish = false; outcome.errors.append("Could not read reader preferences.") }

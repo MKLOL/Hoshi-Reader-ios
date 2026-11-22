@@ -22,6 +22,9 @@
 		842798D7E16961BFBCD267E4 /* PopupCardStyleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC4F9CC1D389C928A405FB8B /* PopupCardStyleTests.swift */; };
 		8B5641D790CDC7A0B94AACA6 /* FirstLaunchSetupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D92B84A7E08075D21DA2CD16 /* FirstLaunchSetupTests.swift */; };
 		9D0B6F784A2E41F1099ED17C /* LookupOutsideTouchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C159EAA1891FE3C2ACA63B8E /* LookupOutsideTouchTests.swift */; };
+		90D100000000000000000002 /* DictionaryRankingParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D100000000000000000003 /* DictionaryRankingParityTests.swift */; };
+		90D100000000000000000004 /* dictionary-ranking in Resources */ = {isa = PBXBuildFile; fileRef = 90D100000000000000000005 /* dictionary-ranking */; };
+		90D100000000000000000006 /* statistics_merge_android.json in Resources */ = {isa = PBXBuildFile; fileRef = 90D100000000000000000007 /* statistics_merge_android.json */; };
 		A70000000000000000000001 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = A70000000000000000000003 /* Textual */; };
 		B3E7A8FF06071C5FD895F987 /* SentenceReadingParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D128506B3FAFB12E351C99FE /* SentenceReadingParityTests.swift */; };
 		B92E41F755B2FAFDCA80AA7D /* AiRequestLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9466CAA7075C0723A644812 /* AiRequestLifetimeTests.swift */; };
@@ -117,6 +120,9 @@
 		BA74B19759C344B3F39854BB /* TtuHistoryParityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TtuHistoryParityTests.swift; sourceTree = "<group>"; };
 		5C98FCA2F06E4177BB55CF0A /* MangaReadingPaceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MangaReadingPaceTests.swift; sourceTree = "<group>"; };
 		C159EAA1891FE3C2ACA63B8E /* LookupOutsideTouchTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LookupOutsideTouchTests.swift; sourceTree = "<group>"; };
+		90D100000000000000000003 /* DictionaryRankingParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryRankingParityTests.swift; sourceTree = "<group>"; };
+		90D100000000000000000005 /* dictionary-ranking */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "dictionary-ranking"; path = "fixtures/dictionary-ranking"; sourceTree = HOSHI_CORE_SOURCE; };
+		90D100000000000000000007 /* statistics_merge_android.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = statistics_merge_android.json; path = tests/fixtures/statistics_merge_android.json; sourceTree = HOSHI_CORE_SOURCE; };
 		CBD5157D77EA7484B5A145F1 /* HoshiReaderUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HoshiReaderUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D128506B3FAFB12E351C99FE /* SentenceReadingParityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SentenceReadingParityTests.swift; sourceTree = "<group>"; };
 		D709BE0160C18E9C202E7877 /* ZoomPopupUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ZoomPopupUITests.swift; sourceTree = "<group>"; };
@@ -377,6 +383,9 @@
 				EC4F9CC1D389C928A405FB8B /* PopupCardStyleTests.swift */,
 				B8CB4310346DBCD0FC25AF3C /* AnonymousStatsTests.swift */,
 				D92B84A7E08075D21DA2CD16 /* FirstLaunchSetupTests.swift */,
+				90D100000000000000000003 /* DictionaryRankingParityTests.swift */,
+				90D100000000000000000005 /* dictionary-ranking */,
+				90D100000000000000000007 /* statistics_merge_android.json */,
 				3687A10FCC7BC8CDB166EAAE /* ReaderPreferencesParityTests.swift */,
 				D128506B3FAFB12E351C99FE /* SentenceReadingParityTests.swift */,
 				F9466CAA7075C0723A644812 /* AiRequestLifetimeTests.swift */,
@@ -558,6 +567,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				90D100000000000000000004 /* dictionary-ranking in Resources */,
+				90D100000000000000000006 /* statistics_merge_android.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -574,7 +585,10 @@
 				"$(HOSHI_CORE_SOURCE)/Cargo.lock",
 				"$(HOSHI_CORE_SOURCE)/Cargo.toml",
 				"$(HOSHI_CORE_SOURCE)/include/hoshi_core.h",
+				"$(HOSHI_CORE_SOURCE)/src/conflicts.rs",
 				"$(HOSHI_CORE_SOURCE)/src/lib.rs",
+				"$(HOSHI_CORE_SOURCE)/src/manga.rs",
+				"$(HOSHI_CORE_SOURCE)/src/statistics_merge.rs",
 				"$(HOSHI_CORE_SOURCE)/src/streak.rs",
 				"$(HOSHI_CORE_SOURCE)/src/sync.rs",
 			);
@@ -648,6 +662,7 @@
 				842798D7E16961BFBCD267E4 /* PopupCardStyleTests.swift in Sources */,
 				5ABC763CDD1556103C12957A /* AnonymousStatsTests.swift in Sources */,
 				8B5641D790CDC7A0B94AACA6 /* FirstLaunchSetupTests.swift in Sources */,
+				90D100000000000000000002 /* DictionaryRankingParityTests.swift in Sources */,
 				CFF8B660D1C5B8356965A0EE /* ReaderPreferencesParityTests.swift in Sources */,
 				B3E7A8FF06071C5FD895F987 /* SentenceReadingParityTests.swift in Sources */,
 				B92E41F755B2FAFDCA80AA7D /* AiRequestLifetimeTests.swift in Sources */,
@@ -776,6 +791,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
+				HOSHI_CORE_SOURCE = "$(SRCROOT)/Dependencies/HoshiReaderAndroid/shared/hoshi-core";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MARKETING_VERSION = 1.2.0;
@@ -838,6 +854,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
+				HOSHI_CORE_SOURCE = "$(SRCROOT)/Dependencies/HoshiReaderAndroid/shared/hoshi-core";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MARKETING_VERSION = 1.2.0;
@@ -863,7 +880,6 @@
 				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				HOSHI_CORE_SOURCE = "$(SRCROOT)/Dependencies/HoshiReaderAndroid/shared/hoshi-core";
 				INFOPLIST_FILE = "HoshiReader-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Hoshi;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -908,7 +924,6 @@
 				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				HOSHI_CORE_SOURCE = "$(SRCROOT)/Dependencies/HoshiReaderAndroid/shared/hoshi-core";
 				INFOPLIST_FILE = "HoshiReader-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Hoshi;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1115,8 +1130,9 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/Manhhao/hoshidicts.git";
 			requirement = {
-				branch = main;
-				kind = branch;
+				// Android's engine revision plus the upstream Swift C++ build fix.
+				kind = revision;
+				revision = 1a34a59c9d84dcef6d872afce44c7fa7241b0709;
 			};
 		};
 		A70000000000000000000002 /* XCRemoteSwiftPackageReference "textual" */ = {

@@ -58,7 +58,11 @@ nonisolated struct MangaStatisticsBlob: Codable {
         try await exchangeRows(root: root, key: "books/\(id)/statistics", transport: transport, listing: listing, uploadLocal: uploadLocal, stillCurrent: stillCurrent,
             load: { try ReadingStatisticsStore.strictReading(root: root) },
             save: { try ReadingStatisticsStore.save($0, root: root, scheduleSync: false) },
-            merge: Statistics.merged,
+            merge: Statistics.merged, mergeConflicts: { latest, remote, document in
+                StatisticsMerge.legacyReading(latest, remote, localDocument: {
+                    try? Data(contentsOf: root.appendingPathComponent(FileNames.statistics))
+                }, receivedDocument: document)
+            },
             encode: { try self.encode(ReadingStatisticsBlob(syncId: id, entries: $0)) },
             decode: { data in
                 let blob = try JSONDecoder().decode(ReadingStatisticsBlob.self, from: data)
@@ -71,7 +75,9 @@ nonisolated struct MangaStatisticsBlob: Codable {
         try await exchangeRows(root: root, key: "books/\(id)/manga_statistics", transport: transport, listing: listing, uploadLocal: uploadLocal, stillCurrent: stillCurrent,
             load: { try ReadingStatisticsStore.strictText(root: root) },
             save: { try ReadingStatisticsStore.saveText($0, root: root, scheduleSync: false) },
-            merge: MangaTextStatistic.merged,
+            merge: MangaTextStatistic.merged, mergeConflicts: { latest, remote, _ in
+                MangaTextStatistic.mergedLegacy(latest + remote)
+            },
             encode: { try self.encode(MangaStatisticsBlob(syncId: id, entries: $0)) },
             decode: { data in
                 let blob = try JSONDecoder().decode(MangaStatisticsBlob.self, from: data)
@@ -113,7 +119,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
     }
     private func exchangeRows<T: Equatable>(root: URL, key: String, transport: any HttpSyncKvTransport,
         listing: [String: HttpSyncKvKeyMeta]?, uploadLocal: Bool, stillCurrent: @MainActor () -> Bool, load: () throws -> [T], save: ([T]) throws -> Void,
-        merge: ([T]) -> [T], encode: ([T]) throws -> Data, decode: (Data) throws -> [T]) async throws -> Bool {
+        merge: ([T]) -> [T], mergeConflicts: ([T], [T], Data?) -> [T], encode: ([T]) throws -> Data, decode: (Data) throws -> [T]) async throws -> Bool {
         try checkCurrent(stillCurrent)
         let local = try load()
         let body = try encode(local)
@@ -139,7 +145,7 @@ nonisolated struct MangaStatisticsBlob: Codable {
         // The reader can save while GET is in flight. Re-read before merging.
         guard FileManager.default.fileExists(atPath: root.path) else { return true }
         let latest = try load()
-        let merged = merge(latest + remote)
+        let merged = mergeConflicts(latest, remote, fetched?.body)
         if merged != latest { try save(merged) }
         if merged.isEmpty && fetched == nil { return true }
         let mergedBody = try encode(merged)

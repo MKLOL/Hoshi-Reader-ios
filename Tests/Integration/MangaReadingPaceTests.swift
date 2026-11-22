@@ -72,6 +72,18 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
         XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: 103, averagePageSeconds: estimate), 3_353.9375)
     }
 
+    func testAndroidRecordedPaceFixtureKeepsPartialHistogramBuckets() {
+        var statistics = day(samples: [1000: 1, 40: 14, 1: 1, 10: 3, 100: 1, -1: 100, 900: 0])
+        statistics.charactersRead = 20
+        statistics.readingTime = 1_691
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 36.25)
+        XCTAssertEqual(MangaStatisticsView.secondsRemaining(remainingPages: 10, averagePageSeconds: 36.25), 362.5)
+        statistics.charactersRead = 25
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 67.64)
+        statistics.charactersRead = 10
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 169.1)
+    }
+
     func testSparseOrDisproportionateTimingUsesAllRecordedPagesAndSeconds() {
         var statistics = day(samples: [1: 1, 30: 7, 89: 1])
         statistics.charactersRead = 9
@@ -101,6 +113,13 @@ nonisolated final class MangaReadingPaceTests: XCTestCase {
         XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 799.0 / 8)
         statistics.mangaPageSeconds = [1: 1, 100: 8, 299: 1] // 1,100 of 1,000 seconds
         XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics), 100)
+    }
+
+    func testAndroidPaceBitsSurviveTheCoreBridge() {
+        var statistics = day(samples: [185: 126_420_183, 8: 627_563_288])
+        statistics.charactersRead = 753_983_455
+        statistics.readingTime = 17_187.030244680296
+        XCTAssertEqual(MangaStatisticsView.estimatedPageSeconds(statistics)?.bitPattern, 0x3ef7e6fa694a7977)
     }
 
     func testExcessiveHistogramCountsCannotOverflow() {

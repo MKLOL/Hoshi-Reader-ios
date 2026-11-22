@@ -34,14 +34,14 @@ nonisolated extension MangaTextStatistic {
     var tieBreak: String {
         "MangaTextStatistic(dateKey=\(dateKey), charactersRead=\(charactersRead), lastModified=\(lastModified), deviceId=\(deviceId ?? "null"), deviceName=\(deviceName ?? "null"))"
     }
-    static func merged(_ entries: [Self]) -> [Self] {
-        var result: [String: Self] = [:]
-        for entry in entries where entry.charactersRead >= 0 {
-            if let old = result[entry.key], old.lastModified > entry.lastModified ||
-                (old.lastModified == entry.lastModified && !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16)) { continue }
-            result[entry.key] = entry
-        }
-        return result.values.sorted { $0.key < $1.key }
+    static func merged(_ entries: [Self]) -> [Self] { merge(entries, legacyOrder: false) }
+    static func mergedLegacy(_ entries: [Self]) -> [Self] { merge(entries, legacyOrder: true) }
+    private static func merge(_ entries: [Self], legacyOrder: Bool) -> [Self] {
+        let rows = entries.filter { $0.charactersRead >= 0 }
+        return StatisticsMerge.mangaText(
+            rows, key: { $0.dateKey + "\u{0}" + ($0.deviceId ?? "") },
+            legacyOrder: legacyOrder ? { $0.tieBreak } : nil
+        ).sorted { $0.key < $1.key }
     }
 }
 
@@ -121,7 +121,7 @@ extension Notification.Name {
         try StatisticsHistory.absorbIfPresent(root: root)
         var recovered = false
         let existing = try preserveUnreadable(root: root, filename: FileNames.statistics, recovered: &recovered, load: { try strictReading(root: root) })
-        let merged = Statistics.merged(existing + rows)
+        let merged = Statistics.merged(rows + existing)
         guard recovered || merged != existing else { return }
         try BookStorage.save(merged, inside: root, as: FileNames.statistics)
         changed(root: root, scheduleSync: scheduleSync, origin: origin)
@@ -131,7 +131,7 @@ extension Notification.Name {
         try StatisticsHistory.absorbIfPresent(root: root)
         var recovered = false
         let existing = try preserveUnreadable(root: root, filename: FileNames.mangaStatistics, recovered: &recovered, load: { try strictText(root: root) })
-        let merged = MangaTextStatistic.merged(existing + rows)
+        let merged = MangaTextStatistic.merged(rows + existing)
         guard recovered || merged != existing else { return }
         try BookStorage.save(merged, inside: root, as: FileNames.mangaStatistics)
         changed(root: root, scheduleSync: scheduleSync, origin: origin)

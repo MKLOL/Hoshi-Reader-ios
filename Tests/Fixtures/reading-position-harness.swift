@@ -67,7 +67,7 @@ actor MemoryTransport: HttpSyncKvTransport {
   precondition(store.record(root:book,event:first)?.progress == 0.4)
   precondition(session.navigate(bookmark:Bookmark(chapterIndex:0, progress:0.4, characterCount:40, lastModified:.now)) == nil)
   let backwards = session.navigate(bookmark:Bookmark(chapterIndex:0, progress:0.2, characterCount:20, lastModified:Date(timeIntervalSinceReferenceDate:1)))!
-  precondition(backwards.observes(first) && backwards.compatibilityAt > first.compatibilityAt)
+  precondition((backwards.seen[first.originId] ?? 0) >= first.sequence && backwards.compatibilityAt > first.compatibilityAt)
   precondition(store.record(root:book,event:backwards)?.progress == 0.2)
   for index in 1...150 {
    let event = session.navigate(bookmark:Bookmark(chapterIndex:0, progress:Double(index)/200, characterCount:index, lastModified:Date(timeIntervalSinceReferenceDate:Double(index))))!
@@ -92,7 +92,7 @@ actor MemoryTransport: HttpSyncKvTransport {
   precondition(BookStorage.loadBookmark(root:book)?.progress == 0.1)
   let peerSession = reopened.open(bookId:"test-book",root:book)
   let local = peerSession.navigate(bookmark:Bookmark(chapterIndex:0,progress:0.05,characterCount:5,lastModified:Date(timeIntervalSinceReferenceDate:0)))!
-  precondition(local.observes(peer) && local.compatibilityAt > peer.compatibilityAt)
+  precondition((local.seen[peer.originId] ?? 0) >= peer.sequence && local.compatibilityAt > peer.compatibilityAt)
   precondition(reopened.record(root:book,event:local)?.progress == 0.05)
   try FileManager.default.removeItem(at:book)
   _ = reopened.record(root:book,event:local)
@@ -127,7 +127,7 @@ actor MemoryTransport: HttpSyncKvTransport {
   let samePlaceMoved = try laneStore.merge(ReadingPositionJournal(bookId:"test-book",deviceId:"peer-device",events:[samePlace],heads:[samePlace]),root:laneRoot)
   precondition(!samePlaceMoved)
   let afterSamePlace=laneSession.navigate(bookmark:Bookmark(chapterIndex:0,progress:0.25,characterCount:25,lastModified:Date(timeIntervalSinceReferenceDate:1)))!
-  precondition(afterSamePlace.observes(samePlace) && afterSamePlace.compatibilityAt > samePlace.compatibilityAt)
+  precondition((afterSamePlace.seen[samePlace.originId] ?? 0) >= samePlace.sequence && afterSamePlace.compatibilityAt > samePlace.compatibilityAt)
   _ = laneStore.record(root:laneRoot,event:afterSamePlace)
   let imported = laneStore.importExplicit(bookId:"test-book",root:laneRoot,bookmark:Bookmark(chapterIndex:0,progress:0.1,characterCount:10,lastModified:Date(timeIntervalSinceReferenceDate:1)))
   precondition(imported?.progress == 0.1 && laneStore.snapshot(bookId:"test-book").winner?.action == "ttuImport")

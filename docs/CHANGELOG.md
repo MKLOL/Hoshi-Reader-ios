@@ -52,6 +52,7 @@
 ### Fixed
 
 - The yellow highlight in a manga bubble stays visible while its dictionary card is open, including when the bubble scrolls to reveal the word.
+- Reading-history conflicts, bookmark conflicts, and reader preference edits use Android's rules. Manga pace estimates, small-text sizing, and dictionary frequency ranking also match Android.
 
 - Scrolling no longer stutters while HTTP sync is set up. When nothing changed, the five-second sync check and the reading-history sync (once a minute, and every 30 seconds while reading) now do almost no work on the main thread and write no files. Books whose position Android last saved were rewritten and announced as moved every five seconds; they are left alone. A sync that changes nothing no longer reloads the whole bookshelf.
 - Covers whose image is not book-shaped, such as a two-page spread, fill their place on the shelf instead of being stretched.

@@ -324,7 +324,10 @@ class LastTenRegressionTests(unittest.TestCase):
         self.assertIn("guard loadToken == pendingLoadToken", view)
         self.assertIn("var onPageReady: (Int) -> Void", webview)
         self.assertIn("navigationLoadTokens", webview)
-        self.assertIn("parent.onPageReady(finishedLoadToken)", webview)
+        self.assertIn("finishPage(webView, token: finishedLoadToken)", webview)
+        finish = method_body(webview, "private func finishPage(")
+        self.assertIn("guard token == parent.controller.loadToken, parent.controller.webView === webView", finish)
+        self.assertIn("parent.onPageReady(token)", finish)
         self.assertIn("onLoadToken: ((Int) -> Void)? = nil", view_model)
 
     def test_manga_menu_actions_clear_existing_popups(self):

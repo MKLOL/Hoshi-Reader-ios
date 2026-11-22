@@ -62,8 +62,8 @@ nonisolated enum MangaPageHtml {
         showActionButtons: Bool = true,
         showCopyButton: Bool = false,
         enlargeSmallText: Bool = true,
-        textEnlargementAmount: Int = 50,
-        smallTextThreshold: Int = 30,
+        textEnlargementAmount: Int = MangaTextEnlargement.defaults.amount,
+        smallTextThreshold: Int = MangaTextEnlargement.defaults.threshold,
         showFurigana: Bool = true,
         textSizePreview: Bool = false,
         imageSources: [String: String] = [:]
@@ -188,11 +188,12 @@ nonisolated enum MangaPageHtml {
         )
         let frameWidthCss = formatNumber(Double(imageWidth) * fitScale)
         let frameHeightCss = formatNumber(Double(imageHeight) * fitScale)
-        let boxes = page.textBoxes
-            .map { textBoxHtml($0, imageWidth: imageWidth, imageHeight: imageHeight,
-                               pageIndex: page.index, enlargeSmallText: enlargeSmallText,
-                                textEnlargementAmount: textEnlargementAmount, smallTextThreshold: smallTextThreshold, showFurigana: showFurigana) }
-            .joined(separator: "\n")
+        let sizing = MangaTextEnlargement(enabled: enlargeSmallText, amount: textEnlargementAmount, threshold: smallTextThreshold)
+        let sizes = sizing.fontSizes(originals: page.textBoxes.map(\.originalFontSize))
+        let boxes = zip(page.textBoxes, sizes).map { box, fontSize in
+            textBoxHtml(box, imageWidth: imageWidth, imageHeight: imageHeight, fontSize: fontSize,
+                        pageIndex: page.index, showFurigana: showFurigana)
+        }.joined(separator: "\n")
         let uiTestBoxes = uiTestActionBoxesHtml(
             imageWidth: imageWidth,
             imageHeight: imageHeight,
@@ -391,11 +392,9 @@ nonisolated enum MangaPageHtml {
         _ box: MokuroTextBox,
         imageWidth: Int,
         imageHeight: Int,
+        fontSize: Int,
         extraAttributes: String = "",
         pageIndex: Int? = nil,
-        enlargeSmallText: Bool = true,
-        textEnlargementAmount: Int = 50,
-        smallTextThreshold: Int = 30,
         showFurigana: Bool = false
     ) -> String {
         let leftPct = percent(box.left, imageWidth)
@@ -405,7 +404,7 @@ nonisolated enum MangaPageHtml {
         // Match Android: the selected image-space font scales with the artwork (cqw = 1%
         // of the frame width). The reveal CSS changes visibility without an extra device-size
         // boost; the shared wrap fallback can still repair a misidentified horizontal bubble.
-        let fontCqw = percent(box.revealFontSize(enlargeSmallText: enlargeSmallText, amount: textEnlargementAmount, threshold: smallTextThreshold), imageWidth)
+        let fontCqw = percent(fontSize, imageWidth)
         let verticalClass = box.vertical ? " vertical" : ""
         // Join with literal `\n` so the shared selection scanner sees mokuro's line boundaries
         // as sentence delimiters; `.ocr-box`'s `white-space: pre` renders it as a real break.
@@ -468,13 +467,15 @@ nonisolated enum MangaPageHtml {
                 fontSize: 8, vertical: false, lines: ["上段", "下段選択"]
             ))
         ]
-        return boxes.map { id, box in
-            textBoxHtml(
+        let sizes = MangaTextEnlargement(enabled: enlargeSmallText).fontSizes(originals: boxes.map { $0.1.originalFontSize })
+        return zip(boxes, sizes).map { item, fontSize in
+            let (id, box) = item
+            return textBoxHtml(
                 box,
                 imageWidth: imageWidth,
                 imageHeight: imageHeight,
-                extraAttributes: "data-hoshi-ui-test=\"\(id)\"",
-                enlargeSmallText: enlargeSmallText
+                fontSize: fontSize,
+                extraAttributes: "data-hoshi-ui-test=\"\(id)\""
             )
         }.joined(separator: "\n")
         #else

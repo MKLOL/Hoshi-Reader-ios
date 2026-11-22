@@ -198,11 +198,24 @@ final class MangaReaderViewModel {
         }
         let device = ReadingDevice.current
         let day = MangaStatisticsTracker.dateKey(for: .now)
-        var row = textStatistics.first { $0.dateKey == day && $0.deviceId == device.id }
+        let current = textStatistics.firstIndex { $0.dateKey == day && $0.deviceId == device.id }
+        var row = current.map { textStatistics[$0] }
             ?? MangaTextStatistic(dateKey: day, deviceId: device.id, deviceName: device.name)
         row.charactersRead = StatisticsNumbers.adding(row.charactersRead, characters)
         row.lastModified = max(Int(Date().timeIntervalSince1970 * 1000), StatisticsNumbers.nextStamp(row.lastModified))
-        textStatistics = MangaTextStatistic.merged(textStatistics + [row])
+        // Load and sync already merge this history. A local turn advances only the owned row.
+        if let current {
+            let previous = textStatistics[current]
+            if row.lastModified > previous.lastModified {
+                textStatistics[current] = row
+            } else if let merged = MangaTextStatistic.merged([previous, row]).first {
+                textStatistics[current] = merged
+            }
+        } else {
+            let key = row.key
+            let insertion = textStatistics.firstIndex { $0.key > key } ?? textStatistics.endIndex
+            textStatistics.insert(row, at: insertion)
+        }
         sessionCharacters = StatisticsNumbers.adding(sessionCharacters, characters)
         if let root = bookRoot { try? ReadingStatisticsStore.saveText(textStatistics, root: root, origin: statisticsOrigin) }
     }

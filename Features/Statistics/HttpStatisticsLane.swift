@@ -22,6 +22,32 @@ nonisolated struct HttpStatisticsPreferences: Codable, Equatable {
     var timeZone: String? = nil
 }
 
+nonisolated struct StatisticsPreferenceSelection {
+    let newest: HttpStatisticsPreferences?
+    let outranksLocal: Bool
+    let zone: String?
+
+    static func rank(
+        _ choices: [(String, HttpStatisticsPreferences)], local: HttpStatisticsPreferences, deviceId: String
+    ) throws -> Self {
+        guard !choices.isEmpty else { return Self(newest: nil, outranksLocal: false, zone: local.timeZone) }
+        func encode(_ device: String, _ value: HttpStatisticsPreferences) -> [String: Any] {
+            ["device": device, "updatedAt": value.updatedAt, "zone": value.timeZone as Any? ?? NSNull()]
+        }
+        let ranked = try HoshiCore.call("statistics-merge.preferences", payload: [
+            "choices": choices.map { encode($0.0, $0.1) }, "local": encode(deviceId, local),
+        ]) as? [String: Any]
+        guard let ranked, let outranks = ranked["outranksLocal"] as? Bool else {
+            throw HoshiCore.Failure(reason: "Invalid shared statistics preferences response")
+        }
+        return Self(
+            newest: (ranked["newest"] as? Int).map { choices[$0].1 },
+            outranksLocal: outranks,
+            zone: ranked["zone"] as? String
+        )
+    }
+}
+
 /// A background merge is only committed while the exact files it read still exist. Reader
 /// saves, imports and deletion all run on the main actor, alongside the final validation/write.
 nonisolated struct HttpStatisticsPreparedBook: Sendable {
@@ -56,7 +82,7 @@ nonisolated struct HttpStatisticsPreparedBook: Sendable {
             return try decoder.decode([T].self, from: Data(contentsOf: root.appendingPathComponent(name)))
         }
         let old = Statistics.merged(try rows(FileNames.statistics)), oldText = MangaTextStatistic.merged(try rows(FileNames.mangaStatistics))
-        let merged = Statistics.merged(old + reading), mergedText = MangaTextStatistic.merged(oldText + text)
+        let merged = Statistics.merged(reading + old), mergedText = MangaTextStatistic.merged(text + oldText)
         let encoder = JSONEncoder(); encoder.outputFormatting = .prettyPrinted
         let readingBytes = merged == old ? nil : try encoder.encode(merged)
         let textBytes = mergedText == oldText ? nil : try encoder.encode(mergedText)
@@ -109,11 +135,23 @@ nonisolated enum HttpStatisticsDecode {
         if stamp == 0 && (goal != 10 || reset != 3 || zone != nil) { stamp = 1 }
         return HttpStatisticsPreferences(streakMinimumMinutes: goal, dayResetHour: reset, updatedAt: stamp, timeZone: zone)
     }
+    static func normalize(_ value: HttpStatisticsPreferences) -> HttpStatisticsPreferences {
+        var normalized = value
+        normalized.version = 1
+        normalized.streakMinimumMinutes = ReadingDay.normalizedGoal(value.streakMinimumMinutes)
+        normalized.dayResetHour = min(23, max(0, value.dayResetHour))
+        if normalized.timeZone?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            normalized.timeZone = nil
+        }
+        return normalized
+    }
     static func save(_ value: HttpStatisticsPreferences, defaults: UserDefaults = .standard) {
-        defaults.set(ReadingDay.normalizedGoal(value.streakMinimumMinutes), forKey: ReadingDay.goalKey)
-        defaults.set(min(23, max(0, value.dayResetHour)), forKey: ReadingDay.resetKey)
+        let value = normalize(value)
+        defaults.set(value.streakMinimumMinutes, forKey: ReadingDay.goalKey)
+        defaults.set(value.dayResetHour, forKey: ReadingDay.resetKey)
         defaults.set(value.updatedAt, forKey: stampKey)
-        if let zone = value.timeZone, StatisticsZone.zone(zone) != nil { defaults.set(zone, forKey: zoneKey) }
+        // Keep the explicit wire choice even if this OS cannot interpret its zone identifier.
+        defaults.set(value.timeZone, forKey: zoneKey)
         NotificationCenter.default.post(name: .readingStatisticsChanged, object: nil)
     }
     static func choose(goal: Int? = nil, reset: Int? = nil) {
@@ -203,7 +241,7 @@ nonisolated struct HttpStatisticsDisk: Sendable {
                     guard let root = installed[id]?.root else { disk.invalidShards.insert(key); break }
                     if reading[id] == nil { reading[id] = Statistics.merged(try rows(root, FileNames.statistics)) }
                     if text[id] == nil { text[id] = MangaTextStatistic.merged(try rows(root, FileNames.mangaStatistics)) }
-                    if Statistics.merged(reading[id]! + expected) != reading[id]! || MangaTextStatistic.merged(text[id]! + expectedText) != text[id]! {
+                    if Statistics.merged(expected + reading[id]!) != reading[id]! || MangaTextStatistic.merged(expectedText + text[id]!) != text[id]! {
                         disk.invalidShards.insert(key); break
                     }
                 }
@@ -573,15 +611,22 @@ nonisolated struct HttpStatisticsDisk: Sendable {
             var local = StatisticsPreferencesStore.load(defaults: defaults)
             let choices = index.preferences.compactMap { key, value -> (String, HttpStatisticsPreferences)? in
                 Self.parse(key).map { ($0.device, value) }
-            }.sorted { $0.1.updatedAt == $1.1.updatedAt ? $0.0 < $1.0 : $0.1.updatedAt < $1.1.updatedAt }
-            if let winner = choices.last, winner.1.updatedAt > local.updatedAt || (winner.1.updatedAt == local.updatedAt && winner.0 > own.id) {
-                var chosen = winner.1; chosen.timeZone = chosen.timeZone ?? local.timeZone
-                if chosen != local { StatisticsPreferencesStore.save(chosen, defaults: defaults); local = StatisticsPreferencesStore.load(defaults: defaults) }
+            }
+            let selection = try StatisticsPreferenceSelection.rank(choices, local: local, deviceId: own.id)
+            var zone = selection.zone
+            if selection.outranksLocal, var chosen = selection.newest {
+                chosen.timeZone = chosen.timeZone ?? local.timeZone
+                chosen = StatisticsPreferencesStore.normalize(chosen)
+                if chosen != local {
+                    StatisticsPreferencesStore.save(chosen, defaults: defaults)
+                    local = chosen
+                    zone = try StatisticsPreferenceSelection.rank(choices, local: local, deviceId: own.id).zone
+                }
             }
             // Old peers omit the zone; retain the newest explicit zone independently.
-            let zones = choices.filter { StatisticsZone.zone($0.1.timeZone) != nil } + (local.timeZone == nil ? [] : [(own.id, local)])
-            if let zone = zones.max(by: { $0.1.updatedAt == $1.1.updatedAt ? $0.0 < $1.0 : $0.1.updatedAt < $1.1.updatedAt })?.1.timeZone, zone != local.timeZone {
-                local.timeZone = zone; StatisticsPreferencesStore.save(local, defaults: defaults)
+            if let zone, zone != local.timeZone {
+                local.timeZone = zone
+                StatisticsPreferencesStore.save(local, defaults: defaults)
             }
             let settingsKey = Self.prefix + own.id + "/settings.json", settingsBody = try encode(local)
             if local.updatedAt > 0, index.hashes[settingsKey] != sha(settingsBody) || listing[settingsKey] == nil,

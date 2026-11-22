@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import unittest
 
+from hoshi_core_build import swift_hoshi_core_flags
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -13,9 +15,10 @@ class TtuImportBehaviorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "imports"
             sources = ["Models/Statistics.swift", "Features/Statistics/ReadingStatisticsMath.swift",
-                       "Features/Statistics/ImportedReadingBaseline.swift", "Tests/Fixtures/ImportedReadingHarness.swift"]
+                       "Features/Statistics/ImportedReadingBaseline.swift", "Features/Statistics/StatisticsMerge.swift",
+                       "Tests/Fixtures/ImportedReadingHarness.swift"]
             compiled = subprocess.run(["swiftc", "-swift-version", "6", "-parse-as-library",
-                                       *[str(ROOT / source) for source in sources], "-o", str(executable)],
+                                       *[str(ROOT / source) for source in sources], *swift_hoshi_core_flags(), "-o", str(executable)],
                                       capture_output=True, text=True)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             result = subprocess.run([str(executable)], capture_output=True, text=True)

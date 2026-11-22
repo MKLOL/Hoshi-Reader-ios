@@ -75,8 +75,9 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         guard self.config === config, !applying, readError == nil else { return }
         let current = values(config)
         var changed = false
-        let clock = max(Int64(Date().timeIntervalSince1970 * 1000), (records.values.map(\.editedAt).max() ?? 0) + 1)
-        guard clock <= ReaderPreferencesProtocol.maxTimestamp else { return }
+        guard let clock = ReaderPreferencesProtocol.nextTimestamp(
+            now: Date(), previous: records.values.map(\.editedAt).max() ?? 0
+        ) else { return }
         for (name, value) in current where value != lastValues[name] {
             guard ReaderPreferencesProtocol.validValue(value, name: name) else { continue }
             records[name] = .init(value: value, editedAt: clock, deviceId: deviceId)
@@ -100,7 +101,9 @@ final class ReaderPreferencesStore: ReaderPreferencesSyncing {
         try ReaderPreferencesProtocol.validate(incoming)
         guard Set(records.keys).union(incoming.keys).count <= 256 else { throw HttpSyncError("Too many reader preferences.") }
         var merged = records
-        for (name, record) in incoming where record.isNewer(than: merged[name]) { merged[name] = record }
+        for name in try ReaderPreferencesProtocol.winningFields(incoming, current: records) {
+            merged[name] = incoming[name]
+        }
         guard merged != records else { return false }
         let data = try JSONEncoder().encode(merged)
         defaults.set(data, forKey: journalKey)

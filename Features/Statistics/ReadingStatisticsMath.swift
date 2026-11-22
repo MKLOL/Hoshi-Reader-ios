@@ -63,60 +63,47 @@ nonisolated extension Statistics {
         if count != 0 { altMinReadingSpeed = altMinReadingSpeed == 0 ? lastReadingSpeed : min(altMinReadingSpeed, lastReadingSpeed) }
         lastStatisticModified = max(stamp, StatisticsNumbers.nextStamp(lastStatisticModified))
     }
-    // Same tie-break text as Android's ReadingStatistics data class.
-    var tieBreak: String {
-        "ReadingStatistics(title=\(title), dateKey=\(dateKey), charactersRead=\(charactersRead), readingTime=\(StatisticsNumbers.kotlinDoubleText(readingTime)), minReadingSpeed=\(minReadingSpeed), altMinReadingSpeed=\(altMinReadingSpeed), lastReadingSpeed=\(lastReadingSpeed), maxReadingSpeed=\(maxReadingSpeed), lastStatisticModified=\(lastStatisticModified), deviceId=\(deviceId ?? "null"), deviceName=\(deviceName ?? "null"))"
+    // Legacy per-book HTTP sidecars order equal timestamps by the Android record text.
+    var tieBreak: String { legacyRecordText() }
+
+    func legacyRecordText(hourOrder: [String]? = nil) -> String {
+        let hours = hourOrder.map { order in
+            legacyMap(order.compactMap { key in readingTimeByHour[key].map { (key, $0) } }, value: StatisticsNumbers.kotlinDoubleText)
+        } ?? legacyHours(readingTimeByHour)
+        let histogram = legacyMap(mangaPageSeconds.sorted { $0.key < $1.key }, value: String.init)
+        let zones = legacyMap(legacySorted(readingTimeByZone), value: legacyHours)
+        let baseline = importedBaseline.map(legacyBaseline) ?? "null"
+        return """
+        ReadingStatistics(title=\(title), dateKey=\(dateKey), charactersRead=\(charactersRead), readingTime=\(StatisticsNumbers.kotlinDoubleText(readingTime)), minReadingSpeed=\(minReadingSpeed), altMinReadingSpeed=\(altMinReadingSpeed), lastReadingSpeed=\(lastReadingSpeed), maxReadingSpeed=\(maxReadingSpeed), lastStatisticModified=\(lastStatisticModified), deviceId=\(deviceId ?? "null"), deviceName=\(deviceName ?? "null"), readingTimeByHour=\(hours), timeZone=\(timeZone ?? "null"), importedBaseline=\(baseline), mangaPageSeconds=\(histogram), readingTimeByZone=\(zones))
+        """
     }
-    static func merged(_ entries: [Statistics]) -> [Statistics] {
-        var result: [String: Statistics] = [:]
-        for incoming in entries where incoming.readingTime.isFinite && incoming.readingTime >= 0 && incoming.charactersRead >= 0 {
-            let entry = incoming.withImportedResidual()
-            guard let old = result[entry.key] else { result[entry.key] = entry; continue }
-            var winner = preferred(old, entry)
-            // Samples are append-only per origin, independently of the scalar timestamp. A
-            // same-day restore or older client can send a newer row missing earlier samples.
-            // Maxima retain that evidence; summing snapshots would count every retry twice.
-            winner.mangaPageSeconds = old.mangaPageSeconds.merging(entry.mangaPageSeconds, uniquingKeysWith: max)
-            result[entry.key] = winner
+
+    private func legacySorted<Value>(_ values: [String: Value]) -> [(key: String, value: Value)] {
+        values.sorted { $0.key.utf16.lexicographicallyPrecedes($1.key.utf16) }
+    }
+
+    private func legacyMap<Key, Value>(_ values: [(key: Key, value: Value)], value text: (Value) -> String) -> String {
+        "{" + values.map { "\($0.key)=\(text($0.value))" }.joined(separator: ", ") + "}"
+    }
+
+    private func legacyHours(_ hours: [String: Double]) -> String {
+        legacyMap(legacySorted(hours), value: StatisticsNumbers.kotlinDoubleText)
+    }
+
+    private func legacyBaseline(_ baseline: ImportedReadingBaseline) -> String {
+        let devices = legacyMap(legacySorted(baseline.includedDevices)) { checkpoint in
+            """
+            ImportedReadingCheckpoint(charactersRead=\(checkpoint.charactersRead), readingTime=\(StatisticsNumbers.kotlinDoubleText(checkpoint.readingTime)), lastStatisticModified=\(checkpoint.lastStatisticModified), readingTimeByHour=\(legacyHours(checkpoint.readingTimeByHour)), timeZone=\(checkpoint.timeZone ?? "null"))
+            """
         }
-        return result.values.sorted { $0.key < $1.key }
+        return """
+        ImportedReadingBaseline(charactersRead=\(baseline.charactersRead), readingTime=\(StatisticsNumbers.kotlinDoubleText(baseline.readingTime)), sourceModified=\(baseline.sourceModified), readingTimeByHour=\(legacyHours(baseline.readingTimeByHour)), timeZone=\(baseline.timeZone ?? "null"), includedDevices=\(devices))
+        """
     }
-    private static func preferred(_ old: Statistics, _ entry: Statistics) -> Statistics {
-        if let merged = old.mergingImportedBaseline(entry) { return merged }
-        if old.lastStatisticModified == entry.lastStatisticModified, let candidate = entry.importedBaseline {
-            guard let prior = old.importedBaseline else { return entry }
-            if candidate.sourceModified != prior.sourceModified { return candidate.sourceModified > prior.sourceModified ? entry : old }
-            if candidate.readingTime != prior.readingTime { return candidate.readingTime > prior.readingTime ? entry : old }
-            if candidate.charactersRead != prior.charactersRead { return candidate.charactersRead > prior.charactersRead ? entry : old }
-        } else if old.lastStatisticModified == entry.lastStatisticModified, old.importedBaseline != nil { return old }
-        if old.lastStatisticModified > entry.lastStatisticModified { return old }
-        if old.lastStatisticModified == entry.lastStatisticModified {
-            // Old clients strip unknown fields. Otherwise-identical rows keep the richer
-            // hourly evidence, so an equal-stamp merge cannot turn an exact day into a guess.
-            if old.tieBreak == entry.tieBreak {
-                if old.readingTimeByHour == entry.readingTimeByHour, old.readingTimeByZone != entry.readingTimeByZone {
-                    if old.readingTimeByZone.isEmpty { return entry }
-                    if entry.readingTimeByZone.isEmpty { return old }
-                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-                    let left = (try? encoder.encode(old.readingTimeByZone)) ?? Data()
-                    let right = (try? encoder.encode(entry.readingTimeByZone)) ?? Data()
-                    return left.lexicographicallyPrecedes(right) ? entry : old
-                }
-                if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone != nil && entry.timeZone == nil { return old }
-                if old.readingTimeByHour == entry.readingTimeByHour && old.timeZone == nil && entry.timeZone != nil { return entry }
-                // Android orders equal stamps by the full row text, where the zone follows the hours.
-                if old.readingTimeByHour == entry.readingTimeByHour, let oldZone = old.timeZone, let newZone = entry.timeZone, oldZone != newZone {
-                    return (newZone + ",").utf16.lexicographicallyPrecedes((oldZone + ",").utf16) ? old : entry
-                }
-                let oldHours = old.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
-                let newHours = entry.readingTimeByHour.values.filter { $0.isFinite && $0 > 0 }.reduce(0.0, StatisticsNumbers.adding)
-                let oldKeys = old.readingTimeByHour.keys.sorted().map { "\($0)=\(old.readingTimeByHour[$0]!)" }.joined(separator: ",")
-                let newKeys = entry.readingTimeByHour.keys.sorted().map { "\($0)=\(entry.readingTimeByHour[$0]!)" }.joined(separator: ",")
-                if oldHours > newHours || (oldHours == newHours && !oldKeys.utf16.lexicographicallyPrecedes(newKeys.utf16)) { return old }
-            } else if !old.tieBreak.utf16.lexicographicallyPrecedes(entry.tieBreak.utf16) { return old }
-        }
-        return entry
-    }
+
+    static func merged(_ entries: [Statistics]) -> [Statistics] { StatisticsMerge.reading(entries) }
+    static func mergedLegacy(_ entries: [Statistics]) -> [Statistics] { StatisticsMerge.reading(entries, legacyOrder: true) }
+
     /// Adds disjoint page samples (different days/devices, or one newly completed page).
     static func sumPageSeconds(_ histograms: [[Int: Int]]) -> [Int: Int] {
         var result: [Int: Int] = [:]
@@ -150,7 +137,8 @@ nonisolated extension Statistics {
     }
     static func total(_ entries: [Statistics], title: String = "", day: String = "") -> Statistics {
         var total = empty(title: title, day: day)
-        for entry in merged(entries) {
+        let rows = merged(entries)
+        for entry in rows {
             total.readingTime = StatisticsNumbers.adding(total.readingTime, entry.readingTime)
             total.readingTimeByHour = ReadingDay.sumHours([total.readingTimeByHour, entry.readingTimeByHour])
             total.charactersRead = StatisticsNumbers.adding(total.charactersRead, entry.charactersRead)
@@ -159,7 +147,7 @@ nonisolated extension Statistics {
             if entry.altMinReadingSpeed > 0 { total.altMinReadingSpeed = total.altMinReadingSpeed == 0 ? entry.altMinReadingSpeed : min(total.altMinReadingSpeed, entry.altMinReadingSpeed) }
             total.maxReadingSpeed = max(total.maxReadingSpeed, entry.maxReadingSpeed)
         }
-        let zones = Set(merged(entries).map(\.timeZone))
+        let zones = Set(rows.map(\.timeZone))
         total.timeZone = zones.count == 1 ? zones.first! : nil
         total.lastReadingSpeed = StatisticsNumbers.speed(count: total.charactersRead, seconds: total.readingTime)
         return total
