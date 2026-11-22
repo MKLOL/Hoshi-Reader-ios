@@ -690,8 +690,9 @@ nonisolated enum MangaPageHtml {
             paragraph.replaceChildren(content);
             box.classList.toggle('has-furigana', paragraph.querySelector('rt') !== null);
             paragraph.addEventListener('scroll', function() {
-              if (window.hoshiSelection) window.hoshiSelection.clearSelection();
-              window.hoshiManga.placeActions(box);
+              // The highlight follows its text range while the paragraph scrolls.
+              // Ignore a queued scroll event from resetting an already closed bubble.
+              if (box.classList.contains('revealed')) window.hoshiManga.placeActions(box);
             }, {passive: true});
           });
         },

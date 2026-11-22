@@ -11,10 +11,10 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
     }
     private func config(enlarge: Bool = true, copy: Bool = false, furigana: Bool = true,
                         amount: Int = 50, threshold: Int = 30,
-                        viewport: CGSize = CGSize(width: 320, height: 640)) -> MangaPageRenderConfig {
+                        viewport: CGSize = CGSize(width: 320, height: 640), selectionScript: String = "") -> MangaPageRenderConfig {
         MangaPageRenderConfig(backgroundCssColor: "#000", scanNonJapaneseText: false,
             viewportCssWidth: Int(viewport.width), viewportCssHeight: Int(viewport.height), singleTapLookup: false,
-            useNotoSansJpFont: false, showActionButtons: true, selectionScript: "",
+            useNotoSansJpFont: false, showActionButtons: true, selectionScript: selectionScript,
             showCopyButton: copy, enlargeSmallText: enlarge, textEnlargementAmount: amount,
             smallTextThreshold: threshold, showFurigana: furigana)
     }
@@ -587,6 +587,51 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(fields["scrollTop"] as? Double, 0)
     }
 
+    @MainActor func testMangaWordHighlightSurvivesRubyParagraphScrolling() async throws {
+        let viewport = CGSize(width: 744, height: 1133)
+        let page = MokuroPage(index: 0, imagePath: "fixture.png", imageWidth: 744, imageHeight: 1133,
+            textBoxes: [MokuroTextBox(left: 600, top: 700, width: 70, height: 70,
+                fontSize: 24, vertical: true, lines: [String(repeating: "学校に行く。", count: 180)])])
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "selection", withExtension: "js"))
+        let script = try String(contentsOf: url, encoding: .utf8)
+        let browser = try MangaTestBrowser(viewport: viewport)
+        defer { browser.close() }
+        let cache = MangaPageRenderCache()
+        try await load(await cache.htmlFor(page: page,
+            config: config(enlarge: false, viewport: viewport, selectionScript: script)), in: browser)
+
+        let marked = try await browser.web.callAsyncJavaScript("""
+        const box = document.querySelector('.ocr-box'), p = box.querySelector('p'), manga = window.hoshiManga;
+        manga.prepareReveal(box);
+        box.classList.add('revealed');
+        manga.fitFurigana(box);
+        const base = p.querySelector('ruby span').firstChild;
+        const selected = manga.selectBaseHit({node: base, offset: 0}, 16);
+        window.hoshiSelection.highlightSelection(2);
+        function highlighted() {
+          const highlights = CSS.highlights.get('hoshi-selection');
+          return Array.from(highlights || [], range => range.toString()).join('');
+        }
+        const beforeScroll = highlighted();
+        const scrolled = new Promise(resolve => {
+          const timeout = setTimeout(() => resolve(false), 1000);
+          p.addEventListener('scroll', () => { clearTimeout(timeout); resolve(true); }, {once: true});
+        });
+        p.scrollLeft = -100;
+        p.scrollTop = 100;
+        const moved = await scrolled;
+        const afterScroll = highlighted();
+        manga.clearRevealed();
+        return { selected, moved, beforeScroll, afterScroll, afterDismissal: highlighted() };
+        """, contentWorld: .page)
+        let result = try XCTUnwrap(marked as? [String: Any])
+        XCTAssertTrue((result["selected"] as? String)?.hasPrefix("学校") ?? false)
+        XCTAssertEqual(result["moved"] as? Bool, true)
+        XCTAssertEqual(result["beforeScroll"] as? String, "学校")
+        XCTAssertEqual(result["afterScroll"] as? String, "学校")
+        XCTAssertEqual(result["afterDismissal"] as? String, "")
+    }
+
     func testImageLoaderRejectsAnObsoleteBooksNamespace() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -657,6 +702,7 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         web = WKWebView(frame: CGRect(origin: .zero, size: viewport), configuration: config)
         super.init()
         config.userContentController.add(self, name: "hoshiManga")
+        config.userContentController.add(self, name: "textSelected")
         web.navigationDelegate = self
         let host = UIViewController()
         host.view.addSubview(web)
@@ -669,6 +715,7 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         web.stopLoading()
         web.navigationDelegate = nil
         web.configuration.userContentController.removeScriptMessageHandler(forName: "hoshiManga")
+        web.configuration.userContentController.removeScriptMessageHandler(forName: "textSelected")
         web.removeFromSuperview()
         window.isHidden = true
         window.rootViewController = nil
