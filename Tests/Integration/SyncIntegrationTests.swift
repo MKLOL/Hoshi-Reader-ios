@@ -598,7 +598,8 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
         let scrollingRequests = try await serverRequests()
         let scrollingPolls = scrollingRequests.filter { $0.method == "GET" && $0.path.hasPrefix("/v1/kv?") }.count
         XCTAssertGreaterThanOrEqual(scrollingPolls, 3, "real polls must overlap rendered shelf scrolling")
-        XCTAssertFalse(scrollingRequests.contains { $0.method != "GET" }, "idle scrolling polls must not upload")
+        let idleWrites = scrollingRequests.filter { $0.method != "GET" }
+        XCTAssertTrue(idleWrites.isEmpty, "idle scrolling polls must not upload: \(idleWrites)")
         print("rendered shelf scrolling: \(scrollingPolls) real polls, \(shelfFrames.frames) display callbacks, \(Int(shelfFrames.distance)) points travelled, longest display gap \(Int(shelfFrames.gap * 1000)) ms")
 
         // A peer may publish a substantial causal journal between polls. Exercise the changed

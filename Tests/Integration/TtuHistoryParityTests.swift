@@ -171,6 +171,30 @@ nonisolated final class ReadingPositionRemoteTests: XCTestCase {
         XCTAssertEqual(repository.record(root: root, event: rewind)?.chapterIndex, 2)
     }
 
+    @MainActor func testJournalEventCacheReencodesCorrectedPayloadWithTheSameEventID() throws {
+        let (directory, root, repository) = try fixture()
+        let original = event(4)
+        let initial = ReadingPositionJournal(bookId: "book", deviceId: original.deviceId, events: [original], heads: [])
+        _ = try repository.merge(initial, root: root)
+
+        // Repeated input ids replace their retained event, while equal id/sequence heads
+        // continue to hold the original payload. Cached encodings must respect that distinction.
+        var corrected = original
+        corrected.deviceName = "Corrected peer name"
+        corrected.seen = ["previous-origin": 1]
+        let replay = ReadingPositionJournal(bookId: "book", deviceId: corrected.deviceId, events: [corrected], heads: [])
+        _ = try repository.merge(replay, root: root)
+
+        let url = ReadingPositionRepository.journalURL("book", in: directory.appendingPathComponent("positions"))
+        let bytes = try Data(contentsOf: url)
+        let journal = try JSONDecoder().decode(ReadingPositionState.self, from: bytes)
+        XCTAssertEqual(journal.events, [corrected])
+        XCTAssertEqual(journal.heads[original.originId], original)
+        XCTAssertEqual(journal, repository.snapshot(bookId: "book"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["bookId", "heads", "events", "pending"])
+    }
+
     @MainActor func testLargeRemoteJournalPreparesOffMainIncludingWinnerAcross512Origins() async throws {
         let (directory, root, repository) = try fixture()
         // Every origin is a concurrent head, exercising the quadratic winner calculation as

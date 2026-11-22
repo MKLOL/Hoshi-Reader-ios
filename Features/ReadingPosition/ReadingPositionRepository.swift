@@ -73,6 +73,7 @@ final class ReadingPositionRepository {
     // Journal bytes are local storage. Sorting thousands of causal-frontier keys here made
     // each durable page turn exceed a frame; the HTTP export keeps its canonical encoder.
     private let encoder = JSONEncoder()
+    private var journalFragments = JournalFragments()
 
     init(directory: URL? = nil, device: ReadingDevice? = nil) {
         self.directory = directory ?? ((try? BookStorage.getAppDirectory()) ?? FileManager.default.temporaryDirectory)
@@ -298,6 +299,54 @@ final class ReadingPositionRepository {
         }
     }
 
+    private struct JournalFragments {
+        private struct Header: Encodable {
+            var bookId: String
+            var heads: [String: ReadingPositionEvent]
+            var pending: Set<String>
+        }
+
+        private struct EncodedEvent {
+            var event: ReadingPositionEvent
+            var data: Data
+        }
+
+        private var bookId: String?
+        private var events: [String: EncodedEvent] = [:]
+
+        mutating func encode(_ state: ReadingPositionState, with encoder: JSONEncoder) throws -> Data {
+            // Keep one recently written journal's event bytes. Old events can contain hundreds
+            // of causal observations. JSONEncoder cannot reuse encoded members of an array, so
+            // Foundation encodes the header and event fragments before the fixed array is joined.
+            let header = try encoder.encode(Header(bookId: state.bookId, heads: state.heads, pending: state.pending))
+            var body = Data()
+            body.append(header.dropLast())
+            body.append(contentsOf: ",\"events\":[".utf8)
+            let previous = bookId == state.bookId ? events : [:]
+            var next: [String: EncodedEvent] = [:]
+            next.reserveCapacity(state.events.count)
+            for (index, event) in state.events.enumerated() {
+                if index > 0 { body.append(0x2c) }
+                let fragment: EncodedEvent
+                if let prior = previous[event.id], prior.event == event {
+                    fragment = prior
+                } else {
+                    fragment = EncodedEvent(event: event, data: try encoder.encode(event))
+                }
+                body.append(fragment.data)
+                next[event.id] = fragment
+            }
+            body.append(contentsOf: "]}".utf8)
+            bookId = state.bookId
+            events = next
+            return body
+        }
+
+        mutating func discard(bookId: String) {
+            if self.bookId == bookId { self = JournalFragments() }
+        }
+    }
+
     nonisolated private struct RemoteMerge: Sendable {
         let state: ReadingPositionState
         let body: Data
@@ -385,6 +434,7 @@ final class ReadingPositionRepository {
     func removeAllHistory() {
         try? FileManager.default.removeItem(at: directory)
         cached = [:]; cachedWinners = [:]; cachedStamps = [:]; ownIndex = nil; sessions = [:]; sequence = 0
+        journalFragments = JournalFragments()
         indexGeneration += 1
         origin = UUID().uuidString.lowercased()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -409,6 +459,7 @@ final class ReadingPositionRepository {
     private func invalidateCorrupt(_ bookId: String, file: URL) {
         try? FileManager.default.moveItem(at: file, to: file.appendingPathExtension(UUID().uuidString + ".corrupt"))
         cached[bookId] = nil; cachedWinners[bookId] = nil; cachedStamps[bookId] = nil; ownIndex?[bookId] = nil
+        journalFragments.discard(bookId: bookId)
         indexGeneration += 1
         try? FileManager.default.removeItem(at: directory.appendingPathComponent("sync-index.json"))
         // A lost journal must never reuse a sequence whose higher value exists on the server.
@@ -450,7 +501,7 @@ final class ReadingPositionRepository {
         let unchanged = cached[state.bookId] == state && cachedStamps[state.bookId] != nil &&
             cachedStamps[state.bookId] == FileStamp.read(file)
         if !unchanged {
-            let body = try encoder.encode(state)
+            let body = try journalFragments.encode(state, with: encoder)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try body.write(to: file, options: .atomic)
             cached[state.bookId] = state
