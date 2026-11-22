@@ -231,6 +231,12 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         let previousWindow = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
         let controller = MangaWebViewController()
+        let imageRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: imageRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: imageRoot) }
+        let pixel = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+        try pixel.write(to: imageRoot.appendingPathComponent(page.imagePath))
+        controller.bookRootForScheme = imageRoot
         var ready: XCTestExpectation?
         window.rootViewController = UIHostingController(rootView:
             MangaReaderWebView(controller: controller, backgroundColor: .black,
@@ -273,6 +279,15 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         XCTAssertEqual(updated.zoomScale, zoomed.zoomScale, accuracy: 0.01)
         XCTAssertEqual(updated.offsetX, zoomed.offsetX, accuracy: 1)
         XCTAssertEqual(updated.offsetY, zoomed.offsetY, accuracy: 1)
+
+        let fittedReady = expectation(description: "A fresh reader page still starts fitted")
+        ready = fittedReady
+        controller.load(html: normal, allowedImagePaths: [page.imagePath])
+        await fulfillment(of: [fittedReady], timeout: 10)
+        let fitted = try XCTUnwrap(controller.viewportForReload())
+        XCTAssertEqual(fitted.zoomScale, 1, accuracy: 0.01)
+        XCTAssertEqual(fitted.offsetX, 0, accuracy: 1)
+        XCTAssertEqual(fitted.offsetY, 0, accuracy: 1)
     }
 
     func testAdjustableEnlargementUsesTheSameCurveAsThePreview() {
@@ -749,9 +764,11 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         previous = scene.windows.first(where: \.isKeyWindow)
         window = UIWindow(windowScene: scene)
         let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
         config.setURLSchemeHandler(MangaTestImageScheme(), forURLScheme: MangaImageScheme.scheme)
         web = WKWebView(frame: CGRect(origin: .zero, size: viewport), configuration: config)
         super.init()
+        web.scrollView.contentInsetAdjustmentBehavior = .never
         config.userContentController.add(self, name: "hoshiManga")
         config.userContentController.add(self, name: "textSelected")
         web.navigationDelegate = self

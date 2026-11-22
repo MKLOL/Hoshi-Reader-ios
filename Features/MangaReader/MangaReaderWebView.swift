@@ -175,7 +175,9 @@ final class MangaWebViewController {
     func restoreViewport(_ viewport: MangaViewportState) {
         guard let scroll = webView?.scrollView, viewport.zoomScale.isFinite,
               viewport.offsetX.isFinite, viewport.offsetY.isFinite else { return }
-        scroll.setZoomScale(CGFloat(viewport.zoomScale), animated: false)
+        if abs(Double(scroll.zoomScale) - viewport.zoomScale) > 0.001 {
+            scroll.setZoomScale(CGFloat(viewport.zoomScale), animated: false)
+        }
         scroll.setContentOffset(CGPoint(x: viewport.offsetX, y: viewport.offsetY), animated: false)
         syncHostViewport()
     }
@@ -342,7 +344,15 @@ struct MangaReaderWebView: UIViewRepresentable {
             controller.startupTrace?.mark("html_navigation_\(min(loadToken, 32))")
             let identity = controller.documentIdentity
             context.coordinator.documentIdentity = identity
-            let identifiedHTML = html.replacingOccurrences(of: "<head>", with:
+            // The renderer can reapply its initial zoom on later layer commits. Give a
+            // same-page reload the saved initial zoom while keeping the document's layout,
+            // minimum/maximum scale and fixed image dimensions identical.
+            var loadHTML = html
+            if let scale = controller.pendingViewport?.zoomScale, scale.isFinite, scale > 1,
+               let initialZoom = loadHTML.range(of: "initial-scale=1, minimum-scale=1") {
+                loadHTML.replaceSubrange(initialZoom, with: "initial-scale=\(min(scale, 5)), minimum-scale=1")
+            }
+            let identifiedHTML = loadHTML.replacingOccurrences(of: "<head>", with:
                 "<head><script>window.hoshiMangaDocumentIdentity='\(identity)';</script>")
             let document = controller.startupTrace?.enabled == true
                 ? identifiedHTML.replacingOccurrences(of: "</body>", with: "<script>" + Self.startupImagePaintScript(loadToken: loadToken, identity: identity) + "</script></body>")
@@ -487,19 +497,21 @@ struct MangaReaderWebView: UIViewRepresentable {
             guard finishedLoadToken == parent.controller.loadToken else { return }
             parent.controller.startupTrace?.mark("document_finished")
             webView.isHidden = false
-            // WebKit can restore the previous document's viewport during navigation. Reset only
-            // after the current document loads, before exposing it for page-turn gestures.
             MangaReaderWebView.configureZoom(for: webView.scrollView)
-            webView.scrollView.setZoomScale(webView.scrollView.minimumZoomScale, animated: false)
-            webView.scrollView.setContentOffset(.zero, animated: false)
             previousPinchLocation = nil
             indirectPinchTransform = nil
             trackpadPanSession = nil
-            if let viewport = parent.controller.pendingViewport { parent.controller.restoreViewport(viewport) }
-            else { parent.controller.syncHostViewport() }
+            if let viewport = parent.controller.pendingViewport {
+                restoreViewportAfterLayout(webView, token: finishedLoadToken, viewport: viewport)
+                return
+            }
+            // A different page starts fitted. A same-page reload instead keeps its existing
+            // viewport until the saved zoom and pan can be applied to the new document.
+            webView.scrollView.setZoomScale(webView.scrollView.minimumZoomScale, animated: false)
+            webView.scrollView.setContentOffset(.zero, animated: false)
+            parent.controller.syncHostViewport()
             if parent.controller.isTextSizePreview {
-                // Fit ruby against the restored visual viewport, as in a normal reveal.
-                webView.evaluateJavaScript("window.hoshiManga && window.hoshiManga.revealPreview()") { [weak self, weak webView] _, _ in
+                webView.evaluateJavaScript(Self.previewRevealScript) { [weak self, weak webView] _, _ in
                     guard let self, let webView else { return }
                     self.finishPage(webView, token: finishedLoadToken)
                 }
@@ -508,12 +520,52 @@ struct MangaReaderWebView: UIViewRepresentable {
             }
         }
 
+        private static let previewRevealScript = "window.hoshiManga && window.hoshiManga.revealPreview()"
+
+        private func restoreViewportAfterLayout(_ webView: WKWebView, token: Int, viewport: MangaViewportState) {
+            Task { [weak self, weak webView] in
+                guard let self, let webView else { return }
+                // Becoming first responder may change WebKit's unobscured viewport. Let
+                // that change and the new document settle before restoring the saved zoom.
+                if webView.window != nil && !webView.isFirstResponder { webView.becomeFirstResponder() }
+                await Self.waitForPageLayout(webView)
+                for _ in 0..<2 {
+                    guard token == parent.controller.loadToken, parent.controller.webView === webView else { return }
+                    MangaReaderWebView.configureZoom(for: webView.scrollView)
+                    parent.controller.restoreViewport(viewport)
+                    if parent.controller.isTextSizePreview {
+                        _ = try? await webView.evaluateJavaScript(Self.previewRevealScript)
+                    }
+                    await Self.waitForPageLayout(webView)
+                    guard token == parent.controller.loadToken, parent.controller.webView === webView else { return }
+                    if let actual = parent.controller.captureViewport(),
+                       abs(actual.zoomScale - viewport.zoomScale) <= 0.01,
+                       abs(actual.offsetX - viewport.offsetX) <= 1, abs(actual.offsetY - viewport.offsetY) <= 1 {
+                        break
+                    }
+                }
+                finishPage(webView, token: token)
+            }
+        }
+
+        private static func waitForPageLayout(_ webView: WKWebView) async {
+            _ = try? await webView.callAsyncJavaScript("""
+                return await new Promise(resolve => {
+                    const timer = setTimeout(() => resolve(true), 100);
+                    requestAnimationFrame(() => requestAnimationFrame(() => {
+                        clearTimeout(timer);
+                        resolve(true);
+                    }));
+                });
+                """, contentWorld: .page)
+        }
+
         private func finishPage(_ webView: WKWebView, token: Int) {
             guard token == parent.controller.loadToken, parent.controller.webView === webView else { return }
             parent.onPageReady(token)
             parent.controller.pageReady(token)
             // loadHTMLString may drop first responder. Re-assert it for reader hardware keys.
-            if webView.window != nil { webView.becomeFirstResponder() }
+            if webView.window != nil && !webView.isFirstResponder { webView.becomeFirstResponder() }
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
