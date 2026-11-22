@@ -280,14 +280,15 @@ nonisolated final class SyncIntegrationTests: XCTestCase {
             let history = ReadingDay.days(reading: [reading], resetHour: 3)
             let now = ReadingDay.parse("2026-10-01")!.addingTimeInterval(3600)
             XCTAssertEqual(StatisticsMath.streak(history, goalMinutes: 10, now: now, resetHour: 3).current, 1)
-            let requests = try await serverRequests().filter { $0.path.hasPrefix("/v1/") }
+            // Podcast account checks can run alongside book sync.
+            let requests = try await serverRequests().filter { $0.path.hasPrefix("/v1/kv") }
             XCTAssertEqual(requests.count, 3, "one metadata check and the two missing histories: \(requests)")
             XCTAssertEqual(requests.filter { $0.method == "GET" && ($0.path.hasSuffix(readingKey) || $0.path.hasSuffix(textKey)) }.count, 2)
             XCTAssertFalse(requests.contains { $0.path.hasSuffix(".zip") || $0.path.hasSuffix(".manifest") })
 
             try await clearServerRequests()
             await syncNow()
-            let unchanged = try await serverRequests().filter { $0.path.hasPrefix("/v1/") }
+            let unchanged = try await serverRequests().filter { $0.path.hasPrefix("/v1/kv") }
             XCTAssertEqual(unchanged.count, 1, "converged histories add no per-book requests: \(unchanged)")
             XCTAssertEqual(unchanged.first?.method, "GET")
             XCTAssertFalse(unchanged.contains { $0.path.hasPrefix("/v1/kv/") })
