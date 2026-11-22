@@ -571,7 +571,12 @@
 			files = ();
 			inputPaths = (
 				"$(SRCROOT)/tools/build-hoshi-core.sh",
-				"$(HOSHI_CORE_SOURCE)",
+				"$(HOSHI_CORE_SOURCE)/Cargo.lock",
+				"$(HOSHI_CORE_SOURCE)/Cargo.toml",
+				"$(HOSHI_CORE_SOURCE)/include/hoshi_core.h",
+				"$(HOSHI_CORE_SOURCE)/src/lib.rs",
+				"$(HOSHI_CORE_SOURCE)/src/streak.rs",
+				"$(HOSHI_CORE_SOURCE)/src/sync.rs",
 			);
 			name = "Build Hoshi Core";
 			outputPaths = (
