@@ -5,22 +5,9 @@
 //  Copyright © 2026 Manhhao.
 //  SPDX-License-Identifier: GPL-3.0-or-later
 //
-//  Generic key/value blob transport for the v2 sync protocol (see docs/HTTP_SYNC_KV.md). Ported
-//  byte-for-byte from the Android client (features/sync/http/HttpSyncKv.kt) so the two platforms
-//  talk to the same server. This file is intentionally schema-free: it knows keys, bytes,
-//  content-types, timestamps and etags, but not bookmarks, chat entries, manga or EPUB. The
-//  Hoshi-specific blob shapes live in SyncBlobs.swift; reconciliation lives in
-//  HttpSyncReconciler.swift; the reader-hot single-PUT pushes live in HttpSyncManager.swift.
-//
-//  Endpoints (all under the configured mount point + `/v1/kv...`):
-//   - PUT    /v1/kv/{key}                          upsert opaque bytes (preserves Content-Type)
-//   - GET    /v1/kv/{key}                          fetch bytes (nil on 404)
-//   - DELETE /v1/kv/{key}                          delete (204 and 404 both succeed)
-//   - GET    /v1/kv?prefix=&since=&cursor=&limit=  list key metadata, auto-paginated
-//   - POST   /v1/kv-multipart/start                begin a large-payload upload
-//   - PUT    /v1/kv-multipart/{id}/{part}          upload one raw part (1-based)
-//   - POST   /v1/kv-multipart/{id}/complete        finish, server concatenates parts
-//   - DELETE /v1/kv-multipart/{id}                 cancel an unfinished upload
+//  URLSession adapter for the shared Hoshi key/value sync protocol. Hoshi Core
+//  defines the server requests, multipart bodies and HTTP errors. URLSession owns
+//  the network, request pacing, streaming and system-managed background downloads.
 //
 
 import Foundation
@@ -243,7 +230,6 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     private let onTransfer: @Sendable (HttpSyncTransferSample) -> Void
 
     private static let jsonDecoder = JSONDecoder()
-    private static let jsonEncoder = JSONEncoder()
     private static let requestGate = HttpSyncRequestGate(minimumInterval: 0.150)
     private static let maxRateLimitRetries = 5
     /// Requests carry their own credentials. Reuse connections across the foreground lanes.
@@ -291,7 +277,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     // MARK: PUT
 
     @concurrent func put(key: String, contentType: String, body: Data) async throws -> HttpSyncKvWriteResponse {
-        var request = makeRequest("PUT", path: "/v1/kv/\(encodeKey(key))", contentType: contentType)
+        var request = try makeRequest("put", ["key": key, "contentType": contentType])
         request.httpBody = body
         let (data, response) = try await perform(request, uploadBody: body)
         try ensureSuccess(response: response, data: data)
@@ -304,7 +290,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         if size > multipartThresholdBytes {
             return try await putFileMultipart(key: key, contentType: contentType, fileURL: fileURL)
         }
-        var request = makeRequest("PUT", path: "/v1/kv/\(encodeKey(key))", contentType: contentType)
+        var request = try makeRequest("put", ["key": key, "contentType": contentType])
         onTransfer(.init(key: key, uploading: true, completed: 0, total: size))
         let (data, response) = try await uploadFile(request: &request, fileURL: fileURL) { [onTransfer] done in
             onTransfer(.init(key: key, uploading: true, completed: done, total: size))
@@ -317,7 +303,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     @concurrent func getBounded(key: String, maxBytes: Int) async throws -> HttpSyncKvFetched? {
         guard maxBytes >= 0 else { throw HttpSyncError("Invalid response size limit.") }
-        let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
+        let request = try makeRequest("get", ["key": key])
         for attempt in 0...Self.maxRateLimitRetries {
             try await Self.requestGate.wait()
             let (bytes, response) = try await session.bytes(for: request)
@@ -348,7 +334,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     @concurrent func get(key: String) async throws -> HttpSyncKvFetched? {
-        let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
+        let request = try makeRequest("get", ["key": key])
         let (data, response) = try await perform(request)
         guard let http = response as? HTTPURLResponse else {
             throw HttpSyncError("Sync server returned a non-HTTP response.")
@@ -364,7 +350,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     func downloadToFile(key: String, targetURL: URL) async throws -> HttpSyncKvFileFetched? {
-        let request = makeRequest("GET", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
+        let request = try makeRequest("get", ["key": key])
         if useBackgroundDownloads {
             for attempt in 0...Self.maxRateLimitRetries {
                 do {
@@ -380,7 +366,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
                             try await waitForRateLimit(response: http.response, attempt: attempt)
                             continue
                         }
-                        throw HttpSyncError(parseError(code: http.response.statusCode, rawBody: ""))
+                        throw HttpSyncError(parseError(code: http.response.statusCode, rawBody: ""), statusCode: http.response.statusCode)
                     }
                     guard attempt < 2, NetworkReachability.isNetworkFailure(error) else { throw error }
                     try await Task.sleep(for: .seconds(attempt + 1))
@@ -413,17 +399,12 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     // MARK: LIST
 
     @concurrent func list(prefix: String?, since: String?, cursor: String?, limit: Int?) async throws -> HttpSyncKvList {
-        // Encode query values the same way Android does (Java URLEncoder): `/`, `:` etc. are
-        // percent-encoded. URLComponents.percentEncodedQuery leaves `/` and `:` literal, which
-        // would diverge from the Android client and from servers that match query strings exactly.
-        var parts: [String] = []
-        if let prefix { parts.append("prefix=\(urlEncode(prefix))") }
-        if let since { parts.append("since=\(urlEncode(since))") }
-        if let cursor { parts.append("cursor=\(urlEncode(cursor))") }
-        if let limit { parts.append("limit=\(limit)") }
-        let query = parts.isEmpty ? "" : "?" + parts.joined(separator: "&")
-
-        let request = makeRequest("GET", path: "/v1/kv\(query)", contentType: nil)
+        var options: [String: Any] = [:]
+        if let prefix { options["prefix"] = prefix }
+        if let since { options["since"] = since }
+        if let cursor { options["cursor"] = cursor }
+        if let limit { options["limit"] = limit }
+        let request = try makeRequest("list", options)
         let (data, response) = try await perform(request)
         try ensureSuccess(response: response, data: data)
         do {
@@ -436,7 +417,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     // MARK: DELETE
 
     func delete(key: String) async throws {
-        let request = makeRequest("DELETE", path: "/v1/kv/\(encodeKey(key))", contentType: nil)
+        let request = try makeRequest("delete", ["key": key])
         let (data, response) = try await perform(request)
         guard let http = response as? HTTPURLResponse else {
             throw HttpSyncError("Sync server returned a non-HTTP response.")
@@ -448,9 +429,7 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
 
     // MARK: - Multipart upload
 
-    private struct MultipartStartRequest: Encodable { let key: String; let contentType: String }
     private struct MultipartStartResponse: Decodable { let uploadId: String }
-    private struct MultipartCompleteRequest: Encodable { let parts: [Int] }
     private struct MultipartCompleteResponse: Decodable {
         let key: String
         let lastModified: String
@@ -476,10 +455,8 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     private func startMultipartUpload(key: String, contentType: String) async throws -> String {
-        let body = try Self.jsonEncoder.encode(MultipartStartRequest(key: key, contentType: contentType))
-        var request = makeRequest("POST", path: "/v1/kv-multipart/start", contentType: "application/json; charset=utf-8")
-        request.httpBody = body
-        let (data, response) = try await perform(request, uploadBody: body)
+        let request = try makeRequest("multipart-start", ["key": key, "contentType": contentType])
+        let (data, response) = try await perform(request, uploadBody: request.httpBody)
         try ensureSuccess(response: response, data: data)
         do {
             return try Self.jsonDecoder.decode(MultipartStartResponse.self, from: data).uploadId
@@ -512,25 +489,14 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     private func uploadMultipartPart(uploadId: String, partNumber: Int, chunk: Data, progress: @escaping @Sendable (Int64) -> Void) async throws {
-        var request = makeRequest(
-            "PUT",
-            path: "/v1/kv-multipart/\(urlEncode(uploadId))/\(partNumber)",
-            contentType: "application/octet-stream"
-        )
-        request.httpBody = chunk
+        let request = try makeRequest("multipart-part", ["uploadId": uploadId, "partNumber": partNumber])
         let (data, response) = try await perform(request, uploadBody: chunk, progress: progress)
         try ensureSuccess(response: response, data: data)
     }
 
     private func completeMultipartUpload(uploadId: String, parts: [Int], fallbackContentType: String) async throws -> HttpSyncKvWriteResponse {
-        let body = try Self.jsonEncoder.encode(MultipartCompleteRequest(parts: parts))
-        var request = makeRequest(
-            "POST",
-            path: "/v1/kv-multipart/\(urlEncode(uploadId))/complete",
-            contentType: "application/json; charset=utf-8"
-        )
-        request.httpBody = body
-        let (data, response) = try await perform(request, uploadBody: body)
+        let request = try makeRequest("multipart-complete", ["uploadId": uploadId, "parts": parts])
+        let (data, response) = try await perform(request, uploadBody: request.httpBody)
         try ensureSuccess(response: response, data: data)
         do {
             let decoded = try Self.jsonDecoder.decode(MultipartCompleteResponse.self, from: data)
@@ -547,25 +513,28 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
     }
 
     private func cancelMultipartUploadQuietly(uploadId: String) async {
-        let request = makeRequest("DELETE", path: "/v1/kv-multipart/\(urlEncode(uploadId))", contentType: nil)
+        guard let request = try? makeRequest("multipart-abort", ["uploadId": uploadId]) else { return }
         // Best effort only; the user-facing error should be the original upload failure.
         _ = try? await session.data(for: request)
     }
 
     // MARK: - Networking primitives
 
-    private func makeRequest(_ method: String, path: String, contentType: String?) -> URLRequest {
-        let urlString = baseURL.trimmingTrailingSlashes() + path
-        // Path is pre-encoded; use the permissive initializer so already-encoded `%` and `/`
-        // are preserved rather than double-encoded.
-        let url = URL(string: urlString) ?? URL(fileURLWithPath: urlString)
+    private func makeRequest(_ action: String, _ options: [String: Any]) throws -> URLRequest {
+        var payload = options
+        payload["baseUrl"] = baseURL
+        payload["bearerToken"] = bearerToken
+        payload["action"] = action
+        guard let result = try HoshiCore.call("sync.request", payload: payload) as? [String: Any],
+              let urlString = result["url"] as? String, let url = URL(string: urlString),
+              let method = result["method"] as? String,
+              let headers = result["headers"] as? [String: String] else {
+            throw HttpSyncError("Could not prepare the HTTP Sync request.")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let contentType {
-            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        }
+        request.allHTTPHeaderFields = headers
+        request.httpBody = (result["body"] as? String).map { Data($0.utf8) }
         return request
     }
 
@@ -697,31 +666,9 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         response.value(forHTTPHeaderField: name)
     }
 
-    private struct ServerError: Decodable { let error: String? }
-
     private func parseError(code: Int, rawBody: String) -> String {
-        let message = (try? Self.jsonDecoder.decode(ServerError.self, from: Data(rawBody.utf8)))?
-            .error?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let detail = (message?.isEmpty == false) ? message : nil
-        switch code {
-        case 401:
-            return "Server rejected the bearer token (HTTP 401). Check the token in HTTP Sync settings."
-        case 403:
-            return "Server forbids this request (HTTP 403)."
-        case 404:
-            return "Not found on server (HTTP 404)."
-        case 413:
-            return "Body too large for the sync server (HTTP 413)."
-        case 429:
-            if let detail { return "Sync server rate limit reached (HTTP 429): \(detail)" }
-            return "Sync server rate limit reached (HTTP 429). The app waited and retried, but the server is still busy."
-        case 500...599:
-            if let detail { return "Server is having trouble (HTTP \(code)): \(detail)" }
-            return "Server is having trouble (HTTP \(code)). Try again in a moment."
-        default:
-            if let detail { return "HTTP \(code): \(detail)" }
-            return "HTTP sync request failed (HTTP \(code))."
-        }
+        (try? HoshiCore.call("sync.error-message", payload: ["status": code, "rawBody": rawBody]) as? String)
+            ?? "HTTP sync request failed (HTTP \(code))."
     }
 
     /// Turns raw URLSession errors into messages a user can act on.
@@ -745,31 +692,5 @@ nonisolated final class HttpSyncKvClient: HttpSyncKvTransport, @unchecked Sendab
         }
         let raw = nsError.localizedDescription
         return raw.isEmpty ? "HTTP sync request failed." : "Network error: \(raw)"
-    }
-
-    /// Encodes a key for use in the URL path. The server's grammar (`[A-Za-z0-9_.-]` per segment,
-    /// `/`-separated) needs no real percent-encoding, but routing each segment through a strict
-    /// allowed-character set keeps the client safe if a borderline character ever appears, and
-    /// preserves `/` as a path separator (matching Android's `encodeKey`).
-    private func encodeKey(_ key: String) -> String {
-        key.split(separator: "/", omittingEmptySubsequences: false)
-            .map { urlEncode(String($0)) }
-            .joined(separator: "/")
-    }
-
-    private func urlEncode(_ value: String) -> String {
-        // Match Java's URLEncoder semantics closely enough for the v2 key grammar: keep
-        // unreserved characters, percent-encode everything else.
-        var allowed = CharacterSet.alphanumerics
-        allowed.insert(charactersIn: "_-.~")
-        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
-    }
-}
-
-nonisolated private extension String {
-    func trimmingTrailingSlashes() -> String {
-        var s = self
-        while s.hasSuffix("/") { s.removeLast() }
-        return s
     }
 }

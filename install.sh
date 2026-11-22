@@ -76,6 +76,8 @@ for d in "${DEVICES[@]}"; do printf '  • %s  [%s]\n' "${d#*$'\t'}" "${d%%$'\t'
 # --- 2. Build + install + launch, per device -------------------------------
 # Per-device build is incremental after the first (just re-signs for that device),
 # and guarantees a brand-new device gets registered in the free-team profile.
+bash tools/prepare-hoshi-core.sh
+
 FAILED=0
 for d in "${DEVICES[@]}"; do
   UDID="${d%%$'\t'*}"; NAME="${d#*$'\t'}"

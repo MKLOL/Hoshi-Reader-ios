@@ -7,24 +7,33 @@ nonisolated struct ReadingStreakProgress {
     let todaySeconds: Double
 }
 
-nonisolated struct ReadingStreakRun {
-    private var lastDay: Date?
-    private var trailing = 0
-    private var longest = 0
-    private var count = 0
-
-    mutating func add(_ day: Date, calendar: Calendar) {
-        if let lastDay, day <= lastDay { return }
-        trailing = lastDay.map { ReadingDay.shift($0, by: 1, calendar: calendar) } == day ? trailing + 1 : 1
-        lastDay = day
-        longest = max(longest, trailing)
-        count += 1
-    }
-
-    func progress(today: Date, seconds: Double, calendar: Calendar) -> ReadingStreakProgress {
-        let active = lastDay == today || lastDay == ReadingDay.shift(today, by: -1, calendar: calendar)
-        return ReadingStreakProgress(current: active ? trailing : 0, longest: longest,
-                                     qualifyingDays: count, todaySeconds: seconds)
+nonisolated enum ReadingStreakRules {
+    static func run(_ days: some Sequence<DailyReading>, minimumSeconds: Double, through: Date,
+                    today: Date? = nil, calendar: Calendar, state: [String: Any]? = nil)
+        -> (progress: ReadingStreakProgress, state: [String: Any]) {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        func key(_ date: Date) -> String {
+            let parts = gregorian.dateComponents([.year, .month, .day], from: date)
+            return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+        }
+        let daily: [[Any]] = days.map { [key($0.date), $0.streakSeconds] }
+        var payload: [String: Any] = ["days": daily, "goal": minimumSeconds, "through": key(through)]
+        if let state { payload["state"] = state }
+        if let today { payload["today"] = key(today) }
+        do {
+            guard let result = try HoshiCore.call("streak.run", payload: payload) as? [String: Any],
+                  let state = result["state"] as? [String: Any],
+                  let current = result["current"] as? Int,
+                  let longest = result["longest"] as? Int,
+                  let count = result["count"] as? Int,
+                  let seconds = result["todaySeconds"] as? Double else {
+                preconditionFailure("Invalid shared streak result")
+            }
+            return (ReadingStreakProgress(current: current, longest: longest, qualifyingDays: count, todaySeconds: seconds), state)
+        } catch {
+            preconditionFailure("Could not compute reading streak: \(error)")
+        }
     }
 }
 
@@ -37,32 +46,25 @@ nonisolated struct ReadingStreakRun {
     private var goalSeconds: Double = 0
     private var calendar: Calendar?
     private var through: Date?
-    private var historical = ReadingStreakRun()
+    private var historical: [String: Any]?
 
     func compute(older: ArraySlice<DailyReading>, recent: ArraySlice<DailyReading>, historyRevision: UUID,
                  minimumSeconds: Double, today: Date, calendar: Calendar) -> ReadingStreakProgress {
         let endOfHistory = ReadingDay.shift(today, by: -3, calendar: calendar)
         if revision != historyRevision || goalSeconds != minimumSeconds || self.calendar != calendar ||
             (through.map { endOfHistory < $0 } ?? true) {
-            historical = ReadingStreakRun()
-            for day in older where day.date <= endOfHistory && day.streakSeconds >= minimumSeconds {
-                historical.add(day.date, calendar: calendar)
-            }
+            historical = ReadingStreakRules.run(older, minimumSeconds: minimumSeconds, through: endOfHistory, calendar: calendar).state
         } else if let previous = through, endOfHistory > previous {
-            // At rollover only the newly finished days enter the prefix.
             let matured = older.reversed().prefix { $0.date > previous }
-            for day in matured.reversed() where day.date <= endOfHistory && day.streakSeconds >= minimumSeconds {
-                historical.add(day.date, calendar: calendar)
-            }
+            historical = ReadingStreakRules.run(matured, minimumSeconds: minimumSeconds, through: endOfHistory,
+                                                calendar: calendar, state: historical).state
         }
         revision = historyRevision
         goalSeconds = minimumSeconds
         self.calendar = calendar
         through = endOfHistory
-        var run = historical
-        for day in recent where day.date > endOfHistory && day.date <= today && day.streakSeconds >= minimumSeconds {
-            run.add(day.date, calendar: calendar)
-        }
-        return run.progress(today: today, seconds: recent.first { $0.date == today }?.streakSeconds ?? 0, calendar: calendar)
+        let live = recent.lazy.filter { $0.date > endOfHistory }
+        return ReadingStreakRules.run(live, minimumSeconds: minimumSeconds, through: today, today: today,
+                                     calendar: calendar, state: historical).progress
     }
 }

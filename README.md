@@ -43,8 +43,14 @@ If you'd like to try out features early consider joining the TestFlight Beta
 
 ## Development
 
-1. Clone the repository.
-2. Open `HoshiReader.xcodeproj` in Xcode.
+1. Clone with `--recurse-submodules`, or run `git submodule update --init` after cloning.
+2. Install Rust 1.85 or newer. Run `rustup target add aarch64-apple-ios aarch64-apple-ios-sim` on Apple Silicon. For Intel simulators, add `x86_64-apple-ios`.
+3. Run `bash tools/prepare-hoshi-core.sh` to fetch the locked Rust dependencies.
+4. Open `Hoshi Reader.xcodeproj` in Xcode.
+
+The Android submodule pins the source for Hoshi Core, which Xcode builds for the
+selected destination. To adopt a tested shared-core change, update the submodule
+revision and run step 3 again.
 
 ## Contributing
 

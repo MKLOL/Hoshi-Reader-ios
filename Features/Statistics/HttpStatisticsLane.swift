@@ -102,7 +102,7 @@ nonisolated enum HttpStatisticsDecode {
     // Retain this preference on the wire for peers that still count in a shared zone.
     nonisolated static let zoneKey = "statistics.timeZone"
     static func load(defaults: UserDefaults = .standard) -> HttpStatisticsPreferences {
-        let goal = defaults.object(forKey: ReadingDay.goalKey) == nil ? 10 : min(120, max(1, defaults.integer(forKey: ReadingDay.goalKey)))
+        let goal = defaults.object(forKey: ReadingDay.goalKey) == nil ? 10 : ReadingDay.normalizedGoal(defaults.integer(forKey: ReadingDay.goalKey))
         let reset = ReadingDay.resetHour(defaults: defaults)
         let zone = defaults.string(forKey: zoneKey)
         var stamp = (defaults.object(forKey: stampKey) as? NSNumber)?.int64Value ?? 0
@@ -110,7 +110,7 @@ nonisolated enum HttpStatisticsDecode {
         return HttpStatisticsPreferences(streakMinimumMinutes: goal, dayResetHour: reset, updatedAt: stamp, timeZone: zone)
     }
     static func save(_ value: HttpStatisticsPreferences, defaults: UserDefaults = .standard) {
-        defaults.set(min(120, max(1, value.streakMinimumMinutes)), forKey: ReadingDay.goalKey)
+        defaults.set(ReadingDay.normalizedGoal(value.streakMinimumMinutes), forKey: ReadingDay.goalKey)
         defaults.set(min(23, max(0, value.dayResetHour)), forKey: ReadingDay.resetKey)
         defaults.set(value.updatedAt, forKey: stampKey)
         if let zone = value.timeZone, StatisticsZone.zone(zone) != nil { defaults.set(zone, forKey: zoneKey) }
@@ -121,7 +121,7 @@ nonisolated enum HttpStatisticsDecode {
         let old = value
         if let goal { value.streakMinimumMinutes = goal }
         if let reset { value.dayResetHour = reset }
-        value.streakMinimumMinutes = min(120, max(1, value.streakMinimumMinutes))
+        value.streakMinimumMinutes = ReadingDay.normalizedGoal(value.streakMinimumMinutes)
         value.dayResetHour = min(23, max(0, value.dayResetHour))
         guard value != old else { return }
         value.updatedAt = max(Int64(Date().timeIntervalSince1970 * 1000), value.updatedAt == .max ? .max : value.updatedAt + 1)

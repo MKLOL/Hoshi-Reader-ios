@@ -5,6 +5,7 @@ nonisolated enum ReadingDay {
     static var calendar: Calendar { StatisticsZone.calendar }
     static let resetKey = "statistics.dayResetHour"
     static let goalKey = "statistics.dailyGoalMinutes"
+    static func normalizedGoal(_ minutes: Int) -> Int { min(600, max(1, minutes)) }
     static let travelStartKey = "2026-11-01"
     private static let travelCutoverWindow: DateInterval = {
         let utc = StatisticsZone.calendar(zone: TimeZone(secondsFromGMT: 0)!)
@@ -153,9 +154,6 @@ nonisolated enum ReadingDay {
         return nil
     }
 
-    static func hourDay(_ hour: (date: Date, hour: Int), reset: Int, calendar: Calendar) -> Date {
-        hour.hour < reset ? shift(hour.date, by: -1, calendar: calendar) : hour.date
-    }
     static func hours(from start: Date, to end: Date, calendar: Calendar = .current, splitAt cutoff: Date? = nil) -> [String: Double] {
         guard end > start else { return [:] }
         var result: [String: Double] = [:], cursor = start
@@ -183,89 +181,40 @@ nonisolated enum ReadingDay {
     static func days(reading: [Statistics], text: [MangaTextStatistic]? = nil, resetHour: Int,
                      calendar: Calendar = StatisticsZone.calendar, historyCalendar: Calendar = StatisticsZone.historyCalendar,
                      includeLegacyStreakCredit: Bool = false) -> [DailyReading] {
-        let reset = min(23, max(0, resetHour)), rows = Statistics.merged(reading)
-        var seconds: [Date: Double] = [:], shares: [String: [Date: Double]] = [:], dateShares: [String: [Date: Double]] = [:]
-        var streakCredit: [Date: Double] = [:]
-        let cutover = travelCutover(resetHour: reset, historyCalendar: historyCalendar)
-        for row in rows {
-            guard let date = parse(row.dateKey, calendar: calendar), row.readingTime > 0 else { continue }
-            let previous = shift(date, by: -1, calendar: calendar)
-            // Even across the widest zone difference and a midnight-crossing sample,
-            // a row from November 5 onward cannot contain an October reading day.
-            let canContainHistory = row.dateKey < "2026-11-05"
-            let wallHours = row.wallClockHours
-            let source = canContainHistory && !wallHours.isEmpty
-                ? StatisticsZone.calendar(zone: row.historicalRecordingZone(target: historyCalendar.timeZone)) : historyCalendar
-            var grouped: [String: [(Calendar, Double)]] = [:]
-            if canContainHistory {
-                for id in row.readingTimeByZone.keys.sorted() {
-                    let zone = StatisticsZone.zone(id) ?? StatisticsZone.legacyZone
-                    let source = StatisticsZone.calendar(zone: zone)
-                    for (key, value) in row.readingTimeByZone[id]! where value.isFinite && value > 0 {
-                        grouped[key, default: []].append((source, value))
-                    }
+        let rows = Statistics.merged(reading)
+        let projectedRows: [[String: Any]] = rows.compactMap { row in
+            guard row.readingTime.isFinite, row.readingTime > 0 else { return nil }
+            var fields: [String: Any] = [
+                "key": row.key, "date": row.dateKey, "seconds": row.readingTime,
+                "updatedAt": row.lastStatisticModified,
+                "hours": row.readingTimeByHour.filter { $0.value.isFinite },
+                "zones": row.readingTimeByZone.mapValues { $0.filter { $0.value.isFinite } }
+            ]
+            if let timeZone = row.timeZone { fields["timeZone"] = timeZone }
+            return fields
+        }
+        let characterCounts = text.map { MangaTextStatistic.merged($0).map { ($0.key, $0.dateKey, $0.charactersRead) } }
+            ?? rows.map { ($0.key, $0.dateKey, $0.charactersRead) }
+        let characters: [[String: Any]] = characterCounts.compactMap { key, date, count in
+            count > 0 ? ["key": key, "date": date, "count": count] : nil
+        }
+        do {
+            let result = try HoshiCore.call("streak.project", payload: [
+                "rows": projectedRows, "characters": characters, "reset": resetHour,
+                "legacyZone": historyCalendar.timeZone.identifier, "includeCredit": includeLegacyStreakCredit
+            ])
+            guard let days = result as? [String: [String: NSNumber]] else {
+                preconditionFailure("Invalid shared reading days")
+            }
+            return days.compactMap { key, day in
+                parse(key, calendar: calendar).map { date in
+                    DailyReading(date: date, seconds: day["seconds"]?.doubleValue ?? 0,
+                        characters: Int(clamping: day["characters"]?.uint64Value ?? 0),
+                        legacyStreakCredit: day["streakCredit"]?.doubleValue ?? 0)
                 }
-            }
-            let hours = wallHours.flatMap { key, value -> [(Date, Double)] in
-                guard value.isFinite, value > 0, let local = hour(key, calendar: calendar),
-                      local.date == date || local.date == previous else { return [] }
-                let localDay = hourDay(local, reset: reset, calendar: calendar)
-                guard canContainHistory else { return [(localDay, value)] }
-                // The flat map is canonical; finer zone evidence must account for this hour.
-                let shares = grouped[key].flatMap { values in
-                    abs(values.reduce(0) { $0 + $1.1 } - value) <= 0.001 ? values : nil
-                } ?? [(source, value)]
-                return shares.map { source, seconds in
-                    guard source.timeZone != historyCalendar.timeZone,
-                          let instant = StatisticsZone.wallInstant(key, calendar: source), instant < cutover else {
-                        return (localDay, seconds)
-                    }
-                    let oldDay = ReadingDay.date(at: instant, resetHour: reset, calendar: historyCalendar)
-                    return (relabel(oldDay, from: historyCalendar, to: calendar) ?? localDay, seconds)
-                }
-            }
-            let known = hours.reduce(0.0) { StatisticsNumbers.adding($0, $1.1) }
-            let scale = known > row.readingTime ? row.readingTime / known : 1
-            func credit(_ day: Date, _ value: Double) {
-                guard value > 0 else { return }
-                seconds[day] = StatisticsNumbers.adding(seconds[day] ?? 0, value)
-                shares[row.key, default: [:]][day] = StatisticsNumbers.adding(shares[row.key]?[day] ?? 0, value)
-                dateShares[row.dateKey, default: [:]][day] = StatisticsNumbers.adding(dateShares[row.dateKey]?[day] ?? 0, value)
-            }
-            for (day, value) in hours { credit(day, value * scale) }
-            let untimed = max(0, row.readingTime - known * scale)
-            credit(date, untimed)
-            if includeLegacyStreakCredit, reset > 0, row.dateKey < travelStartKey, untimed > 0.001 {
-                streakCredit[previous] = StatisticsNumbers.adding(streakCredit[previous] ?? 0, untimed)
-            }
-        }
-        var byDate: [String: Int] = [:]
-        if let text {
-            for row in MangaTextStatistic.merged(text) { byDate[row.key] = StatisticsNumbers.adding(byDate[row.key] ?? 0, row.charactersRead) }
-        } else {
-            for row in rows { byDate[row.key] = StatisticsNumbers.adding(byDate[row.key] ?? 0, row.charactersRead) }
-        }
-        var characters: [Date: Int] = [:]
-        for (key, count) in byDate where count > 0 {
-            let dateKey = String(key.prefix(10))
-            guard let date = parse(dateKey, calendar: calendar) else { continue }
-            let dayShares = shares[key] ?? dateShares[dateKey] ?? [:], total = dayShares.values.reduce(0.0, StatisticsNumbers.adding)
-            if total == 0 { characters[date] = StatisticsNumbers.adding(characters[date] ?? 0, count); continue }
-            let exact = dayShares.mapValues { min(Double(count), Double(count) * ($0 / total)) }
-            var allocations = exact.mapValues { min(count, StatisticsNumbers.integer($0)) }
-            var remaining = count - allocations.values.reduce(0, StatisticsNumbers.adding)
-            for day in exact.keys.sorted(by: {
-                let first = exact[$0]! - Double(allocations[$0]!), second = exact[$1]! - Double(allocations[$1]!)
-                return first == second ? $0 < $1 : first > second
-            }) where remaining > 0 {
-                allocations[day]! += 1; remaining -= 1
-            }
-            for (day, value) in allocations { characters[day] = StatisticsNumbers.adding(characters[day] ?? 0, value) }
-        }
-        return Set(seconds.keys).union(characters.keys).union(streakCredit.keys).sorted().compactMap { date in
-            let day = DailyReading(date: date, seconds: seconds[date] ?? 0, characters: characters[date] ?? 0,
-                                   legacyStreakCredit: streakCredit[date] ?? 0)
-            return day.hasActivity || day.legacyStreakCredit > 0 ? day : nil
+            }.sorted { $0.date < $1.date }
+        } catch {
+            preconditionFailure("Could not calculate reading days: \(error)")
         }
     }
 }
@@ -381,11 +330,8 @@ nonisolated enum StatisticsMath {
     static func streak(_ days: [DailyReading], goalMinutes: Int, now: Date = .now, resetHour: Int = 0,
                        calendar: Calendar = StatisticsZone.calendar, historyCalendar: Calendar = StatisticsZone.historyCalendar) -> (current: Int, longest: Int) {
         let today = ReadingDay.today(at: now, resetHour: resetHour, calendar: calendar, historyCalendar: historyCalendar)
-        let goal = Double(min(120, max(1, goalMinutes))) * 60
-        let eligible = days.filter { $0.date <= today && $0.streakSeconds >= goal }.map(\.date).sorted()
-        var run = ReadingStreakRun()
-        for date in eligible { run.add(date, calendar: calendar) }
-        let progress = run.progress(today: today, seconds: 0, calendar: calendar)
+        let goal = Double(ReadingDay.normalizedGoal(goalMinutes)) * 60
+        let progress = ReadingStreakRules.run(days, minimumSeconds: goal, through: today, today: today, calendar: calendar).progress
         return (progress.current, progress.longest)
     }
     /// Clock-like, for playback positions; reading totals use `readingTime`.

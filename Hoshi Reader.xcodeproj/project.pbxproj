@@ -414,6 +414,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 48107AC22F114021009E12D1 /* Build configuration list for PBXNativeTarget "Hoshi Reader" */;
 			buildPhases = (
+				90D100000000000000000001 /* Build Hoshi Core */,
 				48107AB32F114021009E12D1 /* Sources */,
 				48107AB42F114021009E12D1 /* Frameworks */,
 				48107AB52F114021009E12D1 /* Resources */,
@@ -561,6 +562,27 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		90D100000000000000000001 /* Build Hoshi Core */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(SRCROOT)/tools/build-hoshi-core.sh",
+				"$(HOSHI_CORE_SOURCE)",
+			);
+			name = "Build Hoshi Core";
+			outputPaths = (
+				"$(TARGET_TEMP_DIR)/libhoshi_core.a",
+				"$(TARGET_TEMP_DIR)/hoshi-core",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "/bin/bash \"$SRCROOT/tools/build-hoshi-core.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		48107AB32F114021009E12D1 /* Sources */ = {
@@ -836,6 +858,7 @@
 				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HOSHI_CORE_SOURCE = "$(SRCROOT)/Dependencies/HoshiReaderAndroid/shared/hoshi-core";
 				INFOPLIST_FILE = "HoshiReader-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Hoshi;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -854,6 +877,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
+				OTHER_LDFLAGS = ("$(inherited)", "$(TARGET_TEMP_DIR)/libhoshi_core.a");
 				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshireader;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -861,6 +885,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_INTEROP_MODE = objcxx;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(HOSHI_CORE_SOURCE)/include/hoshi_core.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -878,6 +903,7 @@
 				DEVELOPMENT_TEAM = XR83Z84FJZ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				HOSHI_CORE_SOURCE = "$(SRCROOT)/Dependencies/HoshiReaderAndroid/shared/hoshi-core";
 				INFOPLIST_FILE = "HoshiReader-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Hoshi;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -896,6 +922,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = "$(inherited)";
+				OTHER_LDFLAGS = ("$(inherited)", "$(TARGET_TEMP_DIR)/libhoshi_core.a");
 				PRODUCT_BUNDLE_IDENTIFIER = com.dragosristache.hoshireader;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -903,6 +930,7 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_INTEROP_MODE = objcxx;
+				SWIFT_OBJC_BRIDGING_HEADER = "$(HOSHI_CORE_SOURCE)/include/hoshi_core.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 6.0;
 				TARGETED_DEVICE_FAMILY = "1,2";

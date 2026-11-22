@@ -1,0 +1,3 @@
+[submodule "HoshiReaderAndroid"]
+	path = Dependencies/HoshiReaderAndroid
+	url = https://github.com/MKLOL/Hoshi-Reader-Android.git

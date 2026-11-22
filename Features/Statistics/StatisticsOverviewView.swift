@@ -118,7 +118,8 @@ private struct StreakSections: View {
     }
 
     var body: some View {
-        let goalMinutes = min(120, max(1, goal))
+        let goalMinutes = ReadingDay.normalizedGoal(goal)
+        let maximumMinutes = max(120, goalMinutes)
         let goalSeconds = Double(goalMinutes) * 60
         let streak = ReadingStreakCache.shared.compute(older: days.older, recent: days.recent, historyRevision: days.revision,
             minimumSeconds: goalSeconds, today: readingDate, calendar: calendar)
@@ -164,13 +165,13 @@ private struct StreakSections: View {
                     Text(Self.minutes(shownGoal)).foregroundStyle(.secondary).monospacedDigit()
                 }
                 .accessibilityHidden(true)
-                // Rounded here rather than with `step:`, which draws 119 tick marks under the track.
-                Slider(value: Binding(get: { draftGoal ?? Double(goalMinutes) }, set: { draftGoal = $0.rounded() }), in: 1...120) {
+                // Rounded here rather than with `step:`, which draws a tick mark for every minute.
+                Slider(value: Binding(get: { draftGoal ?? Double(goalMinutes) }, set: { draftGoal = $0.rounded() }), in: 1...Double(maximumMinutes)) {
                     Text("Daily goal")
                 } minimumValueLabel: {
                     if !large { Text("1 min").font(.caption).foregroundStyle(.secondary) }
                 } maximumValueLabel: {
-                    if !large { Text("120 min").font(.caption).foregroundStyle(.secondary) }
+                    if !large { Text("\(maximumMinutes) min").font(.caption).foregroundStyle(.secondary) }
                 } onEditingChanged: { editing in
                     if !editing, let draftGoal { StatisticsPreferencesStore.choose(goal: Int(draftGoal)); self.draftGoal = nil }
                 }

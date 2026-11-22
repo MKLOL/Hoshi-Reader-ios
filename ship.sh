@@ -94,6 +94,7 @@ fi
 
 # The same production-client/real-server gate runs before any version mutation or archive.
 # It owns a disposable simulator and never wipes a developer's existing device.
+bash tools/prepare-hoshi-core.sh
 python3 tools/test_ios_parity.py
 
 # --- version -----------------------------------------------------------------

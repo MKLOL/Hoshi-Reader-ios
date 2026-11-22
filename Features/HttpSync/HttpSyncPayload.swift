@@ -116,7 +116,7 @@ nonisolated struct HttpSyncPayloadCodec {
         let cache = bookRoot.appendingPathComponent(httpSyncPayloadShaCacheFilename)
         guard let raw = try? String(contentsOf: cache, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
-              raw.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+              Self.isPayloadDigest(raw) else {
             return nil
         }
         return raw
@@ -127,7 +127,7 @@ nonisolated struct HttpSyncPayloadCodec {
         let cache = bookRoot.appendingPathComponent(httpSyncPayloadZipShaCacheFilename)
         guard let raw = try? String(contentsOf: cache, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
-              raw.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+              Self.isPayloadDigest(raw) else {
             return nil
         }
         return raw
@@ -150,7 +150,7 @@ nonisolated struct HttpSyncPayloadCodec {
 
     /// Establishes the baseline for an upgraded client that already has this book offline.
     func rememberPayloadSha(bookRoot: URL, sha: String) throws {
-        guard sha.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+        guard Self.isPayloadDigest(sha) else {
             throw HttpSyncError("Invalid payload sha256: \(sha)")
         }
         Self.writeCachedSha(bookRoot: bookRoot, sha: sha)
@@ -366,7 +366,7 @@ nonisolated struct HttpSyncPayloadCodec {
     /// fail a book upload, and local bytes are published only after content identity was proved.
     private func publishCloudCover(transport: HttpSyncKvTransport, syncId: String, bookRoot: URL, archiveSHA: String) async {
         let hash = String(archiveSHA.dropFirst("sha256:".count))
-        guard archiveSHA.hasPrefix("sha256:"), hash.count == 64, hash.allSatisfy({ $0.isHexDigit }) else { return }
+        guard Self.isPayloadDigest(archiveSHA) else { return }
         let key = "books/\(syncId)/cover/\(hash)"
         do {
             if try await transport.getBounded(key: key, maxBytes: 8 * 1024 * 1024) != nil { return }
@@ -402,6 +402,9 @@ nonisolated struct HttpSyncPayloadCodec {
             throw HttpSyncError("No payload manifest for \(syncId).")
         }
         let manifest = try Self.decodeManifest(fetchedManifest, keys: keys)
+        guard manifest.sizeBytes >= 0, Self.isPayloadDigest(manifest.sha256) else {
+            throw HttpSyncError("Payload manifest for \(syncId) has an invalid size or SHA-256 digest.")
+        }
         guard manifest.format == expectedFormat else {
             throw HttpSyncError(
                 "Payload manifest for \(syncId) declares \(manifest.format.rawValue), "
@@ -612,6 +615,10 @@ nonisolated struct HttpSyncPayloadCodec {
             return true
         }
         return false
+    }
+
+    private static func isPayloadDigest(_ digest: String) -> Bool {
+        (try? HoshiCore.call("sync.is-payload-digest", payload: ["digest": digest]) as? Bool) == true
     }
 
     private static func sha256OfFile(_ url: URL) throws -> String {
