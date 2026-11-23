@@ -384,7 +384,9 @@ final class MangaReaderViewModel {
     // MARK: Dictionary lookup (reuses the shared engine + popup model)
 
     private var lookupGeneration = 0
-    func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int, isVertical: Bool, isFullWidth: Bool) async -> Int? {
+    func handleTextSelection(_ selection: SelectionData, maxResults: Int, scanLength: Int,
+                             isVertical: Bool, isFullWidth: Bool,
+                             highlight: ((Int) async -> Bool)? = nil) async -> Int? {
         guard !Task.isCancelled else { return nil }
         lookupGeneration += 1
         let generation = lookupGeneration
@@ -395,7 +397,11 @@ final class MangaReaderViewModel {
             term: lookupResults.first.map { cxxStringToSwift($0.term.expression) },
             source: popups.contains { $0.showPopup } ? "popup" : "page", found: !lookupResults.isEmpty, page: pageIndex + 1)
         let dictionaryStyles = snapshot.styles
-        guard !lookupResults.isEmpty else { return nil }
+        guard let firstResult = lookupResults.first else { return nil }
+        let matchedLength = cxxStringToSwift(firstResult.matched).unicodeScalars.count
+        if let highlight {
+            guard await highlight(matchedLength), !Task.isCancelled, lookupGeneration == generation else { return nil }
+        }
         let popup = PopupItem(
             showPopup: false,
             currentSelection: selection,
@@ -408,17 +414,10 @@ final class MangaReaderViewModel {
         )
         popups.append(popup)
 
-        if let firstResult = lookupResults.first {
-            withAnimation(.default.speed(2.2)) {
-                popups = popups.map {
-                    var p = $0
-                    if p.id == popup.id { p.showPopup = true }
-                    return p
-                }
-            }
-            return cxxStringToSwift(firstResult.matched).unicodeScalars.count
+        withAnimation(.default.speed(2.2)) {
+            popups[popups.count - 1].showPopup = true
         }
-        return nil
+        return matchedLength
     }
 
     func closePopups() {

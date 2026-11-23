@@ -121,7 +121,7 @@ struct MangaTextSizePreview: View {
         ZStack {
             GeometryReader { geometry in
                 MangaReaderWebView(controller: controller, backgroundColor: .black,
-                    onNavigate: { _ in }, onTextSelected: { _ in nil }, onTapOutside: {},
+                    onNavigate: { _ in }, onTextSelected: { _, _ in }, onTapOutside: {},
                     onAskAi: { _, _ in }, onCopy: { _ in }, onPageReady: { _ in }, pageTurnEnabled: false)
                     .task(id: RenderRequest(page: pageIndex, config: renderConfig(size: geometry.size))) {
                         viewportSize = geometry.size

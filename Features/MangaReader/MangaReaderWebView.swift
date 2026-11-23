@@ -216,7 +216,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     /// Right-to-left manga paging: a right swipe moves forward (matches MangaPageNavigation).
     var onNavigate: (NavigationDirection) -> Void
     /// A revealed OCR word was tapped for lookup — drives the shared PopupView.
-    var onTextSelected: (SelectionData) async -> Int?
+    var onTextSelected: (SelectionData, @escaping (Int) async -> Bool) async -> Void
     /// Empty artwork tapped — dismiss any lookup popup.
     var onTapOutside: () -> Void
     /// A bubble's sparkles button was tapped — bubble text for the AI controller.
@@ -233,7 +233,7 @@ struct MangaReaderWebView: UIViewRepresentable {
     /// crop overlay and the go-to-page dialog so those aren't disturbed by a stray key/drag.
     var onBubbleRevealed: (String, String?) -> Void = { _, _ in }
     var pageTurnEnabled: Bool = true
-    var onLookupViewportMoved: () -> Void = {}
+    var onLookupDismissed: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -343,7 +343,7 @@ struct MangaReaderWebView: UIViewRepresentable {
             context.coordinator.allowedImagePaths = controller.allowedImagePaths
             controller.startupTrace?.mark("html_navigation_\(min(loadToken, 32))")
             let identity = controller.documentIdentity
-            context.coordinator.documentIdentity = identity
+            context.coordinator.beginDocument(identity)
             // The renderer can reapply its initial zoom on later layer commits. Give a
             // same-page reload the saved initial zoom while keeping the document's layout,
             // minimum/maximum scale and fixed image dimensions identical.
@@ -434,7 +434,12 @@ struct MangaReaderWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler,
                              WKURLSchemeHandler, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var selectionTask: Task<Void, Never>?
-        private var lookupViewport: MangaViewportState?
+        private struct LookupRequest {
+            let document: String
+            let selectionId: Int
+            let viewport: MangaViewportState?
+        }
+        private var lookup: LookupRequest?
         var preparedWebView: MangaWebViewPreloader.Prepared?
         var documentIdentity: String?
         weak var swipeLeftRecognizer: UISwipeGestureRecognizer?
@@ -483,6 +488,19 @@ struct MangaReaderWebView: UIViewRepresentable {
         }
 
         // MARK: Navigation
+
+        func beginDocument(_ identity: String) {
+            documentIdentity = identity
+            let wasLookingUp = lookup != nil
+            cancelLookup()
+            if wasLookingUp {
+                // updateUIView is still updating SwiftUI. Defer modifying the popup state.
+                Task { [weak self] in
+                    guard let self, self.lookup == nil else { return }
+                    self.parent.onLookupDismissed()
+                }
+            }
+        }
 
         func trackNavigation(_ navigation: WKNavigation, loadToken: Int) {
             scrollableBubbleRegions = []
@@ -615,7 +633,9 @@ struct MangaReaderWebView: UIViewRepresentable {
                   identity == documentIdentity, identity == parent.controller.documentIdentity else { return }
             switch message.name {
             case "textSelected":
-                guard let body = message.body as? [String: Any],
+                let body = payload
+                guard let selectionId = body["selectionId"] as? Int,
+                      let webView = message.webView, parent.controller.webView === webView,
                       let text = body["text"] as? String,
                       let sentence = body["sentence"] as? String,
                       let rect = messageRect(body["rect"]) else {
@@ -628,10 +648,15 @@ struct MangaReaderWebView: UIViewRepresentable {
                                               mangaBubbleRect: messageRect(body["mangaBubbleRect"]),
                                               mangaGlyphRect: messageRect(body["mangaGlyphRect"]),
                                               mangaLookupOnRight: body["mangaLookupOnRight"] as? Bool)
-                selectionTask?.cancel()
-                lookupViewport = parent.controller.captureViewport()
+                cancelLookup()
+                let request = LookupRequest(document: identity, selectionId: selectionId,
+                                            viewport: parent.controller.captureViewport())
+                lookup = request
                 selectionTask = Task {
-                    if let count = await parent.onTextSelected(selection), !Task.isCancelled { highlightSelection(count: count, in: message.webView) }
+                    guard isCurrentLookup(request, in: webView) else { return }
+                    await parent.onTextSelected(selection) { count in
+                        await self.highlightSelection(count: count, request: request, in: webView)
+                    }
                 }
             case "hoshiManga":
                 guard let body = message.body as? [String: Any] else { return }
@@ -658,23 +683,26 @@ struct MangaReaderWebView: UIViewRepresentable {
                         return CGRect(x: x, y: y, width: width, height: height)
                     }
                 case "bubbleRevealed":
+                    if lookup != nil {
+                        cancelLookup()
+                        parent.onLookupDismissed()
+                    }
                     parent.onBubbleRevealed(body["text"] as? String ?? "", body["blockId"] as? String)
                 case "selectedNothing":
-                    selectionTask?.cancel()
-                    lookupViewport = nil
+                    cancelLookup()
                     parent.onTapOutside() // empty artwork tap
                 default:
                     break
                 }
             case "hoshiMangaAi":
-                lookupViewport = nil
+                cancelLookup()
                 if let body = message.body as? [String: Any], let text = body["text"] as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     let blockId = (body["blockId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     if !trimmed.isEmpty { parent.onAskAi(trimmed, blockId) }
                 }
             case "hoshiMangaClipboard":
-                lookupViewport = nil
+                cancelLookup()
                 if let body = message.body as? [String: Any], let text = body["text"] as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty { parent.onCopy(trimmed) }
@@ -684,8 +712,26 @@ struct MangaReaderWebView: UIViewRepresentable {
             }
         }
 
-        private func highlightSelection(count: Int, in webView: WKWebView?) {
-            webView?.evaluateJavaScript("window.hoshiSelection.highlightSelection(\(count))") { _, _ in }
+        private func cancelLookup() {
+            lookup = nil
+            selectionTask?.cancel()
+            selectionTask = nil
+        }
+
+        private func isCurrentLookup(_ request: LookupRequest, in webView: WKWebView) -> Bool {
+            !Task.isCancelled && parent.controller.webView === webView &&
+                request.document == parent.controller.documentIdentity &&
+                lookup?.document == request.document && lookup?.selectionId == request.selectionId
+        }
+
+        private func highlightSelection(count: Int, request: LookupRequest, in webView: WKWebView) async -> Bool {
+            guard isCurrentLookup(request, in: webView) else { return false }
+            let marked = try? await webView.callAsyncJavaScript("""
+                return window.hoshiMangaDocumentIdentity === documentId &&
+                    window.hoshiSelection?.highlightSelection(count, selectionId) === true;
+                """, arguments: ["documentId": request.document, "selectionId": request.selectionId, "count": count],
+                contentWorld: .page)
+            return marked as? Bool == true && isCurrentLookup(request, in: webView)
         }
 
         func cancelImageReads() {
@@ -755,22 +801,32 @@ struct MangaReaderWebView: UIViewRepresentable {
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             parent.controller.syncHostViewport()
-            dismissLookupIfViewportMoved()
+            dismissLookupIfUserMovedViewport(scrollView)
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
             parent.controller.syncHostViewport()
-            dismissLookupIfViewportMoved()
+            dismissLookupIfUserMovedViewport(scrollView)
         }
 
-        private func dismissLookupIfViewportMoved() {
-            guard let before = lookupViewport, let current = parent.controller.captureViewport(),
+        private func dismissLookupIfUserMovedViewport(_ scrollView: UIScrollView) {
+            // Layout, viewport restoration and deceleration can all move the scroll view
+            // after a tap. Only a new active page gesture should dismiss its lookup.
+            guard scrollView.isDragging || scrollView.isZooming ||
+                    nativePanRecognizer?.state == .changed || nativePinchRecognizer?.state == .changed,
+                  let request = lookup, let before = request.viewport,
+                  let webView = parent.controller.webView,
+                  let current = parent.controller.captureViewport(),
                   abs(current.zoomScale - before.zoomScale) > 0.01 ||
-                  abs(current.offsetX - before.offsetX) > 1 || abs(current.offsetY - before.offsetY) > 1 else { return }
-            lookupViewport = nil
-            selectionTask?.cancel()
-            parent.controller.webView?.evaluateJavaScript("window.hoshiSelection?.clearSelection()") { _, _ in }
-            parent.onLookupViewportMoved()
+                    abs(current.offsetX - before.offsetX) > 1 || abs(current.offsetY - before.offsetY) > 1 else { return }
+            cancelLookup()
+            webView.callAsyncJavaScript("""
+                if (window.hoshiMangaDocumentIdentity === documentId) {
+                    window.hoshiSelection?.clearSelection(selectionId);
+                }
+                """, arguments: ["documentId": request.document, "selectionId": request.selectionId],
+                in: nil, in: .page) { _ in }
+            parent.onLookupDismissed()
         }
 
         @objc func observeNativePinch(_ gesture: UIPinchGestureRecognizer) {

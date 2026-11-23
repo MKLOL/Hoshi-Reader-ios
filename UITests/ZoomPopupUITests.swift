@@ -390,7 +390,7 @@ final class ZoomPopupUITests: XCTestCase {
 
         let boxFrame = bubble.frame
         let selection = app.descendants(matching: .any)["manga-selection-probe"].firstMatch
-        _ = try tapUntilSelectionProbeUpdates(app: app, boxFrame: boxFrame, visibleBounds: page.frame,
+        let word = try tapUntilSelectionProbeUpdates(app: app, boxFrame: boxFrame, visibleBounds: page.frame,
             probe: selection, offsets: [CGVector(dx: 0.06, dy: 0.3), CGVector(dx: 0.09, dy: 0.42)])
         let definition = app.staticTexts["Fixture cat definition"].firstMatch
         XCTAssertTrue(definition.waitForExistence(timeout: 5), selection.label)
@@ -404,7 +404,21 @@ final class ZoomPopupUITests: XCTestCase {
         XCTAssertFalse(cardFrame.intersects(translate.frame))
         XCTAssertFalse(cardFrame.intersects(copy.frame))
         XCTAssertTrue(translate.isHittable)
+        XCTAssertTrue(try hasYellowHighlight(in: bubble.frame, app: app), "The selected word must be visibly highlighted")
         saveScreenshot(app, name: "manga-dictionary-opposite-translate")
+
+        let otherBubble = app.switches.matching(NSPredicate(format: "label CONTAINS %@", "学校")).firstMatch
+        XCTAssertTrue(otherBubble.exists)
+        otherBubble.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: definition)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed, "Revealing a new bubble must close the old dictionary")
+        XCTAssertFalse(try hasYellowHighlight(in: boxFrame, app: app))
+
+        bubble.tap()
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: word.x, dy: word.y)).tap()
+        XCTAssertTrue(definition.waitForExistence(timeout: 5))
+        XCTAssertTrue(try hasYellowHighlight(in: bubble.frame, app: app), "Looking the word up again must restore its highlight")
+        saveScreenshot(app, name: "manga-highlight-after-reopening")
         translate.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.waitForExistence(timeout: 5))
     }
@@ -876,6 +890,26 @@ final class ZoomPopupUITests: XCTestCase {
         sleep(6)
         XCTAssertEqual(app.state, .runningForeground, "app crashed while browsing screenshot-heavy history")
         saveScreenshot(app, name: "ai-history-stress")
+    }
+
+    private func hasYellowHighlight(in frame: CGRect, app: XCUIApplication) throws -> Bool {
+        let image = try XCTUnwrap(XCUIScreen.main.screenshot().image.cgImage)
+        let scaleX = CGFloat(image.width) / app.frame.width
+        let scaleY = CGFloat(image.height) / app.frame.height
+        let region = CGRect(x: (frame.minX - app.frame.minX) * scaleX, y: (frame.minY - app.frame.minY) * scaleY,
+                            width: frame.width * scaleX, height: frame.height * scaleY).integral
+        let crop = try XCTUnwrap(image.cropping(to: region))
+        let width = crop.width, height = crop.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        try pixels.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        return stride(from: 0, to: pixels.count, by: 4).filter {
+            pixels[$0] > 225 && (160...240).contains(pixels[$0 + 1]) && pixels[$0 + 2] < 65
+        }.count > 10
     }
 
     /// Attaches a full-screen screenshot to the test result (kept even when the test passes).

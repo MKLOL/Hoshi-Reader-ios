@@ -219,7 +219,6 @@ nonisolated enum MangaPageHtml {
         viewportCssHeight: Int,
         useNotoSansJpFont: Bool
     ) -> String {
-        let matchedWordHighlight = "::highlight(hoshi-selection) { background: #ffd400; color: #000; }"
         let ocrBoxFontFamilyRule = useNotoSansJpFont
             ? "font-family: 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', sans-serif;"
             : ""
@@ -311,7 +310,16 @@ nonisolated enum MangaPageHtml {
           text-orientation: upright;
         }
         .ocr-box p {
+          position: relative;
           margin: 0;
+        }
+        .manga-word-highlight { display: contents; }
+        .manga-word-highlight span {
+          position: absolute;
+          z-index: 1;
+          pointer-events: none;
+          background: #ffd400;
+          mix-blend-mode: multiply;
         }
         .ocr-box.has-furigana { line-height: 1.7; padding: 0.5em 0.15em 0.15em; }
         .ocr-box.has-furigana.vertical { padding: 0.15em 0.5em 0.15em 0.15em; }
@@ -384,7 +392,6 @@ nonisolated enum MangaPageHtml {
           vector-effect: non-scaling-stroke;
         }
         ::selection { background: rgba(70, 130, 220, 0.45); }
-        \(matchedWordHighlight)
         """
     }
 
@@ -762,6 +769,8 @@ nonisolated enum MangaPageHtml {
           h.hoshiManga.postMessage({documentIdentity: window.hoshiMangaDocumentIdentity, event:'scrollableBubbleRegions', regions:regions});
         },
         annotationBaseHit: function(box, x, y) {
+          var clip = box.querySelector('.furigana-scroll p')?.getBoundingClientRect();
+          if (clip && (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom)) return null;
           var annotations = box.querySelectorAll('rt');
           for (var i = 0; i < annotations.length; i++) {
             var rects = annotations[i].getClientRects();
@@ -780,7 +789,49 @@ nonisolated enum MangaPageHtml {
           range.setStart(hit.node, hit.offset);
           range.setEnd(hit.node, hit.offset + String.fromCodePoint(hit.node.textContent.codePointAt(hit.offset)).length);
           var rect = range.getBoundingClientRect();
-          return window.hoshiSelection.selectText(rect.left + rect.width / 2, rect.top + rect.height / 2, maxLength);
+          // In a scrolled ruby bubble the reading can be visible while its base glyph is clipped.
+          // Bring the glyph into view inside this paragraph and keep the exact tapped word.
+          var paragraph = hit.node.parentElement.closest('.furigana-scroll p');
+          if (paragraph) {
+            var clip = paragraph.getBoundingClientRect();
+            var dx = rect.left < clip.left ? rect.left - clip.left : Math.max(0, rect.right - clip.right);
+            var dy = rect.top < clip.top ? rect.top - clip.top : Math.max(0, rect.bottom - clip.bottom);
+            if (dx || dy) {
+              paragraph.scrollBy(dx, dy);
+              rect = range.getBoundingClientRect();
+            }
+          }
+          return window.hoshiSelection.selectText(rect.left + rect.width / 2, rect.top + rect.height / 2, maxLength, hit);
+        },
+        paintWordHighlight: function(ranges) {
+          this.clearWordHighlight();
+          var paragraph = ranges[0].startContainer.parentElement.closest('.ocr-box.revealed p');
+          if (!paragraph) return false;
+          var origin = paragraph.getBoundingClientRect();
+          // Use the glyph rectangles directly. WebKit can retain a custom highlight's DOM
+          // range but stop painting it when a vertical or ruby bubble is hidden and reopened.
+          var highlight = document.createElement('span');
+          highlight.className = 'manga-word-highlight';
+          highlight.setAttribute('aria-hidden', 'true');
+          ranges.forEach(function(range) {
+            Array.from(range.getClientRects()).forEach(function(rect) {
+              if (rect.width <= 0 || rect.height <= 0) return;
+              var mark = document.createElement('span');
+              mark.style.left = (rect.left - origin.left + paragraph.scrollLeft) + 'px';
+              mark.style.top = (rect.top - origin.top + paragraph.scrollTop) + 'px';
+              mark.style.width = rect.width + 'px';
+              mark.style.height = rect.height + 'px';
+              highlight.appendChild(mark);
+            });
+          });
+          if (!highlight.firstChild) return false;
+          paragraph.appendChild(highlight);
+          this.wordHighlight = highlight;
+          return true;
+        },
+        clearWordHighlight: function() {
+          this.wordHighlight?.remove();
+          this.wordHighlight = null;
         },
         clearRevealed: function() {
           this.actionBox = null;
@@ -1359,7 +1410,7 @@ nonisolated enum MangaPageHtml {
               window.hoshiManga.placeActions(box);
             }
             if (alreadyRevealed || window.hoshiManga.singleTapLookupValue) {
-              if (initialHit) return this.selectBaseHit(initialHit, maxLength);
+              if (initialHit && box.contains(initialHit.node)) return this.selectBaseHit(initialHit, maxLength);
               var annotationHit = this.annotationBaseHit(box, x, y);
               return annotationHit ? this.selectBaseHit(annotationHit, maxLength) : window.hoshiSelection.selectText(x, y, maxLength);
             }

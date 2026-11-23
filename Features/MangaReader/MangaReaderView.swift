@@ -401,17 +401,18 @@ struct MangaReaderView: View {
                     guard pageNavigationEnabled else { return }
                     model.navigate(direction)
                 },
-                onTextSelected: { selection in
+                onTextSelected: { selection, highlight in
                     if uiTestingEnabled {
                         uiTestSelectionProbe = uiTestProbeLabel(for: selection)
                     }
                     model.closePopups()
-                    return await model.handleTextSelection(
+                    _ = await model.handleTextSelection(
                         selection,
                         maxResults: userConfig.maxResults,
                         scanLength: userConfig.scanLength,
                         isVertical: false,
-                        isFullWidth: userConfig.popupFullWidth
+                        isFullWidth: userConfig.popupFullWidth,
+                        highlight: highlight
                     )
                 },
                 onTapOutside: {
@@ -451,7 +452,7 @@ struct MangaReaderView: View {
                 // translation, history, settings, statistics, crop or page-jump presentation.
                 onBubbleRevealed: { text, block in model.usage?.reveal(text: text, block: block, page: model.pageIndex + 1) },
                 pageTurnEnabled: pageNavigationEnabled,
-                onLookupViewportMoved: { model.closePopups() }
+                onLookupDismissed: { model.closePopups() }
             )
             // One reused WebView (matches the Android single-WebView model).
             .offset(x: webViewOffset)

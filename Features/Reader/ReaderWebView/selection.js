@@ -8,6 +8,7 @@
 
 window.hoshiSelection = {
     selection: null,
+    nextSelectionId: 0,
     scanDelimiters: '。、！？…‥「」『』（）()【】〈〉《》〔〕｛｝{}［］[]・：；:;，,.─\n\r',
     sentenceDelimiters: '。！？.!?\n\r',
     trailingSentenceChars: '。、！？…‥」』）)】〉》〕｝}］]',
@@ -99,6 +100,7 @@ window.hoshiSelection = {
 
         const walker = this.createWalker(container);
         const range = document.createRange();
+        const clip = container.querySelector('.furigana-scroll p')?.getBoundingClientRect();
         let node;
         let best = null;
         let bestDistance = Infinity;
@@ -121,8 +123,14 @@ window.hoshiSelection = {
                 range.setStart(node, start);
                 range.setEnd(node, end);
                 const rects = range.getClientRects();
-                for (const rect of rects) {
-                    if (rect.width <= 0 || rect.height <= 0) {
+                for (const glyph of rects) {
+                    const rect = clip ? {
+                        left: Math.max(glyph.left, clip.left),
+                        right: Math.min(glyph.right, clip.right),
+                        top: Math.max(glyph.top, clip.top),
+                        bottom: Math.min(glyph.bottom, clip.bottom)
+                    } : glyph;
+                    if (rect.right <= rect.left || rect.bottom <= rect.top) {
                         continue;
                     }
                     if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
@@ -330,7 +338,7 @@ window.hoshiSelection = {
         return sentence.slice(startSlice, endSlice + 1).trim();
     },
     
-    selectText(x, y, maxLength) {
+    selectText(x, y, maxLength, resolvedHit) {
         // A sentence-translation button is handled here rather than with its own click listener:
         // the reader drives selection from a native tap recognizer, so a competing JS listener
         // would race it. Checking first means one tap does exactly one thing.
@@ -343,7 +351,7 @@ window.hoshiSelection = {
             return null;
         }
 
-        const hit = this.getCharacterAtPoint(x, y);
+        const hit = resolvedHit ?? this.getCharacterAtPoint(x, y);
         
         if (!hit) {
             this.clearSelection();
@@ -404,6 +412,7 @@ window.hoshiSelection = {
         }
         
         this.selection = {
+            id: ++this.nextSelectionId,
             startNode: hit.node,
             startOffset: hit.offset,
             ranges,
@@ -415,6 +424,7 @@ window.hoshiSelection = {
         const rect = this.getSelectionRect(x, y);
         webkit.messageHandlers.textSelected.postMessage({
             documentIdentity: window.hoshiMangaDocumentIdentity ?? null,
+            selectionId: this.selection.id,
             text,
             sentence,
             rect,
@@ -490,9 +500,9 @@ window.hoshiSelection = {
         return this.getPointSelectionRect(x, y);
     },
     
-    highlightSelection(charCount) {
-        if (!this.selection?.ranges.length) {
-            return;
+    highlightSelection(charCount, selectionId) {
+        if (!this.selection?.ranges.length || (selectionId !== undefined && this.selection.id !== selectionId)) {
+            return false;
         }
         
         const highlights = [];
@@ -516,7 +526,16 @@ window.hoshiSelection = {
             highlights.push(range);
         }
         
-        CSS.highlights?.set('hoshi-selection', new Highlight(...highlights));
+        if (!highlights.length) {
+            return false;
+        }
+        if (window.hoshiManga && !window.hoshiManga.paintWordHighlight(highlights)) {
+            return false;
+        }
+        if (CSS.highlights) {
+            CSS.highlights.set('hoshi-selection', new Highlight(...highlights));
+        }
+        return Boolean(window.hoshiManga || CSS.highlights);
     },
     
     getNormalizedOffset(targetNode, offset) {
@@ -532,9 +551,13 @@ window.hoshiSelection = {
         return count;
     },
     
-    clearSelection() {
+    clearSelection(selectionId) {
+        if (selectionId !== undefined && this.selection?.id !== selectionId) {
+            return;
+        }
         window.getSelection()?.removeAllRanges();
         CSS.highlights?.get('hoshi-selection')?.clear();
+        window.hoshiManga?.clearWordHighlight();
         this.selection = null;
     }
 };

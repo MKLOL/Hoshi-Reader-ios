@@ -240,7 +240,7 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         var ready: XCTestExpectation?
         window.rootViewController = UIHostingController(rootView:
             MangaReaderWebView(controller: controller, backgroundColor: .black,
-                onNavigate: { _ in }, onTextSelected: { _ in nil }, onTapOutside: {},
+                onNavigate: { _ in }, onTextSelected: { _, _ in }, onTapOutside: {},
                 onAskAi: { _, _ in }, onCopy: { _ in }, onPageReady: { _ in ready?.fulfill() },
                 pageTurnEnabled: false)
                 .ignoresSafeArea())
@@ -678,7 +678,16 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
           const highlights = CSS.highlights.get('hoshi-selection');
           return Array.from(highlights || [], range => range.toString()).join('');
         }
-        const beforeScroll = highlighted();
+        function highlightFollowsGlyphs() {
+          const marks = [...p.querySelectorAll('.manga-word-highlight span')];
+          const ranges = [...(CSS.highlights.get('hoshi-selection') ?? [])];
+          const glyphs = ranges.flatMap(range => [...range.getClientRects()]);
+          return marks.length > 0 && marks.length === glyphs.length && marks.every((mark, i) => {
+            const r = mark.getBoundingClientRect();
+            return ['left', 'top', 'width', 'height'].every(key => Math.abs(r[key] - glyphs[i][key]) < 1);
+          });
+        }
+        const beforeScroll = highlighted(), alignedBefore = highlightFollowsGlyphs();
         const scrolled = new Promise(resolve => {
           const timeout = setTimeout(() => resolve(false), 1000);
           p.addEventListener('scroll', () => { clearTimeout(timeout); resolve(true); }, {once: true});
@@ -686,16 +695,210 @@ nonisolated final class MangaReadabilityParityTests: XCTestCase {
         p.scrollLeft = -100;
         p.scrollTop = 100;
         const moved = await scrolled;
-        const afterScroll = highlighted();
+        const afterScroll = highlighted(), alignedAfter = highlightFollowsGlyphs();
         manga.clearRevealed();
-        return { selected, moved, beforeScroll, afterScroll, afterDismissal: highlighted() };
+        return { selected, moved, beforeScroll, afterScroll, alignedBefore, alignedAfter,
+          afterDismissal: highlighted(), visibleMarksAfterDismissal: p.querySelectorAll('.manga-word-highlight span').length };
         """, contentWorld: .page)
         let result = try XCTUnwrap(marked as? [String: Any])
         XCTAssertTrue((result["selected"] as? String)?.hasPrefix("学校") ?? false)
         XCTAssertEqual(result["moved"] as? Bool, true)
         XCTAssertEqual(result["beforeScroll"] as? String, "学校")
         XCTAssertEqual(result["afterScroll"] as? String, "学校")
+        XCTAssertEqual(result["alignedBefore"] as? Bool, true)
+        XCTAssertEqual(result["alignedAfter"] as? Bool, true)
         XCTAssertEqual(result["afterDismissal"] as? String, "")
+        XCTAssertEqual(result["visibleMarksAfterDismissal"] as? Int, 0)
+    }
+
+    @MainActor func testOldLookupCannotPaintOrClearNewWord() async throws {
+        let viewport = CGSize(width: 500, height: 500)
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "selection", withExtension: "js"))
+        let script = try String(contentsOf: url, encoding: .utf8)
+        let browser = try MangaTestBrowser(viewport: viewport)
+        defer { browser.close() }
+        try await load(await MangaPageRenderCache().htmlFor(page: page,
+            config: config(viewport: viewport, selectionScript: script)), in: browser)
+
+        let value = try await browser.web.callAsyncJavaScript("""
+        const p = document.querySelector('.ocr-box p'), manga = window.hoshiManga;
+        p.textContent = '猫。学校。';
+        p.closest('.ocr-box').classList.add('revealed');
+        const selection = window.hoshiSelection;
+        const tap = offset => manga.selectBaseHit({node:p.firstChild, offset}, 16);
+        const first = tap(0), firstId = selection.selection.id;
+        const second = tap(2), secondId = selection.selection.id;
+        const marked = selection.highlightSelection(2, secondId);
+        const oldMarked = selection.highlightSelection(1, firstId);
+        selection.clearSelection(firstId);
+        const text = [...CSS.highlights.get('hoshi-selection')].map(range => range.toString()).join('');
+        selection.clearSelection(secondId);
+        return {first, second, marked, oldMarked, text, cleared: CSS.highlights.get('hoshi-selection').size === 0};
+        """, contentWorld: .page)
+        let fields = try XCTUnwrap(value as? [String: Any])
+        XCTAssertEqual(fields["first"] as? String, "猫")
+        XCTAssertEqual(fields["second"] as? String, "学校")
+        XCTAssertEqual(fields["marked"] as? Bool, true)
+        XCTAssertEqual(fields["oldMarked"] as? Bool, false)
+        XCTAssertEqual(fields["text"] as? String, "学校")
+        XCTAssertEqual(fields["cleared"] as? Bool, true)
+    }
+
+    @MainActor func testTappingVisibleRubyScrollsItsClippedBaseIntoView() async throws {
+        let viewport = CGSize(width: 500, height: 500)
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "selection", withExtension: "js"))
+        let script = try String(contentsOf: url, encoding: .utf8)
+        let browser = try MangaTestBrowser(viewport: viewport)
+        defer { browser.close() }
+        try await load(await MangaPageRenderCache().htmlFor(page: page,
+            config: config(viewport: viewport, selectionScript: script)), in: browser)
+
+        let value = try await browser.web.callAsyncJavaScript("""
+        const frame = document.querySelector('.frame'), box = document.querySelector('.ocr-box');
+        Object.assign(frame.style, {width:'500px', height:'500px'});
+        box.className = 'ocr-box vertical revealed has-furigana furigana-scroll';
+        box.style.cssText = 'left:150px;top:100px;width:80px;height:180px;font-size:24px';
+        const p = box.querySelector('p'), manga = window.hoshiManga;
+        p.innerHTML = Array(40).fill('<ruby><span>学校</span><rt>がっこう</rt></ruby>だ').join(String.fromCharCode(10));
+        const clip = p.getBoundingClientRect();
+        const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+        const ranges = document.createRange();
+        const annotations = [...p.querySelectorAll('rt')];
+        for (let offset = 0; offset < 80; offset++) {
+          p.scrollLeft = -offset;
+          for (const rt of annotations) {
+            const annotation = rt.getBoundingClientRect();
+            if (!overlaps(annotation, clip)) continue;
+            const base = rt.previousElementSibling.firstChild;
+            ranges.selectNodeContents(base);
+            if (overlaps(ranges.getBoundingClientRect(), clip)) continue;
+            const x = Math.max(clip.left + 0.1, Math.min(clip.right - 0.1, (annotation.left + annotation.right) / 2));
+            const y = Math.max(clip.top + 0.1, Math.min(clip.bottom - 0.1, (annotation.top + annotation.bottom) / 2));
+            const hit = manga.annotationBaseHit(box, x, y);
+            if (hit?.node !== base) continue;
+            const selected = manga.handleTap(x, y, 16);
+            window.hoshiSelection.highlightSelection(2);
+            const marked = [...(CSS.highlights.get('hoshi-selection') ?? [])];
+            return {selected, word: marked.map(range => range.toString()).join(''),
+              glyphVisible: marked.some(range => [...range.getClientRects()].some(rect => overlaps(rect, clip)))};
+          }
+        }
+        return {selected: null, word: null, glyphVisible: false};
+        """, contentWorld: .page)
+        let fields = try XCTUnwrap(value as? [String: Any])
+        XCTAssertTrue((fields["selected"] as? String)?.hasPrefix("学校") == true, String(describing: fields))
+        XCTAssertEqual(fields["word"] as? String, "学校")
+        XCTAssertEqual(fields["glyphVisible"] as? Bool, true)
+    }
+
+    @MainActor func testMangaLookupTracksBubbleAndDocumentAcrossAsyncPaintAndViewportChanges() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        let controller = MangaWebViewController()
+        let ready = expectation(description: "Initial page ready")
+        var onReady: (() -> Void)? = { ready.fulfill() }
+        var resumeLookup: CheckedContinuation<Void, Never>?
+        let lookupPending = expectation(description: "First dictionary lookup is pending")
+        var onLookupEnd: ((Bool) -> Void)?
+        var onDismiss: (() -> Void)?
+        let host = UIHostingController(rootView: MangaReaderWebView(controller: controller, backgroundColor: .black,
+            onNavigate: { _ in }, onTextSelected: { selection, highlight in
+                let cat = selection.text == "猫"
+                if cat {
+                    await withCheckedContinuation { continuation in
+                        resumeLookup = continuation
+                        lookupPending.fulfill()
+                    }
+                }
+                let marked = await highlight(cat ? 1 : 2)
+                onLookupEnd?(marked)
+            }, onTapOutside: {}, onAskAi: { _, _ in }, onCopy: { _ in },
+            onPageReady: { _ in onReady?() }, pageTurnEnabled: false,
+            onLookupDismissed: { onDismiss?() }).ignoresSafeArea())
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            resumeLookup?.resume()
+            window.isHidden = true
+            window.rootViewController = nil
+            previous?.makeKeyAndVisible()
+        }
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "selection", withExtension: "js"))
+        let script = try String(contentsOf: url, encoding: .utf8)
+        let fixture = MokuroPage(index: 0, imagePath: "fixture.png", imageWidth: 500, imageHeight: 780,
+            textBoxes: [
+                MokuroTextBox(left: 100, top: 140, width: 140, height: 80, fontSize: 34, vertical: false, lines: ["猫"]),
+                MokuroTextBox(left: 200, top: 300, width: 140, height: 80, fontSize: 34, vertical: false, lines: ["学校"])
+            ])
+        let html = await MangaPageRenderCache().htmlFor(page: fixture,
+            config: config(furigana: false, viewport: window.bounds.size, selectionScript: script))
+        controller.load(html: html, allowedImagePaths: [])
+        await fulfillment(of: [ready], timeout: 10)
+        onReady = nil
+
+        func findWebView(_ view: UIView) -> WKWebView? {
+            (view as? WKWebView) ?? view.subviews.lazy.compactMap(findWebView).first
+        }
+        let web = try XCTUnwrap(findWebView(host.view))
+        func tap(_ index: Int) async throws -> String? {
+            try await web.callAsyncJavaScript("""
+            const p = document.querySelectorAll('.ocr-box p')[index];
+            const range = document.createRange();
+            range.setStart(p.firstChild, 0);
+            range.setEnd(p.firstChild, 1);
+            const r = range.getBoundingClientRect();
+            return window.hoshiManga.handleTap(r.left + r.width / 2, r.top + r.height / 2, 16);
+            """, arguments: ["index": index], contentWorld: .page) as? String
+        }
+        func markedWord() async throws -> String? {
+            try await web.evaluateJavaScript("""
+            [...(CSS.highlights.get('hoshi-selection') ?? [])].map(range => range.toString()).join('')
+            """) as? String
+        }
+
+        let catRevealed = try await tap(0)
+        let catTapped = try await tap(0)
+        XCTAssertEqual(catRevealed, "__revealed__")
+        XCTAssertEqual(catTapped, "猫")
+        await fulfillment(of: [lookupPending], timeout: 5)
+        let invalidated = expectation(description: "Changing bubbles dismisses the pending lookup")
+        onDismiss = { invalidated.fulfill() }
+        let schoolRevealed = try await tap(1)
+        XCTAssertEqual(schoolRevealed, "__revealed__")
+        await fulfillment(of: [invalidated], timeout: 5)
+        onDismiss = { XCTFail("Unexpected lookup dismissal") }
+        let oldLookupFinished = expectation(description: "Old lookup cannot present")
+        onLookupEnd = { painted in
+            XCTAssertFalse(painted)
+            oldLookupFinished.fulfill()
+        }
+        try XCTUnwrap(resumeLookup).resume()
+        resumeLookup = nil
+        await fulfillment(of: [oldLookupFinished], timeout: 5)
+
+        let newLookupFinished = expectation(description: "New lookup presents only after highlighting")
+        onLookupEnd = { painted in
+            XCTAssertTrue(painted)
+            newLookupFinished.fulfill()
+        }
+        let schoolTapped = try await tap(1)
+        XCTAssertEqual(schoolTapped, "学校")
+        await fulfillment(of: [newLookupFinished], timeout: 5)
+        controller.restoreViewport(MangaViewportState(zoomScale: 1.4, offsetX: 12, offsetY: 30))
+        XCTAssertGreaterThan(try XCTUnwrap(controller.captureViewport()).zoomScale, 1.2)
+        let afterLayout = try await markedWord()
+        XCTAssertEqual(afterLayout, "学校", "An unrelated viewport adjustment must keep the highlighted word")
+
+        let reloaded = expectation(description: "Replacement page ready")
+        let closedOnReload = expectation(description: "Replacing the document dismisses its lookup")
+        onReady = { reloaded.fulfill() }
+        onDismiss = { closedOnReload.fulfill() }
+        controller.reissueCurrentPage()
+        controller.reissueCurrentPage()
+        await fulfillment(of: [closedOnReload, reloaded], timeout: 10)
+        let afterReload = try await markedWord()
+        XCTAssertEqual(afterReload, "")
     }
 
     func testImageLoaderRejectsAnObsoleteBooksNamespace() async throws {
