@@ -419,6 +419,20 @@ final class ZoomPopupUITests: XCTestCase {
         XCTAssertTrue(definition.waitForExistence(timeout: 5))
         XCTAssertTrue(try hasYellowHighlight(in: bubble.frame, app: app), "Looking the word up again must restore its highlight")
         saveScreenshot(app, name: "manga-highlight-after-reopening")
+
+        app.buttons["manga-options-menu"].tap()
+        app.buttons["Manga"].tap()
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        done.tap()
+        XCTAssertTrue(translate.waitForExistence(timeout: 5), "Returning from settings must preserve the revealed bubble")
+        XCTAssertFalse(definition.exists)
+        XCTAssertFalse(try hasYellowHighlight(in: bubble.frame, app: app), "Closing the dictionary from the reader menu must also clear its highlight")
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: word.x, dy: word.y)).tap()
+        XCTAssertTrue(definition.waitForExistence(timeout: 5), "The same word should reopen with one tap")
+        XCTAssertTrue(try hasYellowHighlight(in: bubble.frame, app: app))
+        saveScreenshot(app, name: "manga-highlight-after-settings")
+
         translate.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "UI1OK")).firstMatch.waitForExistence(timeout: 5))
     }

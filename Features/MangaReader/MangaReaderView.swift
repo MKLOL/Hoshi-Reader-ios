@@ -676,6 +676,11 @@ struct MangaReaderView: View {
 
     // MARK: Chrome
 
+    private func dismissPageLookup() {
+        model.closePopups()
+        controller.clearWordSelection()
+    }
+
     private var topBar: some View {
         HStack(alignment: .top) {
             CircleButton(systemName: "chevron.left")
@@ -698,7 +703,7 @@ struct MangaReaderView: View {
             // stacked directly beneath it — matching the Android layout.
             VStack(spacing: 8) {
                 TranslationHistoryButton(book: metadata) {
-                    model.closePopups()
+                    dismissPageLookup()
                     aiController.browseHistory()
                 }
                 .font(.title3)
@@ -709,13 +714,13 @@ struct MangaReaderView: View {
                 // presented detached (mid-screen / bottom), which is what looked wrong.
                 Menu {
                     Button {
-                        model.closePopups()
+                        dismissPageLookup()
                         showTextPreview = true
                     } label: { Label("Preview text size", systemImage: "textformat.size") }
                     .disabled(textPreviewSource == nil)
                     .accessibilityIdentifier("manga-preview-text-size")
                     Button {
-                        model.closePopups()
+                        dismissPageLookup()
                         goToPageText = "\(model.pageIndex + 1)"
                         showGoToPageDialog = true
                     } label: { Label("Go to page", systemImage: "arrow.right.to.line") }
@@ -723,15 +728,15 @@ struct MangaReaderView: View {
                         startScreenshotCrop()
                     } label: { Label("Screenshot translate", systemImage: "camera.viewfinder") }
                     Button {
-                        model.closePopups()
+                        dismissPageLookup()
                         aiController.browseHistory()
                     } label: { Label("Chat history", systemImage: "clock.arrow.circlepath") }
                     Button {
-                        model.closePopups()
+                        dismissPageLookup()
                         showStatisticsSheet = true
                     } label: { Label("Statistics", systemImage: "chart.bar") }
                     Button {
-                        model.closePopups()
+                        dismissPageLookup()
                         showMangaSettings = true
                     } label: { Label("Manga", systemImage: "gearshape") }
                     Divider()

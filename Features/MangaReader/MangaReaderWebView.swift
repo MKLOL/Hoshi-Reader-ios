@@ -106,6 +106,15 @@ final class MangaWebViewController {
         webView?.evaluateJavaScript(pendingPredecode.script) { _, _ in }
     }
 
+    /// Clears the selected word when reader chrome dismisses the dictionary.
+    func clearWordSelection() {
+        webView?.evaluateJavaScript("""
+            if (window.hoshiMangaDocumentIdentity === '\(documentIdentity)') {
+                window.hoshiSelection?.clearSelection();
+            }
+            """) { _, _ in }
+    }
+
     /// Hides any revealed OCR plates/buttons before a raw page crop.
     func clearRevealedBubbles() {
         webView?.evaluateJavaScript(
